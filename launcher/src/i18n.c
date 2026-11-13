@@ -1,0 +1,364 @@
+/*
+ * Launcher5 - traductions de l'interface (voir i18n.h).
+ *
+ * Launcher5 (c) 2026 cedsaill
+ */
+#include <stdio.h>
+#include <string.h>
+
+#include "i18n.h"
+
+static int LANG = L_FR, CODE = 2;
+
+/* codes de langue du systeme PS5 -> langue de l'interface et code regional */
+static const char *const LOCALES[] = {
+  "ja-JP", "en-US", "fr-FR", "es-ES", "de-DE", "it-IT", "nl-NL", "pt-PT", "ru-RU", "ko-KR", "zh-Hant",
+  "zh-Hans", "fi-FI", "sv-SE", "da-DK", "no-NO", "pl-PL", "pt-BR", "en-GB", "tr-TR", "es-419", "ar-AE",
+  "fr-CA", "cs-CZ", "hu-HU", "el-GR", "ro-RO", "th-TH", "vi-VN", "id-ID", "uk-UA",
+};
+#define NLOCALES (int)(sizeof LOCALES / sizeof LOCALES[0])
+
+void i18n_init(int code) {
+  CODE = code >= 0 && code < NLOCALES ? code : 1;
+  switch (CODE) {
+  case 2: case 22: LANG = L_FR; break;
+  case 3: case 20: LANG = L_ES; break;
+  case 4: LANG = L_DE; break;
+  case 5: LANG = L_IT; break;
+  case 7: case 17: LANG = L_PT; break;
+  default: LANG = L_EN;
+  }
+}
+
+int i18n_lang(void) { return LANG; }
+const char *i18n_locale(void) { return LOCALES[CODE]; }
+const char *i18n_title_key(void) {
+  static char k[16];
+  snprintf(k, sizeof k, "TITLE_%02d", CODE);
+  return k;
+}
+
+/* francais, anglais, espagnol, allemand, italien, portugais */
+static const char *const T[][L_COUNT] = {
+  /* sections, types, presentations */
+  { "Mes dossiers", "My folders", "Mis carpetas", "Meine Ordner", "Le mie cartelle", "As minhas pastas" },
+  { "Jeux PS5", "PS5 games", "Juegos de PS5", "PS5-Spiele", "Giochi PS5", "Jogos PS5" },
+  { "Jeux PS4", "PS4 games", "Juegos de PS4", "PS4-Spiele", "Giochi PS4", "Jogos PS4" },
+  { "Médias", "Media", "Multimedia", "Medien", "Media", "Multimédia" },
+  { "Émulateurs", "Emulators", "Emuladores", "Emulatoren", "Emulatori", "Emuladores" },
+  { "Récents", "Recent", "Recientes", "Zuletzt gespielt", "Recenti", "Recentes" },
+  { "Paramètres", "Settings", "Ajustes", "Einstellungen", "Impostazioni", "Definições" },
+  { "JEU PS5", "PS5 GAME", "JUEGO PS5", "PS5-SPIEL", "GIOCO PS5", "JOGO PS5" },
+  { "JEU PS4", "PS4 GAME", "JUEGO PS4", "PS4-SPIEL", "GIOCO PS4", "JOGO PS4" },
+  { "MÉDIA", "MEDIA", "MULTIMEDIA", "MEDIEN", "MEDIA", "MULTIMÉDIA" },
+  { "RÉGLAGE", "SETTING", "AJUSTE", "EINSTELLUNG", "IMPOSTAZIONE", "DEFINIÇÃO" },
+  { "DOSSIER", "FOLDER", "CARPETA", "ORDNER", "CARTELLA", "PASTA" },
+  { "Grille", "Grid", "Cuadrícula", "Raster", "Griglia", "Grelha" },
+  { "Carrousel", "Carousel", "Carrusel", "Karussell", "Carosello", "Carrossel" },
+  /* jours */
+  { "dim.", "Sun", "dom.", "So.", "dom", "dom." },
+  { "lun.", "Mon", "lun.", "Mo.", "lun", "seg." },
+  { "mar.", "Tue", "mar.", "Di.", "mar", "ter." },
+  { "mer.", "Wed", "mié.", "Mi.", "mer", "qua." },
+  { "jeu.", "Thu", "jue.", "Do.", "gio", "qui." },
+  { "ven.", "Fri", "vie.", "Fr.", "ven", "sex." },
+  { "sam.", "Sat", "sáb.", "Sa.", "sab", "sáb." },
+  { "à l'instant", "just now", "ahora mismo", "gerade eben", "adesso", "agora mesmo" },
+  { "il y a %ld min", "%ld min ago", "hace %ld min", "vor %ld Min.", "%ld min fa", "há %ld min" },
+  { "il y a %ld h", "%ld h ago", "hace %ld h", "vor %ld Std.", "%ld h fa", "há %ld h" },
+  { "il y a %ld j", "%ld d ago", "hace %ld d", "vor %ld T.", "%ld g fa", "há %ld d" },
+  /* informations */
+  { "%d élément", "%d item", "%d elemento", "%d Element", "%d elemento", "%d item" },
+  { "%d éléments", "%d items", "%d elementos", "%d Elemente", "%d elementi", "%d itens" },
+  { "Couleurs, fond d'écran, particules, musique : crée ton propre thème", "Colours, wallpaper, particles, music: create your own theme",
+    "Colores, fondo, partículas, música: crea tu propio tema", "Farben, Hintergrund, Partikel, Musik: erstelle dein eigenes Theme",
+    "Colori, sfondo, particelle, musica: crea il tuo tema", "Cores, fundo, partículas, música: cria o teu próprio tema" },
+  { "Cover Flow, Grille ou Carrousel  ·  aussi avec le pavé tactile", "Cover Flow, Grid or Carousel  ·  also with the touchpad",
+    "Cover Flow, Cuadrícula o Carrusel  ·  también con el panel táctil", "Cover Flow, Raster oder Karussell  ·  auch mit dem Touchpad",
+    "Cover Flow, Griglia o Carosello  ·  anche con il touchpad", "Cover Flow, Grelha ou Carrossel  ·  também com o painel tátil" },
+  { "Revenir au launcher tout seul quand tu fermes un jeu", "Return to the launcher automatically when you close a game",
+    "Volver al launcher automáticamente al cerrar un juego", "Automatisch zum Launcher zurück, wenn du ein Spiel schließt",
+    "Torna al launcher da solo quando chiudi un gioco", "Voltar ao launcher sozinho quando fechas um jogo" },
+  { "Affiche la section où tu ranges tes jeux dans tes dossiers", "Shows the section where you sort your games into folders",
+    "Muestra la sección donde ordenas tus juegos en carpetas", "Zeigt den Bereich, in dem du Spiele in Ordner sortierst",
+    "Mostra la sezione dove metti i giochi nelle cartelle", "Mostra a secção onde arrumas os jogos em pastas" },
+  { "Montre ou cache les jeux que tu as masqués", "Shows or hides the games you have hidden", "Muestra u oculta los juegos que has ocultado",
+    "Zeigt oder verbirgt deine ausgeblendeten Spiele", "Mostra o nasconde i giochi che hai nascosto", "Mostra ou esconde os jogos que ocultaste" },
+  { "Ferme le launcher et revient à l'accueil de la PS5", "Closes the launcher and goes back to the PS5 home screen",
+    "Cierra el launcher y vuelve a la pantalla de inicio de PS5", "Schließt den Launcher und kehrt zum PS5-Startbildschirm zurück",
+    "Chiude il launcher e torna alla schermata Home della PS5", "Fecha o launcher e volta ao ecrã inicial da PS5" },
+  { "Réglage", "Setting", "Ajuste", "Einstellung", "Impostazione", "Definição" },
+  { "Lancé %d fois  ·  Dernière session %s", "Launched %d times  ·  Last session %s", "Iniciado %d veces  ·  Última sesión %s",
+    "%d-mal gestartet  ·  Letzte Sitzung %s", "Avviato %d volte  ·  Ultima sessione %s", "Iniciado %d vezes  ·  Última sessão %s" },
+  { "Jamais lancé depuis Launcher5", "Never launched from Launcher5", "Nunca iniciado desde Launcher5", "Noch nie über Launcher5 gestartet",
+    "Mai avviato da Launcher5", "Nunca iniciado a partir do Launcher5" },
+  { "Ce dossier est vide", "This folder is empty", "Esta carpeta está vacía", "Dieser Ordner ist leer", "Questa cartella è vuota", "Esta pasta está vazia" },
+  { "Rien à afficher ici", "Nothing to show here", "No hay nada aquí", "Hier gibt es nichts", "Niente da mostrare qui", "Nada para mostrar aqui" },
+  { "Range des jeux dedans avec △ › Ranger dans un dossier.", "Put games in it with △ › Move to a folder.",
+    "Guarda juegos dentro con △ › Guardar en una carpeta.", "Lege Spiele hinein mit △ › In einen Ordner legen.",
+    "Mettici dei giochi con △ › Metti in una cartella.", "Arruma jogos lá dentro com △ › Arrumar numa pasta." },
+  { "Lance des jeux pour remplir cette section.", "Launch games to fill this section.", "Inicia juegos para llenar esta sección.",
+    "Starte Spiele, um diesen Bereich zu füllen.", "Avvia dei giochi per riempire questa sezione.", "Inicia jogos para preencher esta secção." },
+  { "✕  OUVRIR", "✕  OPEN", "✕  ABRIR", "✕  ÖFFNEN", "✕  APRI", "✕  ABRIR" },
+  { "✕  ENVOYER", "✕  SEND", "✕  ENVIAR", "✕  SENDEN", "✕  INVIA", "✕  ENVIAR" },
+  { "✕  REGARDER", "✕  WATCH", "✕  VER", "✕  ANSEHEN", "✕  GUARDA", "✕  VER" },
+  { "✕  JOUER", "✕  PLAY", "✕  JUGAR", "✕  SPIELEN", "✕  GIOCA", "✕  JOGAR" },
+  { "△  OPTIONS", "△  OPTIONS", "△  OPCIONES", "△  OPTIONEN", "△  OPZIONI", "△  OPÇÕES" },
+  { "masqué", "hidden", "oculto", "ausgeblendet", "nascosto", "oculto" },
+  /* pied de page */
+  { "◀ ▶  Déplacer      ✕  Poser", "◀ ▶  Move      ✕  Drop", "◀ ▶  Mover      ✕  Soltar", "◀ ▶  Verschieben      ✕  Ablegen",
+    "◀ ▶  Sposta      ✕  Posa", "◀ ▶  Mover      ✕  Largar" },
+  { "✕  Choisir      ○  Annuler", "✕  Select      ○  Cancel", "✕  Elegir      ○  Cancelar", "✕  Wählen      ○  Abbrechen",
+    "✕  Scegli      ○  Annulla", "✕  Escolher      ○  Cancelar" },
+  { "✕  Touche      □  Effacer      △  Espace      OPTIONS  Valider      ○  Annuler",
+    "✕  Key      □  Delete      △  Space      OPTIONS  Confirm      ○  Cancel",
+    "✕  Tecla      □  Borrar      △  Espacio      OPTIONS  Aceptar      ○  Cancelar",
+    "✕  Taste      □  Löschen      △  Leerzeichen      OPTIONS  OK      ○  Abbrechen",
+    "✕  Tasto      □  Cancella      △  Spazio      OPTIONS  Conferma      ○  Annulla",
+    "✕  Tecla      □  Apagar      △  Espaço      OPTIONS  Confirmar      ○  Cancelar" },
+  { "✕  Ouvrir      ○  Retour      △  Options      □  Déplacer", "✕  Open      ○  Back      △  Options      □  Move",
+    "✕  Abrir      ○  Volver      △  Opciones      □  Mover", "✕  Öffnen      ○  Zurück      △  Optionen      □  Verschieben",
+    "✕  Apri      ○  Indietro      △  Opzioni      □  Sposta", "✕  Abrir      ○  Voltar      △  Opções      □  Mover" },
+  { "✕  Ouvrir / Jouer      △  Options      □  Déplacer", "✕  Open / Play      △  Options      □  Move",
+    "✕  Abrir / Jugar      △  Opciones      □  Mover", "✕  Öffnen / Spielen      △  Optionen      □  Verschieben",
+    "✕  Apri / Gioca      △  Opzioni      □  Sposta", "✕  Abrir / Jogar      △  Opções      □  Mover" },
+  { "✕  Jouer      △  Options", "✕  Play      △  Options", "✕  Jugar      △  Opciones", "✕  Spielen      △  Optionen",
+    "✕  Gioca      △  Opzioni", "✕  Jogar      △  Opções" },
+  { "%s      L1 R1  Sections      Pavé tactile  Vue : %s", "%s      L1 R1  Sections      Touchpad  View: %s",
+    "%s      L1 R1  Secciones      Panel táctil  Vista: %s", "%s      L1 R1  Bereiche      Touchpad  Ansicht: %s",
+    "%s      L1 R1  Sezioni      Touchpad  Vista: %s", "%s      L1 R1  Secções      Painel tátil  Vista: %s" },
+  /* clavier */
+  { "Maj", "Shift", "Mayús", "Umschalt", "Maiusc", "Maiús" },
+  { "Espace", "Space", "Espacio", "Leertaste", "Spazio", "Espaço" },
+  { "Effacer", "Delete", "Borrar", "Löschen", "Cancella", "Apagar" },
+  { "Valider", "OK", "Aceptar", "OK", "OK", "OK" },
+  /* menus */
+  { "Ranger dans…", "Move to…", "Guardar en…", "Verschieben nach…", "Sposta in…", "Arrumar em…" },
+  { "Couleur du dossier", "Folder colour", "Color de la carpeta", "Ordnerfarbe", "Colore della cartella", "Cor da pasta" },
+  { "Bleu", "Blue", "Azul", "Blau", "Blu", "Azul" },
+  { "Violet", "Purple", "Violeta", "Violett", "Viola", "Violeta" },
+  { "Rouge", "Red", "Rojo", "Rot", "Rosso", "Vermelho" },
+  { "Orange", "Orange", "Naranja", "Orange", "Arancione", "Laranja" },
+  { "Jaune", "Yellow", "Amarillo", "Gelb", "Giallo", "Amarelo" },
+  { "Vert", "Green", "Verde", "Grün", "Verde", "Verde" },
+  { "Turquoise", "Turquoise", "Turquesa", "Türkis", "Turchese", "Turquesa" },
+  { "Ciel", "Sky", "Cielo", "Himmel", "Cielo", "Céu" },
+  { "Rose", "Pink", "Rosa", "Rosa", "Rosa", "Rosa" },
+  { "Gris", "Grey", "Gris", "Grau", "Grigio", "Cinzento" },
+  { "Dossier « %s »", "Folder “%s”", "Carpeta «%s»", "Ordner „%s“", "Cartella «%s»", "Pasta «%s»" },
+  { "Ouvrir", "Open", "Abrir", "Öffnen", "Apri", "Abrir" },
+  { "Renommer", "Rename", "Renombrar", "Umbenennen", "Rinomina", "Mudar o nome" },
+  { "Changer la couleur", "Change colour", "Cambiar el color", "Farbe ändern", "Cambia colore", "Mudar a cor" },
+  { "Déplacer", "Move", "Mover", "Verschieben", "Sposta", "Mover" },
+  { "Ranger dans un autre dossier…", "Move to another folder…", "Guardar en otra carpeta…", "In einen anderen Ordner legen…",
+    "Sposta in un'altra cartella…", "Arrumar noutra pasta…" },
+  { "Sortir du dossier", "Take out of folder", "Sacar de la carpeta", "Aus dem Ordner nehmen", "Togli dalla cartella", "Tirar da pasta" },
+  { "Supprimer le dossier (garde son contenu)", "Delete folder (keeps its content)", "Eliminar carpeta (conserva su contenido)",
+    "Ordner löschen (Inhalt bleibt)", "Elimina cartella (ne conserva il contenuto)", "Eliminar pasta (mantém o conteúdo)" },
+  { "Envoyer", "Send", "Enviar", "Senden", "Invia", "Enviar" },
+  { "Jouer", "Play", "Jugar", "Spielen", "Gioca", "Jogar" },
+  { "Ranger dans un dossier…", "Move to a folder…", "Guardar en una carpeta…", "In einen Ordner legen…", "Metti in una cartella…",
+    "Arrumar numa pasta…" },
+  { "Remettre le nom d'origine", "Restore original name", "Restaurar el nombre original", "Originalnamen wiederherstellen",
+    "Ripristina il nome originale", "Repor o nome original" },
+  { "Ne plus masquer", "Unhide", "Dejar de ocultar", "Wieder einblenden", "Non nascondere più", "Deixar de ocultar" },
+  { "Masquer", "Hide", "Ocultar", "Ausblenden", "Nascondi", "Ocultar" },
+  { "Options", "Options", "Opciones", "Optionen", "Opzioni", "Opções" },
+  { "+ Nouveau dossier ici", "+ New folder here", "+ Nueva carpeta aquí", "+ Neuer Ordner hier", "+ Nuova cartella qui", "+ Nova pasta aqui" },
+  { "+ Nouveau dossier…", "+ New folder…", "+ Nueva carpeta…", "+ Neuer Ordner…", "+ Nuova cartella…", "+ Nova pasta…" },
+  { "Affichage : %s  ›  %s", "Layout: %s  ›  %s", "Vista: %s  ›  %s", "Ansicht: %s  ›  %s", "Vista: %s  ›  %s", "Vista: %s  ›  %s" },
+  { "Affichage : %s", "Layout: %s", "Vista: %s", "Ansicht: %s", "Vista: %s", "Vista: %s" },
+  { "Personnaliser le thème…", "Customise theme…", "Personalizar el tema…", "Theme anpassen…", "Personalizza il tema…", "Personalizar o tema…" },
+  { "Cacher les éléments masqués", "Hide hidden items", "Ocultar elementos ocultos", "Ausgeblendete verbergen",
+    "Nascondi elementi nascosti", "Esconder itens ocultos" },
+  { "Voir les éléments masqués", "Show hidden items", "Ver elementos ocultos", "Ausgeblendete anzeigen", "Mostra elementi nascosti",
+    "Ver itens ocultos" },
+  /* parametres */
+  { "Thème : %s", "Theme: %s", "Tema: %s", "Theme: %s", "Tema: %s", "Tema: %s" },
+  { "Retour auto après un jeu : oui", "Auto return after a game: on", "Volver tras un juego: sí", "Auto-Rückkehr nach Spiel: an",
+    "Ritorno auto dopo un gioco: sì", "Voltar após um jogo: sim" },
+  { "Retour auto après un jeu : non", "Auto return after a game: off", "Volver tras un juego: no", "Auto-Rückkehr nach Spiel: aus",
+    "Ritorno auto dopo un gioco: no", "Voltar após um jogo: não" },
+  { "Section Mes dossiers : oui", "My folders section: on", "Sección Mis carpetas: sí", "Bereich Meine Ordner: an",
+    "Sezione Le mie cartelle: sì", "Secção As minhas pastas: sim" },
+  { "Section Mes dossiers : non", "My folders section: off", "Sección Mis carpetas: no", "Bereich Meine Ordner: aus",
+    "Sezione Le mie cartelle: no", "Secção As minhas pastas: não" },
+  { "Éléments masqués : visibles", "Hidden items: shown", "Elementos ocultos: visibles", "Ausgeblendete: sichtbar",
+    "Elementi nascosti: visibili", "Itens ocultos: visíveis" },
+  { "Éléments masqués : cachés", "Hidden items: hidden", "Elementos ocultos: ocultos", "Ausgeblendete: verborgen",
+    "Elementi nascosti: nascosti", "Itens ocultos: escondidos" },
+  { "Quitter vers l'accueil PS5", "Quit to PS5 home", "Salir al inicio de PS5", "Zum PS5-Startbildschirm", "Esci alla Home della PS5",
+    "Sair para o ecrã inicial da PS5" },
+  /* messages */
+  { "⚠ Impossible d'enregistrer le menu", "⚠ Could not save the menu", "⚠ No se pudo guardar el menú", "⚠ Menü konnte nicht gespeichert werden",
+    "⚠ Impossibile salvare il menu", "⚠ Não foi possível guardar o menu" },
+  { "Le lancement prend du temps…", "Launching is taking a while…", "El inicio está tardando…", "Der Start dauert etwas…",
+    "L'avvio richiede un po' di tempo…", "O arranque está a demorar…" },
+  { "Lancement%s", "Launching%s", "Iniciando%s", "Wird gestartet%s", "Avvio%s", "A iniciar%s" },
+  { "Sorti du dossier", "Taken out of folder", "Sacado de la carpeta", "Aus dem Ordner genommen", "Tolto dalla cartella", "Tirado da pasta" },
+  { "Nom du dossier", "Folder name", "Nombre de la carpeta", "Ordnername", "Nome della cartella", "Nome da pasta" },
+  { "Nouveau nom", "New name", "Nuevo nombre", "Neuer Name", "Nuovo nome", "Novo nome" },
+  { "Masqué  ·  △ › Voir les éléments masqués pour le retrouver", "Hidden  ·  △ › Show hidden items to find it again",
+    "Oculto  ·  △ › Ver elementos ocultos para recuperarlo", "Ausgeblendet  ·  △ › Ausgeblendete anzeigen, um es wiederzufinden",
+    "Nascosto  ·  △ › Mostra elementi nascosti per ritrovarlo", "Oculto  ·  △ › Ver itens ocultos para o encontrar" },
+  { "Dossier supprimé, son contenu est revenu ici", "Folder deleted, its content is back here", "Carpeta eliminada, su contenido ha vuelto aquí",
+    "Ordner gelöscht, sein Inhalt ist wieder hier", "Cartella eliminata, il contenuto è tornato qui", "Pasta eliminada, o conteúdo voltou para aqui" },
+  { "Nom du nouveau dossier", "New folder name", "Nombre de la nueva carpeta", "Name des neuen Ordners", "Nome della nuova cartella",
+    "Nome da nova pasta" },
+  { "Nom vide : rien n'a été changé", "Empty name: nothing changed", "Nombre vacío: no se ha cambiado nada", "Leerer Name: nichts geändert",
+    "Nome vuoto: nessuna modifica", "Nome vazio: nada foi alterado" },
+  { "Dossier créé  ·  range des jeux dedans avec △", "Folder created  ·  put games in it with △", "Carpeta creada  ·  guarda juegos dentro con △",
+    "Ordner erstellt  ·  lege Spiele hinein mit △", "Cartella creata  ·  mettici dei giochi con △", "Pasta criada  ·  arruma jogos lá dentro com △" },
+  { "Dossier créé et élément rangé dedans", "Folder created and item moved into it", "Carpeta creada y elemento guardado dentro",
+    "Ordner erstellt und Element hineingelegt", "Cartella creata ed elemento spostato dentro", "Pasta criada e item arrumado lá dentro" },
+  { "Rangé dans « %s »", "Moved to “%s”", "Guardado en «%s»", "Verschoben nach „%s“", "Spostato in «%s»", "Arrumado em «%s»" },
+  { "Menu mis à jour depuis le PC", "Menu updated from the PC", "Menú actualizado desde el PC", "Menü vom PC aktualisiert",
+    "Menu aggiornato dal PC", "Menu atualizado a partir do PC" },
+  { "Thème « %s » reçu depuis le PC", "Theme “%s” received from the PC", "Tema «%s» recibido desde el PC", "Theme „%s“ vom PC empfangen",
+    "Tema «%s» ricevuto dal PC", "Tema «%s» recebido do PC" },
+  /* studio de theme */
+  { "Thème de base", "Base theme", "Tema base", "Basis-Theme", "Tema di base", "Tema base" },
+  { "Couleur principale", "Main colour", "Color principal", "Hauptfarbe", "Colore principale", "Cor principal" },
+  { "Couleur secondaire", "Second colour", "Color secundario", "Zweitfarbe", "Colore secondario", "Cor secundária" },
+  { "Fond : haut", "Top colour", "Fondo: arriba", "Farbe oben", "Sfondo: alto", "Fundo: cima" },
+  { "Fond : bas", "Bottom colour", "Fondo: abajo", "Farbe unten", "Sfondo: basso", "Fundo: baixo" },
+  { "Arrière-plan", "Background", "Fondo", "Hintergrund", "Sfondo", "Fundo" },
+  { "Image", "Image", "Imagen", "Bild", "Immagine", "Imagem" },
+  { "Illustration du jeu", "Game artwork", "Ilustración del juego", "Spielbild", "Illustrazione del gioco", "Ilustração do jogo" },
+  { "Halos lumineux", "Glow", "Halos de luz", "Leuchten", "Aloni luminosi", "Halos de luz" },
+  { "Particules", "Particles", "Partículas", "Partikel", "Particelle", "Partículas" },
+  { "Forme", "Shape", "Forma", "Form", "Forma", "Forma" },
+  { "Sens", "Direction", "Dirección", "Richtung", "Direzione", "Direção" },
+  { "Coins des jaquettes", "Cover corners", "Esquinas de portadas", "Cover-Ecken", "Angoli copertine", "Cantos das capas" },
+  { "Horloge", "Clock", "Reloj", "Uhr", "Orologio", "Relógio" },
+  { "Musique", "Music", "Música", "Musik", "Musica", "Música" },
+  { "Volume", "Volume", "Volumen", "Lautstärke", "Volume", "Volume" },
+  { "Enregistrer comme mon thème…", "Save as my theme…", "Guardar como mi tema…", "Als mein Theme speichern…", "Salva come mio tema…",
+    "Guardar como o meu tema…" },
+  { "Supprimer ce thème", "Delete this theme", "Eliminar este tema", "Dieses Theme löschen", "Elimina questo tema", "Eliminar este tema" },
+  { "aucune", "none", "ninguna", "keine", "nessuna", "nenhuma" },
+  { "dossier fonds vide", "fonds folder empty", "carpeta fonds vacía", "Ordner fonds leer", "cartella fonds vuota", "pasta fonds vazia" },
+  { "Aucune", "None", "Ninguna", "Keine", "Nessuna", "Nenhuma" },
+  { "Aucune (dossier vide)", "None (folder empty)", "Ninguna (carpeta vacía)", "Keine (Ordner leer)", "Nessuna (cartella vuota)",
+    "Nenhuma (pasta vazia)" },
+  { "Toutes, à la suite", "All, one after another", "Todas, seguidas", "Alle nacheinander", "Tutte, di seguito", "Todas, seguidas" },
+  { "Copie tes images dans /data/launcher5/fonds", "Copy your images to /data/launcher5/fonds", "Copia tus imágenes en /data/launcher5/fonds",
+    "Kopiere deine Bilder nach /data/launcher5/fonds", "Copia le tue immagini in /data/launcher5/fonds",
+    "Copia as tuas imagens para /data/launcher5/fonds" },
+  { "Copie tes musiques (ogg, mp3, flac…) dans /data/launcher5/musique", "Copy your music (ogg, mp3, flac…) to /data/launcher5/musique",
+    "Copia tu música (ogg, mp3, flac…) en /data/launcher5/musique", "Kopiere deine Musik (ogg, mp3, flac…) nach /data/launcher5/musique",
+    "Copia la tua musica (ogg, mp3, flac…) in /data/launcher5/musique", "Copia as tuas músicas (ogg, mp3, flac…) para /data/launcher5/musique" },
+  { "⚠ Impossible d'enregistrer le thème", "⚠ Could not save the theme", "⚠ No se pudo guardar el tema", "⚠ Theme konnte nicht gespeichert werden",
+    "⚠ Impossibile salvare il tema", "⚠ Não foi possível guardar o tema" },
+  { "⚠ Impossible de supprimer ce thème", "⚠ Could not delete this theme", "⚠ No se pudo eliminar este tema", "⚠ Theme konnte nicht gelöscht werden",
+    "⚠ Impossibile eliminare questo tema", "⚠ Não foi possível eliminar este tema" },
+  { "Mon thème", "My theme", "Mi tema", "Mein Theme", "Il mio tema", "O meu tema" },
+  { "Nom de ton thème", "Your theme name", "Nombre de tu tema", "Name deines Themes", "Nome del tuo tema", "Nome do teu tema" },
+  { "Thème supprimé (les réglages restent affichés)", "Theme deleted (settings still shown)", "Tema eliminado (los ajustes siguen visibles)",
+    "Theme gelöscht (Einstellungen bleiben sichtbar)", "Tema eliminato (le impostazioni restano visibili)", "Tema eliminado (as definições continuam visíveis)" },
+  { " perso", " custom", " personal", " eigen", " personale", " pessoal" },
+  { "Thème « %s » appliqué", "Theme “%s” applied", "Tema «%s» aplicado", "Theme „%s“ angewendet", "Tema «%s» applicato", "Tema «%s» aplicado" },
+  { "Thème « %s » enregistré (themes/%s)", "Theme “%s” saved (themes/%s)", "Tema «%s» guardado (themes/%s)", "Theme „%s“ gespeichert (themes/%s)",
+    "Tema «%s» salvato (themes/%s)", "Tema «%s» guardado (themes/%s)" },
+  { "COULEURS", "COLOURS", "COLORES", "FARBEN", "COLORI", "CORES" },
+  { "ARRIÈRE-PLAN", "BACKGROUND", "FONDO", "HINTERGRUND", "SFONDO", "FUNDO" },
+  { "EFFETS", "EFFECTS", "EFECTOS", "EFFEKTE", "EFFETTI", "EFEITOS" },
+  { "INTERFACE ET SON", "INTERFACE & SOUND", "INTERFAZ Y SONIDO", "OBERFLÄCHE & TON", "INTERFACCIA E SUONO", "INTERFACE E SOM" },
+  { "Jeu", "Game", "Juego", "Spiel", "Gioco", "Jogo" },
+  { "Dégradé", "Gradient", "Degradado", "Verlauf", "Sfumato", "Gradiente" },
+  { "Peu", "Few", "Pocas", "Wenige", "Poche", "Poucas" },
+  { "Beaucoup", "Many", "Muchas", "Viele", "Molte", "Muitas" },
+  { "Points", "Dots", "Puntos", "Punkte", "Punti", "Pontos" },
+  { "Étincelles", "Sparks", "Chispas", "Funken", "Scintille", "Faíscas" },
+  { "Flocons", "Snow", "Copos", "Flocken", "Fiocchi", "Flocos" },
+  { "Montent", "Rise", "Suben", "Steigen", "Salgono", "Sobem" },
+  { "Tombent", "Fall", "Caen", "Fallen", "Cadono", "Caem" },
+  { "Droits", "Square", "Rectas", "Eckig", "Squadrati", "Retos" },
+  { "Arrondis", "Rounded", "Redondeadas", "Abgerundet", "Arrotondati", "Arredondados" },
+  { "Ronds", "Round", "Redondas", "Rund", "Tondi", "Redondos" },
+  { "Masquée", "Hidden", "Oculto", "Aus", "Nascosto", "Oculto" },
+  { "STUDIO THÈME", "THEME STUDIO", "ESTUDIO DE TEMAS", "THEME-STUDIO", "STUDIO TEMI", "ESTÚDIO DE TEMAS" },
+  { "● modifié", "● modified", "● modificado", "● geändert", "● modificato", "● alterado" },
+  { "aperçu en direct", "live preview", "vista previa en directo", "Live-Vorschau", "anteprima dal vivo", "pré-visualização em direto" },
+  { "Thème perso (non enregistré)", "Custom theme (not saved)", "Tema personal (sin guardar)", "Eigenes Theme (nicht gespeichert)",
+    "Tema personale (non salvato)", "Tema pessoal (não guardado)" },
+  { "▲▼ Réglage    ◀▶ Modifier    L1 R1 Thème    ✕ Appliquer    ○ Annuler",
+    "▲▼ Setting    ◀▶ Change    L1 R1 Theme    ✕ Apply    ○ Cancel",
+    "▲▼ Ajuste    ◀▶ Cambiar    L1 R1 Tema    ✕ Aplicar    ○ Cancelar",
+    "▲▼ Wählen    ◀▶ Ändern    L1 R1 Theme    ✕ Anwenden    ○ Zurück",
+    "▲▼ Impostazione    ◀▶ Modifica    L1 R1 Tema    ✕ Applica    ○ Annulla",
+    "▲▼ Definição    ◀▶ Alterar    L1 R1 Tema    ✕ Aplicar    ○ Cancelar" },
+  /* noms des themes fournis */
+  { "Néon", "Neon", "Neón", "Neon", "Neon", "Néon" },
+  { "Glace", "Ice", "Hielo", "Eis", "Ghiaccio", "Gelo" },
+  { "Océan", "Ocean", "Océano", "Ozean", "Oceano", "Oceano" },
+  { "Noir et or", "Black & gold", "Negro y oro", "Schwarz & Gold", "Nero e oro", "Preto e ouro" },
+  { "Minuit", "Midnight", "Medianoche", "Mitternacht", "Mezzanotte", "Meia-noite" },
+  { "Cinéma", "Cinema", "Cine", "Kino", "Cinema", "Cinema" },
+  /* lancement (PS5) */
+  { "Impossible de lire %s", "Cannot read %s", "No se puede leer %s", "%s kann nicht gelesen werden", "Impossibile leggere %s", "Não é possível ler %s" },
+  { "Fichier payload vide ou invalide", "Empty or invalid payload file", "Archivo payload vacío o no válido", "Payload-Datei leer oder ungültig",
+    "File payload vuoto o non valido", "Ficheiro payload vazio ou inválido" },
+  { "Mémoire insuffisante", "Not enough memory", "Memoria insuficiente", "Nicht genug Speicher", "Memoria insufficiente", "Memória insuficiente" },
+  { "Chargeur ELF injoignable (port 9021)", "ELF loader unreachable (port 9021)", "Cargador ELF inaccesible (puerto 9021)",
+    "ELF-Loader nicht erreichbar (Port 9021)", "Loader ELF non raggiungibile (porta 9021)", "Carregador ELF inacessível (porta 9021)" },
+  { "Retour à l'accueil PS5…", "Back to the PS5 home screen…", "Volviendo al inicio de PS5…", "Zurück zum PS5-Startbildschirm…",
+    "Ritorno alla Home della PS5…", "A voltar ao ecrã inicial da PS5…" },
+  { "Raccourci inconnu", "Unknown shortcut", "Acceso directo desconocido", "Unbekannte Verknüpfung", "Scorciatoia sconosciuta", "Atalho desconhecido" },
+  { "Payload « %s » envoyé", "Payload “%s” sent", "Payload «%s» enviado", "Payload „%s“ gesendet", "Payload «%s» inviato", "Payload «%s» enviado" },
+  { "Impossible de lancer %s", "Cannot launch %s", "No se puede iniciar %s", "%s kann nicht gestartet werden", "Impossibile avviare %s",
+    "Não é possível iniciar %s" },
+  { "Lancement de « %s »…", "Launching “%s”…", "Iniciando «%s»…", "„%s“ wird gestartet…", "Avvio di «%s»…", "A iniciar «%s»…" },
+  { "Aucun fichier .elf dans ce homebrew", "No .elf file in this homebrew", "No hay archivo .elf en este homebrew",
+    "Keine .elf-Datei in diesem Homebrew", "Nessun file .elf in questo homebrew", "Nenhum ficheiro .elf neste homebrew" },
+  { "Ce type de contenu n'est pas encore pris en charge sur la console", "This kind of content is not supported on the console yet",
+    "Este tipo de contenido aún no es compatible en la consola", "Dieser Inhaltstyp wird auf der Konsole noch nicht unterstützt",
+    "Questo tipo di contenuto non è ancora supportato sulla console", "Este tipo de conteúdo ainda não é suportado na consola" },
+  /* simulation (PC) */
+  { "Simulation : %s « %s » lancé", "Simulation: %s “%s” launched", "Simulación: %s «%s» iniciado", "Simulation: %s „%s“ gestartet",
+    "Simulazione: %s «%s» avviato", "Simulação: %s «%s» iniciado" },
+  { "Jeu PS5", "PS5 game", "Juego de PS5", "PS5-Spiel", "Gioco PS5", "Jogo PS5" },
+  { "Jeu PS4", "PS4 game", "Juego de PS4", "PS4-Spiel", "Gioco PS4", "Jogo PS4" },
+  { "Application", "App", "Aplicación", "App", "App", "Aplicação" },
+  { "Raccourci", "Shortcut", "Acceso directo", "Verknüpfung", "Scorciatoia", "Atalho" },
+  /* bootstrap (notifications) */
+  { "Launcher5 : droits insuffisants (jailbreak actif ?)", "Launcher5: insufficient rights (is the jailbreak active?)",
+    "Launcher5: permisos insuficientes (¿jailbreak activo?)", "Launcher5: unzureichende Rechte (Jailbreak aktiv?)",
+    "Launcher5: permessi insufficienti (jailbreak attivo?)", "Launcher5: permissões insuficientes (jailbreak ativo?)" },
+  { "Launcher5 : impossible d'installer l'application relais", "Launcher5: could not install the home screen tile",
+    "Launcher5: no se pudo instalar el icono de inicio", "Launcher5: Startbildschirm-Kachel konnte nicht installiert werden",
+    "Launcher5: impossibile installare l'icona della Home", "Launcher5: não foi possível instalar o ícone do ecrã inicial" },
+  { "Launcher5 : impossible d'écrire l'interface dans /data", "Launcher5: could not write the interface to /data",
+    "Launcher5: no se pudo escribir la interfaz en /data", "Launcher5: Oberfläche konnte nicht nach /data geschrieben werden",
+    "Launcher5: impossibile scrivere l'interfaccia in /data", "Launcher5: não foi possível escrever a interface em /data" },
+  { "Launcher5 : impossible de lancer l'interface", "Launcher5: could not start the interface", "Launcher5: no se pudo iniciar la interfaz",
+    "Launcher5: Oberfläche konnte nicht gestartet werden", "Launcher5: impossibile avviare l'interfaccia", "Launcher5: não foi possível iniciar a interface" },
+  { "Launcher5 : le lancement a échoué", "Launcher5: launch failed", "Launcher5: el inicio ha fallado", "Launcher5: Start fehlgeschlagen",
+    "Launcher5: avvio non riuscito", "Launcher5: o arranque falhou" },
+  { "Launcher5 : le homebrew n'a pas pu démarrer", "Launcher5: the homebrew could not start", "Launcher5: el homebrew no pudo iniciarse",
+    "Launcher5: das Homebrew konnte nicht starten", "Launcher5: impossibile avviare l'homebrew", "Launcher5: o homebrew não conseguiu arrancar" },
+};
+#define NT (int)(sizeof T / sizeof T[0])
+
+/* recherche rapide : table de hachage construite au premier appel */
+#define NB 512
+static short BUCKET[NB], NEXT[NT];
+
+static unsigned hash(const char *s) {
+  unsigned h = 2166136261u;
+  while (*s) h = (h ^ (unsigned char)*s++) * 16777619u;
+  return h % NB;
+}
+
+const char *tr(const char *fr) {
+  if (!fr || LANG == L_FR) return fr;
+  static int ready;
+  if (!ready) {
+    for (int i = 0; i < NB; i++) BUCKET[i] = -1;
+    for (int i = NT - 1; i >= 0; i--) { unsigned h = hash(T[i][L_FR]); NEXT[i] = BUCKET[h]; BUCKET[h] = (short)i; }
+    ready = 1;
+  }
+  for (int i = BUCKET[hash(fr)]; i >= 0; i = NEXT[i])
+    if (!strcmp(T[i][L_FR], fr)) return T[i][LANG];
+  return fr;
+}

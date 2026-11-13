@@ -1,0 +1,13 @@
+{
+  "applicationCategoryType": 0,
+  "attribute": 1,
+  "attribute2": 0,
+  "attribute3": 4,
+  "titleId": "LNCH00005",
+  "contentId": "IV9999-LNCH00005_00-LAUNCHER50000000",
+  "localizedParameters": {
+    "defaultLanguage": "fr-FR",
+    "fr-FR": { "titleName": "Launcher5" },
+    "en-US": { "titleName": "Launcher5" }
+  }
+}
