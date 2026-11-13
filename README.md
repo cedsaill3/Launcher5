@@ -24,7 +24,7 @@ mur de jaquettes, cover flow en 3D, thèmes animés, dossiers, musique d'ambianc
 
 ## Installation
 1. PS5 jailbreakée avec un chargeur ELF actif (port 9021).
-2. Télécharge `Launcher5-v1.0.0-PS5.zip` dans les [Releases](../../releases).
+2. Télécharge `launcher5.elf` dans les [Releases](../../releases).
 3. Envoie `launcher5.elf` au chargeur (port 9021).
 4. La tuile Launcher5 apparaît sur l'accueil et le launcher s'ouvre.
    Après un redémarrage de la console, renvoie l'ELF.
@@ -64,7 +64,7 @@ Polices DejaVu : licence libre.
 perspective and reflections, cover grid, carousel, animated themes, folders, background music.
 The interface follows the console language (French, English, Spanish, German, Italian, Portuguese).
 
-**Install:** download `Launcher5-v1.0.0-PS5.zip` from [Releases](../../releases) and send
+**Install:** download `launcher5.elf` from [Releases](../../releases) and send
 `launcher5.elf` to your ELF loader (port 9021). A *Launcher5* tile is added to the PS5 home screen.
 
 **Controls:** touchpad = Cover Flow / Grid / Carousel · L1/R1 = sections · ✕ play · △ options ·
