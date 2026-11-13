@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/launcher5-icone.png" width="180" alt="Launcher5"></p>
+
 # Launcher5 — game loader pour PS5
 
 **par cedsaill** · v1.0.0 · [English below](#english)
