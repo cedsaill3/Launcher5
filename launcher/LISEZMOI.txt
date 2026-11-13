@@ -1,0 +1,60 @@
+=====================================================================
+  LAUNCHER5  v1.0.0  
+  par cedsaill
+=====================================================================
+
+[ FRANÇAIS ]
+
+INSTALLATION
+  1. PS5 jailbreakée avec un chargeur ELF actif (port 9021).
+  2. Envoie le fichier launcher5.elf 
+
+UTILISATION (manette)
+  Pavé tactile ........ changer d'affichage : Cover Flow / Grille / Carrousel
+  L1 / R1 ............. sections (Jeux PS5, PS4, Médias, Homebrews...)
+  Croix ............... jouer / ouvrir
+  Triangle ............ options (dossiers, renommer, masquer, thème...)
+  Carré ............... déplacer un jeu
+  Rond ................ retour
+  Triangle > Personnaliser le thème : Studio Thème (L1 / R1 = thèmes)
+
+LANGUE
+  L'interface suit la langue de la console : français, anglais,
+  espagnol, allemand, italien, portugais (anglais pour les autres).
+  Les noms des jeux suivent aussi la langue de la console.
+
+PERSONNALISER
+  Dans /data/launcher5 sur la PS5 (par FTP) :
+    fonds/    tes images de fond (png, jpg)
+    musique/  tes musiques d'ambiance (ogg, mp3, flac, wav, mod...)
+    themes/   tes thèmes (.json)
+
+---------------------------------------------------------------------
+
+[ ENGLISH ]
+
+INSTALL
+  1. Jailbroken PS5 with an ELF loader running (port 9021).
+  2. Send launcher5.elf 
+
+CONTROLS
+  Touchpad: Cover Flow / Grid / Carousel   L1/R1: sections
+  Cross: play   Triangle: options   Square: move   Circle: back
+
+LANGUAGE
+  Follows the console language: French, English, Spanish, German,
+  Italian, Portuguese (English otherwise). Game names too.
+
+CUSTOMISE
+  /data/launcher5/fonds (wallpapers), musique (music), themes (.json).
+
+---------------------------------------------------------------------
+
+LICENCE / LICENSE
+  Launcher5 (c) 2026 cedsaill.
+  Les chargeurs ELF intégrés (dossier gpl/ des sources) et la méthode
+  d'installation de la tuile viennent des projets de John Törnblom,
+  sous licence GPL v3 : launcher5.elf est donc distribué sous GPL v3
+  (voir COPYING).
+  Sources / source code : https://github.com/cedsaill3/Launcher5
+  Polices DejaVu : licence libre.
