@@ -25,6 +25,7 @@ int  plat_sys_lang(void);
 long plat_https_get(const char *url, unsigned char **data, size_t *len, size_t max);
 /* envoie un ELF au chargeur de la console (port 9021) : 0 si envoye */
 int plat_send_elf(const char *path);
+int plat_restart_ui(void);               /* relance l'interface (0 : demande envoyee) */
 void plat_sysinfo(char *ip, size_t iplen, long long *free_mb, int *temp_c);               /* code de langue du systeme PS5 (2 = francais, 1 = anglais…) */
 void plat_poll_system(int *overlaid);   /* evenements du systeme (menu PS, arriere-plan) */
 int  plat_auto_return(int set);         /* -1 : lire ; 0/1 : regler le retour automatique */

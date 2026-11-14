@@ -479,6 +479,8 @@ long plat_https_get(const char *url, unsigned char **data, size_t *len, size_t m
 }
 
 /* Envoi d'un ELF au chargeur de la console (mise a jour du launcher) */
+int plat_restart_ui(void) { return write_request("restart", "launcher", NULL); }
+
 int plat_send_elf(const char *path) {
   FILE *f = fopen(path, "rb");
   if (!f) return -1;

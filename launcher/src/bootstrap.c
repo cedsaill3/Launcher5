@@ -411,6 +411,14 @@ int main(void) {
           logf("fermeture du launcher par le systeme : %d", app > 0 ? sceSystemServiceKillApp(app, -1, 0, 0) : -1);
           break;
         }
+        if (!strcmp(type, "restart")) {
+          /* menu rapide : l'interface se ferme, on la relance aussitot */
+          for (int i = 0; i < 30 && alive(ui); i++) usleep(100 * 1000);
+          if (alive(ui)) kill(ui, SIGKILL);
+          logf("interface relancee");
+          ui = start_ui();
+          continue;
+        }
         if (!strcmp(type, "title")) {
           if (launch_title(value)) notify("Launcher5 : le lancement a échoué");
           else launched = 1;

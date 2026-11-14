@@ -14,6 +14,7 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include <dirent.h>
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
 #include <SDL2/SDL_ttf.h>
@@ -139,6 +140,8 @@ enum {
   ACT_LAUNCH, ACT_OPEN, ACT_MOVE, ACT_TO_FOLDER, ACT_OUT_OF_FOLDER, ACT_RENAME, ACT_HIDE,
   ACT_SHOW, ACT_COLOR, ACT_DELETE_FOLDER, ACT_NEW_FOLDER, ACT_TOGGLE_HIDDEN, ACT_RESET_NAME, ACT_THEME, ACT_SAVE_THEME,
   ACT_VIEW, ACT_FAV, ACT_UNFAV,
+  /* menu rapide (touche OPTIONS) */
+  ACT_Q_RESTART, ACT_Q_CACHE,
 };
 
 typedef struct { int is_folder; int index; App *app; Node *node; } Entry;
@@ -198,7 +201,7 @@ static struct {
   int last_sel_key;
 
   int mode;
-  Choice choices[16]; int nchoices, csel;
+  Choice choices[16]; int nchoices, csel, quick;   /* quick : menu rapide ouvert */
   char ctx_title[NAME_LEN];
 
   char kb_buf[NAME_LEN]; int kb_row, kb_col, kb_shift, kb_action;
@@ -2073,6 +2076,7 @@ static void check_tile_shape(void);
 static void open_theme_editor(void);
 static void music_fade(void);
 static void theme_editor_input(int in);
+static void draw_quick_info(void);
 static void theme_saved_as(const char *name);
 
 static void draw_list_panel(const char *title, int n, const char *(*label)(int), int sel, uint32_t (*swatch)(int)) {
@@ -2407,6 +2411,7 @@ static void draw(void) {
   }
   draw_footer();
   if (S.mode == MODE_CONTEXT) draw_list_panel(S.ctx_title, S.nchoices, choice_label, S.csel, NULL);
+  if (S.mode == MODE_CONTEXT && S.quick) draw_quick_info();
   if (S.mode == MODE_PICKFOLDER) draw_list_panel("Ranger dans…", S.nfolders, folder_label, S.fsel, NULL);
   if (S.mode == MODE_COLOR) draw_list_panel("Couleur du dossier", NPALETTE, color_label, S.color_sel, color_swatch);
   if (S.mode == MODE_THEME) draw_theme_editor();
@@ -2716,9 +2721,87 @@ static void draw_launching(void) {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Menu rapide (touche OPTIONS) : infos de la console, relance du      */
+/* launcher, cache des jaquettes.                                       */
+/* ------------------------------------------------------------------ */
+static void open_quick(void) {
+  S.nchoices = 0; S.csel = 0; S.quick = 1;
+  snprintf(S.ctx_title, sizeof S.ctx_title, "%s", tr("Menu rapide"));
+  add_choice("Relancer le launcher", ACT_Q_RESTART);
+  add_choice("Vider le cache des jaquettes", ACT_Q_CACHE);
+  S.mode = MODE_CONTEXT;
+  sfx(SFX_OK);
+}
+
+/* infos de la console, sous le menu */
+static void draw_quick_info(void) {
+  static Uint32 last; static char line[160];
+  if (!last || SDL_GetTicks() - last > 2000) {   /* releve toutes les deux secondes */
+    last = SDL_GetTicks();
+    char ip[64] = ""; long long mb = -1; int temp = -1;
+    plat_sysinfo(ip, sizeof ip, &mb, &temp);
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    long up = (long)ts.tv_sec / 60;
+    char t[24] = "", f[32] = "", u[48];
+    if (temp > 0) snprintf(t, sizeof t, "%d °C  ·  ", temp);
+    if (mb >= 0) snprintf(f, sizeof f, tr("%lld Go libres"), mb / 1024);
+    snprintf(u, sizeof u, tr("allumée depuis %ld h %02ld"), up / 60, up % 60);
+    snprintf(line, sizeof line, "%s%s  ·  %s%s%s", t, f, u, S.menu.hide_ip || !ip[0] ? "" : "  ·  ", S.menu.hide_ip ? "" : ip);
+  }
+  int ph = 120 + S.nchoices * 66, py = (H - ph) / 2;   /* sous le menu, au centre */
+  if (ph > H - 140) { ph = H - 140; py = 70; }
+  int lw = text_w(S.f26, line) + 48;
+  if (lw > 1240) lw = 1240;
+  fill_round(W / 2 - lw / 2, py + ph + 12, lw, 46, 23, 0x000000, 190);
+  draw_text_a(S.f26, line, W / 2, py + ph + 18, 0xdfe5ee, 1, 1200, 235);
+}
+
+/* cache des jaquettes vide : tout est refait (utile si une jaquette s'affiche mal) */
+static void quick_clear_cache(void) {
+  char dir[PATH_LEN], path[PATH_LEN + 300];
+  snprintf(dir, sizeof dir, "%s/cache", plat_data_dir());
+  DIR *d = opendir(dir);
+  int n = 0;
+  struct dirent *de;
+  while (d && (de = readdir(d))) {
+    const char *x = strrchr(de->d_name, '.');
+    if (!x || (strcmp(x, ".jpg") && strcmp(x, ".none"))) continue;
+    snprintf(path, sizeof path, "%s/%s", dir, de->d_name);
+    if (!remove(path)) n++;
+  }
+  if (d) closedir(d);
+  for (int i = 0; i < S.menu.napps; i++) {
+    App *a = &S.menu.apps[i];
+    if (a->boxtex) { SDL_DestroyTexture(a->boxtex); a->boxtex = NULL; }
+    a->box_state = 0; a->box_pref = 0;
+    drop_tiles(a);
+  }
+  char msg[96];
+  snprintf(msg, sizeof msg, tr("Cache vidé (%d fichiers) : les jaquettes se refont"), n);
+  toast(msg);
+  plat_log("menu rapide : cache des jaquettes vide (%d)", n);
+}
+
+static void quick_action(int act) {
+  char path[PATH_LEN];
+  switch (act) {
+  case ACT_Q_RESTART:
+    save();
+    toast("Relance du launcher…");
+    draw(); SDL_RenderPresent(S.r);
+    if (!plat_restart_ui()) { plat_log("menu rapide : relance de l'interface"); S.running = 0; break; }
+    snprintf(path, sizeof path, "%s/launcher5.elf", plat_data_dir());   /* secours (version de test sur PC) */
+    if (plat_send_elf(path)) toast("Chargeur ELF introuvable : envoie /data/launcher5/launcher5.elf");
+    break;
+  case ACT_Q_CACHE: quick_clear_cache(); break;
+  }
+}
+
 static void do_action(int act) {
   Entry *e = selected();
   S.mode = MODE_BROWSE;
+  if (S.quick) { S.quick = 0; quick_action(act); return; }
   switch (act) {
   case ACT_LAUNCH: if (e && !e->is_folder) launch(e->app); break;
   case ACT_OPEN:
@@ -4411,7 +4494,8 @@ static void handle_inner(int in) {
     else launch(e->app);
     break;
   case IN_BACK: if (S.sec == SEC_HOME && S.depth) { S.depth--; S.scroll = (float)S.sel[S.depth]; } break;
-  case IN_MENU: case IN_START: open_context(); break;
+  case IN_MENU: S.quick = 0; open_context(); break;
+  case IN_START: open_quick(); break;
   case IN_MOVE: if (e && S.sec == SEC_HOME) do_action(ACT_MOVE); break;
   case IN_L1: change_section(-1); break;
   case IN_R1: change_section(1); break;
