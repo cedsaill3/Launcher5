@@ -131,9 +131,9 @@ static int sec_match(int sec, const App *a) {
 /* ------------------------------------------------------------------ */
 /* Etat                                                                */
 /* ------------------------------------------------------------------ */
-enum { MODE_BROWSE, MODE_CONTEXT, MODE_MOVE, MODE_KEYBOARD, MODE_PICKFOLDER, MODE_COLOR, MODE_THEME, MODE_COMMU };
+enum { MODE_BROWSE, MODE_CONTEXT, MODE_MOVE, MODE_KEYBOARD, MODE_PICKFOLDER, MODE_COLOR, MODE_THEME };
 /* lignes de l'editeur de theme */
-enum { R_PRESET, R_COMMU, R_AUTO, R_ACCENT, R_ACCENT2, R_TOP, R_BOTTOM, R_BG, R_WALL, R_ART, R_FX, R_GLOW, R_PART, R_PSTYLE,
+enum { R_PRESET, R_AUTO, R_ACCENT, R_ACCENT2, R_TOP, R_BOTTOM, R_BG, R_WALL, R_ART, R_FX, R_GLOW, R_PART, R_PSTYLE,
        R_FALL, R_CASE, R_CORNERS, R_CLOCK, R_SFX, R_MUSIC, R_VOLUME, R_SAVE, R_DELETE, R_COUNT };
 enum {
   ACT_LAUNCH, ACT_OPEN, ACT_MOVE, ACT_TO_FOLDER, ACT_OUT_OF_FOLDER, ACT_RENAME, ACT_HIDE,
@@ -2034,7 +2034,7 @@ static void draw_footer(void) {
   switch (S.mode) {
   case MODE_MOVE: hint = S.menu.view == VIEW_GRID ? "◀ ▶  Déplacer      ✕  Poser" : "◀ ▶  Déplacer      ✕  Poser"; break;
   case MODE_CONTEXT: case MODE_PICKFOLDER: case MODE_COLOR: hint = "✕  Choisir      ○  Annuler"; break;
-  case MODE_THEME: case MODE_COMMU: hint = ""; break;
+  case MODE_THEME: hint = ""; break;
   case MODE_KEYBOARD: hint = "✕  Touche      □  Effacer      △  Espace      OPTIONS  Valider      ○  Annuler"; break;
   default:
     if (S.sec == SEC_SYS) { hint = "▲▼  Choisir      ◀ ▶  Modifier      ✕  Valider      L1 R1  Sections"; break; }
@@ -2073,9 +2073,6 @@ static void check_tile_shape(void);
 static void open_theme_editor(void);
 static void music_fade(void);
 static void theme_editor_input(int in);
-static void commu_input(int in);
-static void draw_community(void);
-static void cm_poll(void);
 static void theme_saved_as(const char *name);
 
 static void draw_list_panel(const char *title, int n, const char *(*label)(int), int sel, uint32_t (*swatch)(int)) {
@@ -2412,8 +2409,7 @@ static void draw(void) {
   if (S.mode == MODE_CONTEXT) draw_list_panel(S.ctx_title, S.nchoices, choice_label, S.csel, NULL);
   if (S.mode == MODE_PICKFOLDER) draw_list_panel("Ranger dans…", S.nfolders, folder_label, S.fsel, NULL);
   if (S.mode == MODE_COLOR) draw_list_panel("Couleur du dossier", NPALETTE, color_label, S.color_sel, color_swatch);
-  if (S.mode == MODE_THEME || S.mode == MODE_COMMU) draw_theme_editor();
-  if (S.mode == MODE_COMMU) draw_community();
+  if (S.mode == MODE_THEME) draw_theme_editor();
   if (S.mode == MODE_KEYBOARD) draw_keyboard();
   draw_launching();
   draw_letter();
@@ -2932,7 +2928,7 @@ static int row_visible(int r) {
 }
 
 static const char *ROW_LABEL[R_COUNT] = {
-  "Thème de base", "Thèmes de la communauté", "Couleurs", "Couleur principale", "Couleur secondaire", "Fond : haut", "Fond : bas", "Arrière-plan",
+  "Thème de base", "Couleurs", "Couleur principale", "Couleur secondaire", "Fond : haut", "Fond : bas", "Arrière-plan",
   "Image", "Illustration du jeu", "Effet animé", "Halos lumineux", "Particules", "Forme", "Sens", "Boîtier", "Coins des jaquettes",
   "Horloge", "Sons d'interface", "Musique", "Volume", "Enregistrer comme mon thème…", "Supprimer ce thème",
 };
@@ -2986,7 +2982,6 @@ static const char *row_value(int r, char *buf, long *sw) {
     if (!strcmp(t->music, "*")) return "Toutes, à la suite";
     return t->music;
   case R_VOLUME: sprintf(buf, "%d %%", t->volume); return buf;
-  case R_COMMU: return "Parcourir ›";
   }
   return "";
 }
@@ -3076,289 +3071,6 @@ static void theme_saved_as(const char *name) {
   toast(msg);
 }
 
-/* ------------------------------------------------------------------ */
-/* Themes de la communaute : catalogue public sur GitHub. Chacun propose */
-/* son theme (formulaire du depot), on le telecharge ici d'une touche.   */
-/* ------------------------------------------------------------------ */
-#define THEMES_URL "https://raw.githubusercontent.com/cedsaill3/Launcher5-themes/main/"
-static const char *themes_url(void) {            /* L5_THEMES_URL : catalogue local pour les essais */
-  const char *e = getenv("L5_THEMES_URL");
-  return e && *e ? e : THEMES_URL;
-}
-
-typedef struct {
-  char id[48], name[48], author[40], file[96], wall[96], prev[96];
-  uint32_t c1, c2, top, bot;
-  SDL_Texture *tex;
-  int prev_state;                                /* 0 a demander, 1 en cours, 2 pret, 3 impossible */
-} CTheme;
-
-enum { CJ_INDEX, CJ_PREVIEW, CJ_INSTALL };
-static struct {
-  SDL_mutex *mx;
-  volatile int busy, done;
-  int job, item, state;                          /* state : 0 rien, 1 chargement, 2 pret, 3 erreur */
-  char url[2][300];
-  unsigned char *data[2]; size_t len[2]; long code[2];
-  CTheme *list; int n, sel, installing;
-} CM;
-
-static int cm_thread(void *u) {
-  (void)u;
-  static const size_t MAX[3][2] = { { 1 << 20, 0 }, { 2 << 20, 0 }, { 64 << 10, 12 << 20 } };
-  for (int i = 0; i < 2; i++) {
-    CM.data[i] = NULL; CM.len[i] = 0; CM.code[i] = 0;
-    if (CM.url[i][0]) CM.code[i] = plat_https_get(CM.url[i], &CM.data[i], &CM.len[i], MAX[CM.job][i]);
-  }
-  SDL_LockMutex(CM.mx);
-  CM.done = 1;
-  SDL_UnlockMutex(CM.mx);
-  return 0;
-}
-
-static int cm_start(int job, int item, const char *path1, const char *path2) {
-  if (!CM.mx && !(CM.mx = SDL_CreateMutex())) return 0;
-  if (CM.busy) return 0;
-  CM.job = job; CM.item = item;
-  snprintf(CM.url[0], sizeof CM.url[0], "%s%s", themes_url(), path1);
-  if (path2 && *path2) snprintf(CM.url[1], sizeof CM.url[1], "%s%s", themes_url(), path2); else CM.url[1][0] = 0;
-  CM.busy = 1; CM.done = 0;
-  SDL_Thread *th = SDL_CreateThread(cm_thread, "themes", NULL);
-  if (!th) { CM.busy = 0; return 0; }
-  SDL_DetachThread(th);
-  return 1;
-}
-
-static void cm_free_list(void) {
-  for (int i = 0; i < CM.n; i++) if (CM.list[i].tex) SDL_DestroyTexture(CM.list[i].tex);
-  free(CM.list); CM.list = NULL; CM.n = 0;
-}
-
-/* chemin du catalogue sans surprise : dossier attendu, lettres simples, pas de ".." */
-static int cm_path_ok(const char *p, const char *dir) {
-  if (!p || strncmp(p, dir, strlen(dir)) || strstr(p, "..")) return 0;
-  for (const char *c = p; *c; c++) if (!isalnum((unsigned char)*c) && !strchr("-_./", *c)) return 0;
-  return 1;
-}
-
-static uint32_t cm_color(json_t *v, uint32_t def) {
-  const char *s = json_string_value(v);
-  return s && s[0] == '#' && strlen(s) == 7 ? (uint32_t)strtoul(s + 1, NULL, 16) : def;
-}
-
-static void cm_parse_index(const unsigned char *d, size_t n) {
-  cm_free_list();
-  json_t *j = json_loadb((const char *)d, n, 0, NULL), *e;
-  json_t *arr = json_object_get(j, "themes");
-  size_t k, cnt = json_array_size(arr);
-  if (cnt > 300) cnt = 300;
-  CM.list = calloc(cnt ? cnt : 1, sizeof *CM.list);
-  json_array_foreach(arr, k, e) {
-    if (k >= cnt) break;
-    const char *id = json_string_value(json_object_get(e, "id"));
-    const char *nm = json_string_value(json_object_get(e, "nom"));
-    const char *th = json_string_value(json_object_get(e, "theme"));
-    const char *wl = json_string_value(json_object_get(e, "fond"));
-    const char *pv = json_string_value(json_object_get(e, "apercu"));
-    const char *au = json_string_value(json_object_get(e, "auteur"));
-    if (!id || !nm || !cm_path_ok(th, "themes/") || (wl && !cm_path_ok(wl, "fonds/")) || (pv && !cm_path_ok(pv, "apercus/"))) continue;
-    int idok = strlen(id) < sizeof CM.list[0].id;
-    for (const char *c = id; *c; c++) if (!islower((unsigned char)*c) && !isdigit((unsigned char)*c) && *c != '-') idok = 0;
-    if (!idok) continue;
-    CTheme *t = &CM.list[CM.n++];
-    snprintf(t->id, sizeof t->id, "%s", id);
-    snprintf(t->name, sizeof t->name, "%s", nm);
-    snprintf(t->author, sizeof t->author, "%s", au ? au : "");
-    snprintf(t->file, sizeof t->file, "%s", th);
-    snprintf(t->wall, sizeof t->wall, "%s", wl ? wl : "");
-    snprintf(t->prev, sizeof t->prev, "%s", pv ? pv : "");
-    t->c1 = cm_color(json_object_get(e, "couleur"), 0xff2bd6);
-    t->c2 = cm_color(json_object_get(e, "couleur2"), 0x00e5ff);
-    t->top = cm_color(json_object_get(e, "fond_haut"), 0x0d0221);
-    t->bot = cm_color(json_object_get(e, "fond_bas"), 0x2a0845);
-    t->prev_state = t->prev[0] ? 0 : 3;
-  }
-  json_decref(j);
-  CM.state = 2;
-  plat_log("themes de la communaute : %d", CM.n);
-}
-
-static int write_bytes(const char *path, const unsigned char *d, size_t n) {
-  FILE *f = fopen(path, "wb");
-  if (!f) return -1;
-  size_t w = fwrite(d, 1, n, f);
-  return fclose(f) || w != n ? -1 : 0;
-}
-
-/* theme recu : verifie, son fond range dans fonds/, puis ajoute aux themes et montre dans le Studio */
-static void cm_install_done(CTheme *ct) {
-  char dir[PATH_LEN], tmp[PATH_LEN + 16], path[PATH_LEN + THEME_FILE_LEN], file[THEME_FILE_LEN];
-  data_path(dir, sizeof dir, "themes");
-  mkdir(dir, 0755);
-  snprintf(tmp, sizeof tmp, "%s/.recu.json", dir);
-  Theme t;
-  if (CM.code[0] != 200 || write_bytes(tmp, CM.data[0], CM.len[0]) || theme_load(tmp, &t)) {
-    remove(tmp);
-    toast(CM.code[0] ? "⚠ Thème illisible" : "⚠ Pas d'accès à Internet");
-    return;
-  }
-  remove(tmp);
-  snprintf(t.name, sizeof t.name, "%s", ct->name);
-  snprintf(t.music, sizeof t.music, "%s", S.edit.music);   /* ta musique reste la tienne */
-  t.volume = S.edit.volume;
-  t.wallpaper[0] = 0;
-  if (ct->wall[0]) {
-    SDL_Surface *img = CM.code[1] == 200 ? IMG_Load_RW(SDL_RWFromConstMem(CM.data[1], (int)CM.len[1]), 1) : NULL;
-    char wdir[PATH_LEN], wpath[PATH_LEN + THEME_FILE_LEN];
-    data_path(wdir, sizeof wdir, "fonds");
-    mkdir(wdir, 0755);
-    snprintf(t.wallpaper, sizeof t.wallpaper, "communaute-%s.jpg", ct->id);
-    snprintf(wpath, sizeof wpath, "%s/%s", wdir, t.wallpaper);
-    if (!img || write_bytes(wpath, CM.data[1], CM.len[1])) {
-      if (img) SDL_FreeSurface(img);
-      toast("⚠ Fond d'écran du thème illisible");
-      return;
-    }
-    SDL_FreeSurface(img);
-    t.bg_mode = BG_IMAGE;
-  } else if (t.bg_mode == BG_IMAGE) t.bg_mode = BG_GRADIENT;
-  theme_file_name(t.name, file, sizeof file);
-  snprintf(path, sizeof path, "%s/%s", dir, file);
-  if (theme_save(path, &t)) { toast("⚠ Impossible d'enregistrer le thème"); return; }
-  scan_media_files();                            /* le nouveau fond apparait dans la liste */
-  load_presets();
-  S.edit = t;
-  S.preset = find_preset(t.name);
-  S.ed_dirty = 0;
-  S.ed_row = R_PRESET;
-  theme_changed();
-  S.mode = MODE_THEME;
-  char msg[160];
-  snprintf(msg, sizeof msg, tr("Thème « %s » installé : ✕ pour l'appliquer"), t.name);
-  toast(msg);
-  plat_log("theme de la communaute installe : %s", ct->id);
-}
-
-static void cm_next_preview(void) {               /* apercu du theme choisi, puis de ses voisins */
-  for (int d = 0; d < 4; d++)
-    for (int s = -1; s <= 1; s += 2) {
-      int i = CM.sel + d * s;
-      if (i < 0 || i >= CM.n || CM.list[i].prev_state) continue;
-      if (cm_start(CJ_PREVIEW, i, CM.list[i].prev, NULL)) CM.list[i].prev_state = 1;
-      return;
-    }
-}
-
-static void cm_poll(void) {
-  if (!CM.mx || !CM.busy) { if (S.mode == MODE_COMMU && CM.state == 2) cm_next_preview(); return; }
-  SDL_LockMutex(CM.mx);
-  int done = CM.done;
-  SDL_UnlockMutex(CM.mx);
-  if (!done) return;
-  CM.busy = 0;
-  switch (CM.job) {
-  case CJ_INDEX:
-    if (CM.code[0] == 200) cm_parse_index(CM.data[0], CM.len[0]);
-    else { CM.state = 3; plat_log("themes de la communaute : catalogue indisponible (%ld)", CM.code[0]); }
-    break;
-  case CJ_PREVIEW:
-    if (CM.item < CM.n) {
-      CTheme *t = &CM.list[CM.item];
-      SDL_Surface *img = CM.code[0] == 200 ? IMG_Load_RW(SDL_RWFromConstMem(CM.data[0], (int)CM.len[0]), 1) : NULL;
-      if (img) { t->tex = SDL_CreateTextureFromSurface(S.r, img); SDL_FreeSurface(img); }
-      t->prev_state = t->tex ? 2 : 3;
-    }
-    break;
-  case CJ_INSTALL:
-    CM.installing = 0;
-    if (CM.item < CM.n && S.mode == MODE_COMMU) cm_install_done(&CM.list[CM.item]);
-    break;
-  }
-  for (int i = 0; i < 2; i++) { free(CM.data[i]); CM.data[i] = NULL; }
-}
-
-static void open_community(void) {
-  S.mode = MODE_COMMU;
-  if (CM.state == 2 || CM.state == 1) return;    /* deja charge (ou en cours) */
-  CM.sel = 0;
-  CM.state = cm_start(CJ_INDEX, 0, "index.json", NULL) ? 1 : 3;
-}
-
-static void commu_input(int in) {
-  switch (in) {
-  case IN_UP: case IN_DOWN:
-    if (CM.n) CM.sel = (CM.sel + (in == IN_UP ? -1 : 1) + CM.n) % CM.n;
-    sfx(SFX_MOVE);
-    return;
-  case IN_BACK: S.mode = MODE_THEME; return;
-  case IN_OK:
-    if (CM.state == 3) { CM.state = 0; open_community(); return; }   /* reessayer */
-    if (CM.state != 2 || !CM.n || CM.installing) return;
-    if (CM.busy) { toast("Un instant…"); return; }
-    if (cm_start(CJ_INSTALL, CM.sel, CM.list[CM.sel].file, CM.list[CM.sel].wall)) {
-      CM.installing = 1;
-      sfx(SFX_OK);
-    }
-    return;
-  }
-}
-
-static void draw_community(void) {
-  int pw = 1400, ph = 800, px = (W - pw) / 2, py = (H - ph) / 2 + 10;
-  set_color(0x000000, 150);
-  SDL_Rect full = { 0, 0, W, H };
-  SDL_RenderFillRect(S.r, &full);
-  glass_panel(px, py, pw, ph);
-  draw_text(S.f36, "Thèmes de la communauté", px + 44, py + 30, 0xffffff, 0, 700);
-  draw_text_a(S.f22, "Propose le tien : github.com/cedsaill3/Launcher5-themes", px + pw - 44, py + 42, 0x9aa4b5, 2, 640, 220);
-  int lx = px + 30, ly = py + 104, lw = 560, rowh = 74, vis = 8;
-  if (CM.state != 2) {
-    const char *m = CM.state == 1 ? "Chargement du catalogue…" : "Catalogue indisponible (Internet ?)  ·  ✕ réessayer";
-    draw_text(S.f30, m, px + pw / 2, py + ph / 2 - 20, 0xffffff, 1, pw - 80);
-  } else if (!CM.n) {
-    draw_text(S.f30, "Aucun thème pour l'instant", px + pw / 2, py + ph / 2 - 20, 0xffffff, 1, pw - 80);
-  } else {
-    int first = CM.sel >= vis ? CM.sel - vis + 1 : 0;
-    for (int i = first; i < CM.n && i - first < vis; i++) {
-      CTheme *t = &CM.list[i];
-      int y = ly + (i - first) * rowh, on = i == CM.sel;
-      if (on) fill_round(lx, y - 6, lw, rowh - 8, 14, S.th->accent, 255);
-      fill_round(lx + 18, y + 6, 22, 22, 11, t->c1, 255);
-      fill_round(lx + 18, y + 34, 22, 14, 7, t->c2, 255);
-      draw_text(S.f30, t->name, lx + 60, y, on ? 0x0a0a12 : 0xffffff, 0, lw - 80);
-      char by[64];
-      snprintf(by, sizeof by, tr("par %s"), t->author[0] ? t->author : "?");
-      draw_text_a(S.f22, by, lx + 60, y + 36, on ? 0x0a0a12 : 0x9aa4b5, 0, lw - 80, 220);
-    }
-    if (CM.n > vis) {                            /* position dans la liste */
-      int bh = vis * rowh - 8, th = bh * vis / CM.n, ty = ly - 6 + (bh - th) * CM.sel / (CM.n - 1);
-      fill_round(lx + lw + 8, ly - 6, 4, bh, 2, 0xffffff, 30);
-      fill_round(lx + lw + 8, ty, 4, th, 2, S.th->accent, 220);
-    }
-    /* apercu du theme choisi */
-    CTheme *t = &CM.list[CM.sel];
-    int vx = px + 640, vy = py + 104, vw = 720, vh = 405;
-    if (t->tex) { SDL_Rect d = { vx, vy, vw, vh }; SDL_RenderCopy(S.r, t->tex, NULL, &d); }
-    else {
-      for (int i = 0; i < vh; i += 3) {
-        set_color(mix_color(t->top, t->bot, (float)i / vh), 255);
-        SDL_Rect rr = { vx, vy + i, vw, 3 };
-        SDL_RenderFillRect(S.r, &rr);
-      }
-      if (t->prev_state == 1) draw_text_a(S.f22, "Chargement de l'aperçu…", vx + vw / 2, vy + vh / 2 - 12, 0xffffff, 1, 0, 180);
-    }
-    outline_round(vx - 2, vy - 2, vw + 4, vh + 4, 10, 2, 0xffffff, 120);
-    draw_text(S.f48, t->name, vx, vy + vh + 26, 0xffffff, 0, vw);
-    char by[64];
-    snprintf(by, sizeof by, tr("par %s"), t->author[0] ? t->author : "?");
-    draw_text(S.f26, by, vx, vy + vh + 96, 0x9aa4b5, 0, vw);
-    fill_round(vx, vy + vh + 146, 120, 12, 6, t->c1, 255);
-    fill_round(vx + 132, vy + vh + 146, 60, 12, 6, t->c2, 255);
-  }
-  const char *hint = CM.installing ? "Téléchargement du thème…" : "▲▼  Choisir      ✕  Installer      ○  Retour";
-  draw_text(S.f26, hint, px + 44, py + ph - 60, CM.installing ? S.th->accent : 0xc8cfdb, 0, pw - 88);
-}
-
 static void theme_editor_input(int in) {
   switch (in) {
   case IN_UP: case IN_DOWN: {
@@ -3376,7 +3088,6 @@ static void theme_editor_input(int in) {
     S.mode = MODE_BROWSE;
     return;
   case IN_OK: case IN_START:
-    if (S.ed_row == R_COMMU && in == IN_OK) { open_community(); return; }
     if (S.ed_row == R_SAVE && in == IN_OK) {
       char base[64];
       snprintf(base, sizeof base, "%s", S.preset >= S.nbuiltin && !S.ed_dirty ? S.edit.name : tr("Mon thème"));
@@ -4633,7 +4344,6 @@ static void handle_inner(int in) {
     if (settings_input(in)) return;
     if (in == IN_MENU || in == IN_START || in == IN_MOVE) return;
   }
-  if (S.mode == MODE_COMMU) { commu_input(in); return; }
   if (S.mode == MODE_THEME) { theme_editor_input(in); return; }
   if (S.mode == MODE_KEYBOARD) {
     switch (in) {
@@ -5008,7 +4718,6 @@ int main(int argc, char **argv) {
   while (S.running) {
     box_poll();
     up_poll();
-    cm_poll();
     Uint64 now = SDL_GetPerformanceCounter();
     S.dt = (float)(now - last) / SDL_GetPerformanceFrequency();
     if (S.dt > 0.1f) S.dt = 0.1f;
