@@ -23,6 +23,7 @@
 #include "theme.h"
 #include "i18n.h"
 #include "version.h"
+#include "sha256.h"
 
 #ifdef HAVE_MIXER
 #include <SDL2/SDL_mixer.h>
@@ -3433,11 +3434,188 @@ static void move_cursor(int dx, int dy) {
   S.sel_anim = 0.3f;
 }
 
+
+/* ------------------------------------------------------------------ */
+/* Mise a jour : derniere version publiee sur GitHub, verifiee par son  */
+/* empreinte SHA-256, gardee dans /data/launcher5/launcher5.elf puis    */
+/* envoyee au chargeur ELF de la console.                               */
+/* ------------------------------------------------------------------ */
+#define UPDATE_API "https://api.github.com/repos/cedsaill3/Launcher5/releases/latest"
+enum { UP_IDLE, UP_CHECKING, UP_LATEST, UP_AVAILABLE, UP_DOWNLOADING, UP_READY, UP_ERROR };
+static struct {
+  SDL_mutex *mx;
+  volatile int state, busy, notify, install;     /* install : envoyer des que la version est prete */
+  char ver[24], url[600], digest[72], err[96];
+} UP;
+
+static const char *run_version(void) {           /* L5_VERSION_TEST : essais de mise a jour sur PC */
+  const char *e = getenv("L5_VERSION_TEST");
+  return e && *e ? e : L5_VERSION;
+}
+
+/* compare deux versions « v2.1.0 » / « 2.0.1 » */
+static int ver_cmp(const char *a, const char *b) {
+  if (*a == 'v' || *a == 'V') a++;
+  if (*b == 'v' || *b == 'V') b++;
+  for (int i = 0; i < 4; i++) {
+    long x = strtol(a, (char **)&a, 10), y = strtol(b, (char **)&b, 10);
+    if (x != y) return x < y ? -1 : 1;
+    if (*a == '.') a++;
+    if (*b == '.') b++;
+  }
+  return 0;
+}
+
+static void up_path(char *out, size_t n, const char *name) { snprintf(out, n, "%s/%s", plat_data_dir(), name); }
+
+static void up_set(int state, const char *err) {
+  SDL_LockMutex(UP.mx);
+  UP.state = state;
+  if (err) snprintf(UP.err, sizeof UP.err, "%s", err);
+  UP.notify = 1;
+  SDL_UnlockMutex(UP.mx);
+}
+
+static void up_check(void) {
+  unsigned char *d; size_t n;
+  long code = plat_https_get(UPDATE_API, &d, &n, 1 << 20);
+  char path[PATH_LEN];
+  up_path(path, sizeof path, "cache/update_check");
+  FILE *f = fopen(path, "w");                    /* derniere verification (une par jour) */
+  if (f) fclose(f);
+  if (code != 200) { up_set(UP_ERROR, code ? "GitHub ne répond pas correctement" : "Pas d'accès à Internet"); return; }
+  json_t *j = json_loadb((const char *)d, n, 0, NULL), *a;
+  free(d);
+  const char *tag = json_string_value(json_object_get(j, "tag_name"));
+  char ver[24] = "", url[600] = "", dig[72] = "";
+  size_t k;
+  if (tag) snprintf(ver, sizeof ver, "%s", tag[0] == 'v' ? tag + 1 : tag);
+  json_array_foreach(json_object_get(j, "assets"), k, a) {
+    const char *nm = json_string_value(json_object_get(a, "name"));
+    const char *u = json_string_value(json_object_get(a, "browser_download_url"));
+    const char *dg = json_string_value(json_object_get(a, "digest"));
+    if (nm && u && dg && !strcmp(nm, "launcher5.elf") && !strncmp(dg, "sha256:", 7) &&
+        !strncmp(u, "https://github.com/cedsaill3/Launcher5/releases/download/", 56)) {
+      snprintf(url, sizeof url, "%s", u);
+      snprintf(dig, sizeof dig, "%s", dg + 7);
+    }
+  }
+  json_decref(j);
+  if (!ver[0] || !url[0]) { up_set(UP_ERROR, "Version publiée illisible"); return; }
+  SDL_LockMutex(UP.mx);
+  snprintf(UP.ver, sizeof UP.ver, "%s", ver);
+  snprintf(UP.url, sizeof UP.url, "%s", url);
+  snprintf(UP.digest, sizeof UP.digest, "%s", dig);
+  SDL_UnlockMutex(UP.mx);
+  up_set(ver_cmp(ver, run_version()) > 0 ? UP_AVAILABLE : UP_LATEST, NULL);
+  plat_log("mise a jour : version publiee %s, version actuelle %s", ver, run_version());
+}
+
+static void up_download(void) {
+  char url[600], dig[72], ver[24];
+  SDL_LockMutex(UP.mx);
+  memcpy(url, UP.url, sizeof url); memcpy(dig, UP.digest, sizeof dig); memcpy(ver, UP.ver, sizeof ver);
+  SDL_UnlockMutex(UP.mx);
+  up_set(UP_DOWNLOADING, NULL);
+  unsigned char *d; size_t n;
+  long code = plat_https_get(url, &d, &n, 64 << 20);
+  if (code != 200) { up_set(UP_ERROR, code ? "Téléchargement refusé par GitHub" : "Téléchargement interrompu"); return; }
+  char hex[65];
+  sha256_hex(d, n, hex);
+  if (strcmp(hex, dig) || n < 4 || memcmp(d, "\x7f" "ELF", 4)) {
+    free(d);
+    plat_log("mise a jour : empreinte incorrecte, fichier refuse");
+    up_set(UP_ERROR, "Fichier abîmé : mise à jour refusée");
+    return;
+  }
+  char tmp[PATH_LEN], dst[PATH_LEN], vf[PATH_LEN];
+  up_path(tmp, sizeof tmp, "launcher5.elf.tmp");
+  up_path(dst, sizeof dst, "launcher5.elf");
+  up_path(vf, sizeof vf, "launcher5.version");
+  FILE *f = fopen(tmp, "wb");
+  size_t w = f ? fwrite(d, 1, n, f) : 0;
+  if (f) fclose(f);
+  free(d);
+  if (w != n || rename(tmp, dst)) { remove(tmp); up_set(UP_ERROR, "Écriture impossible dans /data/launcher5"); return; }
+  if ((f = fopen(vf, "w"))) { fprintf(f, "%s\n", ver); fclose(f); }
+  plat_log("mise a jour : version %s prete (%s)", ver, dst);
+  up_set(UP_READY, NULL);
+}
+
+static int up_thread(void *u) {
+  if (u) up_download(); else up_check();
+  UP.busy = 0;
+  return 0;
+}
+
+static void up_start(int download) {
+  if (!UP.mx && !(UP.mx = SDL_CreateMutex())) return;
+  if (UP.busy) return;
+  UP.busy = 1;
+  if (!download) up_set(UP_CHECKING, NULL);
+  SDL_Thread *th = SDL_CreateThread(up_thread, "update", download ? (void *)1 : NULL);
+  if (th) SDL_DetachThread(th); else { UP.busy = 0; up_set(UP_ERROR, "Pas de fil disponible"); }
+}
+
+static void up_install(void) {
+  char path[PATH_LEN];
+  up_path(path, sizeof path, "launcher5.elf");
+  toast(tr("Installation de la mise à jour : le launcher redémarre…"));
+  draw(); SDL_RenderPresent(S.r);
+  save();
+  if (plat_send_elf(path)) {
+    toast(tr("Chargeur ELF introuvable : envoie /data/launcher5/launcher5.elf"));
+    UP.install = 0;
+  }
+}
+
+/* au demarrage : version deja telechargee, puis verification du jour */
+static void up_boot(void) {
+  if (!UP.mx && !(UP.mx = SDL_CreateMutex())) return;
+  char vf[PATH_LEN], el[PATH_LEN], v[24] = "";
+  up_path(vf, sizeof vf, "launcher5.version");
+  up_path(el, sizeof el, "launcher5.elf");
+  FILE *f = fopen(vf, "r");
+  if (f) { if (!fgets(v, sizeof v, f)) v[0] = 0; fclose(f); v[strcspn(v, "\r\n")] = 0; }
+  if (v[0] && ver_cmp(v, run_version()) > 0 && !access(el, R_OK)) {
+    snprintf(UP.ver, sizeof UP.ver, "%s", v);
+    up_set(UP_READY, NULL);                      /* plus recente que celle qui tourne */
+    return;
+  }
+  char chk[PATH_LEN];
+  up_path(chk, sizeof chk, "cache/update_check");
+  if (S.menu.auto_update && !recent_file(chk, 1)) up_start(0);
+}
+
+/* a chaque image : messages et installation demandee */
+static void up_poll(void) {
+  if (!UP.mx || !UP.notify) return;
+  UP.notify = 0;
+  char msg[160];
+  switch (UP.state) {
+  case UP_AVAILABLE:
+    if (UP.install) { up_start(1); break; }
+    snprintf(msg, sizeof msg, tr("Mise à jour %s disponible : Paramètres › Mettre à jour"), UP.ver);
+    toast(msg);
+    break;
+  case UP_READY:
+    if (UP.install) up_install();
+    else { snprintf(msg, sizeof msg, tr("Version %s prête : Paramètres › Mettre à jour"), UP.ver); toast(msg); }
+    break;
+  case UP_LATEST:
+    if (UP.install) { toast(tr("Launcher5 est à jour")); UP.install = 0; }
+    break;
+  case UP_ERROR:
+    if (UP.install) { toast(tr(UP.err)); UP.install = 0; }
+    break;
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Menu Parametres : une vraie liste de reglages + une carte d'infos    */
 /* ------------------------------------------------------------------ */
 enum { SR_THEME, SR_VIEW, SR_COVERS, SR_ONLINE, SR_SAVER, SR_SFX, SR_SFXPACK, SR_BOOT, SR_RETURN, SR_FOLDERS, SR_HIDDEN, SR_HIDEIP,
-       SR_QUIT, SR_COUNT };
+       SR_AUTOUPD, SR_UPDATE, SR_QUIT, SR_COUNT };
 #define SR_VISIBLE 8                             /* lignes affichees a la fois */
 static int set_row, set_top;
 
@@ -3518,6 +3696,14 @@ static void settings_change(int d, int activate) {
   case SR_FOLDERS: S.menu.show_folders = !S.menu.show_folders; save(); break;
   case SR_HIDDEN: S.show_hidden = !S.show_hidden; break;
   case SR_HIDEIP: S.menu.hide_ip = !S.menu.hide_ip; S.sys_t = 0; save(); break;
+  case SR_AUTOUPD: S.menu.auto_update = !S.menu.auto_update; save(); break;
+  case SR_UPDATE:                                /* ✕ seulement : verifier, telecharger puis installer */
+    if (!activate || UP.busy) break;
+    UP.install = 1;
+    if (UP.state == UP_READY) up_install();
+    else if (UP.state == UP_AVAILABLE) up_start(1);
+    else up_start(0);
+    break;
   case SR_QUIT:
     if (activate) { App *a = menu_find_app(&S.menu, "sys:home"); if (a) launch(a); }
     break;
@@ -3557,6 +3743,18 @@ static void settings_value(int r, char *v, size_t n, int *toggle) {
   case SR_HIDDEN: *toggle = S.show_hidden; break;
   case SR_HIDEIP: *toggle = S.menu.hide_ip; break;
   case SR_ONLINE: *toggle = S.menu.covers_online; break;
+  case SR_AUTOUPD: *toggle = S.menu.auto_update; break;
+  case SR_UPDATE:
+    switch (UP.state) {
+    case UP_CHECKING: snprintf(v, n, "%s", tr("Vérification…")); break;
+    case UP_LATEST: snprintf(v, n, tr("À jour (v%s)"), run_version()); break;
+    case UP_AVAILABLE: snprintf(v, n, tr("v%s disponible"), UP.ver); break;
+    case UP_DOWNLOADING: snprintf(v, n, "%s", tr("Téléchargement…")); break;
+    case UP_READY: snprintf(v, n, tr("v%s prête"), UP.ver); break;
+    case UP_ERROR: snprintf(v, n, "%s", tr("Échec")); break;
+    default: snprintf(v, n, "v%s", run_version());
+    }
+    break;
   default: v[0] = 0;
   }
 }
@@ -3679,10 +3877,11 @@ static void draw_view_preview(int cx, int cy, int cw, int ch) {
 }
 
 static void draw_settings(void) {
-  static const char *ICON[SR_COUNT] = { "◐", "▦", "▯", "⬇", "☾", "♪", "♫", "★", "↺", "▤", "◌", "⊘", "⌂" };
+  static const char *ICON[SR_COUNT] = { "◐", "▦", "▯", "⬇", "☾", "♪", "♫", "★", "↺", "▤", "◌", "⊘", "◷", "↻", "⌂" };
   static const char *LABEL[SR_COUNT] = {
     "Thème", "Affichage des jeux", "Jaquettes", "Jaquettes officielles", "Économiseur d'écran", "Sons d'interface", "Style des sons", "Son de démarrage",
-    "Retour automatique", "Section Mes dossiers", "Éléments masqués", "Masquer l'IP", "Quitter vers l'accueil PS5",
+    "Retour automatique", "Section Mes dossiers", "Éléments masqués", "Masquer l'IP", "Mises à jour automatiques", "Mettre à jour",
+    "Quitter vers l'accueil PS5",
   };
   static const char *HELP[SR_COUNT] = {
     "◀ ▶ change de thème  ·  ✕ ouvre le Studio Thème",
@@ -3697,6 +3896,8 @@ static void draw_settings(void) {
     "Affiche la section où tu ranges tes jeux dans tes dossiers",
     "Montre ou cache les jeux que tu as masqués",
     "Pour tes captures et tes lives",
+    "Vérifie une fois par jour sur GitHub",
+    "✕ vérifie, télécharge et installe la dernière version",
     "Ferme le launcher et revient à l'accueil de la PS5",
   };
   /* liste des reglages (defile si elle depasse l'ecran) */
@@ -3729,7 +3930,7 @@ static void draw_settings(void) {
       draw_text(S.f22, tr(tog ? "OUI" : "NON"), sx - 16, my - 14, tog ? 0xffffff : 0x9aa4b5, 2, 0);
     } else if (v[0]) {
       int vw = text_w(S.f26, v);
-      if (on) {
+      if (on && r != SR_UPDATE) {
         draw_text(S.f26, "▶", right, my - 17, ac, 2, 0);
         draw_text(S.f26, v, right - 40, my - 17, 0xffffff, 2, 300);
         draw_text(S.f26, "◀", right - 54 - (vw < 300 ? vw : 300), my - 17, ac, 2, 0);
@@ -4061,7 +4262,7 @@ static void check_external_changes(void) {
     tmp.stats = NULL; tmp.nstats = 0;
     tmp.show_folders = 0; tmp.view = VIEW_FLOW; tmp.theme[0] = 0;
     tmp.favs = NULL; tmp.nfavs = 0; tmp.saver = 5;
-    tmp.sfx_pack = 0; tmp.boot_snd = 0; tmp.hide_ip = 0; tmp.boxes = 1; tmp.covers_online = 1;
+    tmp.sfx_pack = 0; tmp.boot_snd = 0; tmp.hide_ip = 0; tmp.boxes = 1; tmp.covers_online = 1; tmp.auto_update = 1;
     if (!menu_load(&tmp, S.menu_path)) {
       S.menu_sig = sig;
       menu_reset(&S.menu);       /* libere l'ancien menu (pas les applications) */
@@ -4133,6 +4334,7 @@ int main(int argc, char **argv) {
   S.menu.saver = 5;                     /* economiseur apres 5 min par defaut */
   S.menu.boxes = 1;                     /* jaquettes boites par defaut */
   S.menu.covers_online = 1;
+  S.menu.auto_update = 1;
   menu_load(&S.menu, S.menu_path);
   menu_prune_missing(&S.menu);
   menu_merge_new_apps(&S.menu);
@@ -4172,8 +4374,10 @@ int main(int argc, char **argv) {
   if (!S.boot_done) sfx(SFX_BOOT);
   int saver_secs = getenv("L5_SAVER") ? atoi(getenv("L5_SAVER")) : 0;   /* test : economiseur plus rapide */
   Uint64 last = SDL_GetPerformanceCounter();
+  up_boot();
   while (S.running) {
     box_poll();
+    up_poll();
     Uint64 now = SDL_GetPerformanceCounter();
     S.dt = (float)(now - last) / SDL_GetPerformanceFrequency();
     if (S.dt > 0.1f) S.dt = 0.1f;

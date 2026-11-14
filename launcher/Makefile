@@ -21,7 +21,7 @@ UI_LIBS := $(HB)/lib/libSDL2main.a $(HB)/lib/libSDL2_mixer.a $(HB)/lib/libvorbis
            -lSceSystemService -lSceUserService -lSceVideoOut -lSceAudioOut -lScePad \
            -lSceKeyboard -lSceImeDialog -lkernel_sys -lm -lz -lbz2 -liconv
 
-UI_SRCS := src/main.c src/menu.c src/scan.c src/theme.c src/i18n.c src/platform_ps5.c src/font_data.c
+UI_SRCS := src/main.c src/menu.c src/scan.c src/theme.c src/i18n.c src/platform_ps5.c src/font_data.c src/sha256.c
 GPL_SRCS := gpl/pt.c gpl/elfldr.c gpl/hbldr.c gpl/fs_readfile.c
 
 all: build/launcher5.elf
@@ -29,7 +29,7 @@ all: build/launcher5.elf
 build:
 	mkdir -p build
 
-build/launcher5-ui.elf: $(UI_SRCS) src/menu.h src/platform.h src/theme.h src/i18n.h src/version.h | build
+build/launcher5-ui.elf: $(UI_SRCS) src/menu.h src/platform.h src/theme.h src/i18n.h src/version.h src/sha256.h | build
 	$(CC) $(CFLAGS) -o $@ $(UI_SRCS) $(UI_LIBS)
 	$(STRIP) --strip-debug $@
 
