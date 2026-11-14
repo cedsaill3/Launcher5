@@ -33,7 +33,7 @@ build/launcher5-ui.elf: $(UI_SRCS) src/menu.h src/platform.h src/theme.h src/i18
 	$(CC) $(CFLAGS) -o $@ $(UI_SRCS) $(UI_LIBS)
 	$(STRIP) --strip-debug $@
 
-build/launcher5.elf: src/bootstrap.c src/i18n.c src/i18n.h src/version.h $(GPL_SRCS) build/launcher5-ui.elf assets/relay/param.json assets/relay/icon0.png $(wildcard assets/fonds/*.jpg) $(wildcard assets/sons/*.mp3)
+build/launcher5.elf: src/bootstrap.c src/i18n.c src/i18n.h src/version.h $(GPL_SRCS) build/launcher5-ui.elf assets/relay/param.json assets/relay/icon0.png $(wildcard assets/fonds/*.jpg)
 	$(CC) $(CFLAGS) -o $@ src/bootstrap.c src/i18n.c $(GPL_SRCS) $(HB)/lib/libsqlite3.a -lkernel_sys -lSceSystemService -lSceUserService -lSceAppInstUtil -lpthread
 	$(STRIP) --strip-debug $@
 
