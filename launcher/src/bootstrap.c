@@ -32,6 +32,7 @@
 #include <ps5/kernel.h>
 
 #include "../gpl/hbldr.h"
+#include "../gpl/elfldr.h"
 #include "i18n.h"
 #include "version.h"
 
@@ -345,6 +346,27 @@ static int launch_title(const char *title_id) {
   return err < 0 ? err : 0;
 }
 
+/* Lance un ELF comme un vrai payload (processus a part, comme le fait l'elfldr du
+   port 9021), avec l'elfldr integre. « --spawned » dit a la nouvelle version
+   qu'elle a ete lancee correctement. */
+static int spawn_payload(const char *path) {
+  FILE *f = fopen(path, "rb");
+  if (!f) return -1;
+  fseek(f, 0, SEEK_END);
+  long n = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  uint8_t *buf = n > 0 ? malloc((size_t)n) : NULL;
+  size_t got = buf ? fread(buf, 1, (size_t)n, f) : 0;
+  fclose(f);
+  if (!buf || got != (size_t)n) { free(buf); return -1; }
+  char *av[] = { (char *)path, (char *)"--spawned", NULL };
+  char *ev[] = { NULL };
+  pid_t p = elfldr_spawn(DATA_DIR, -1, buf, av, ev);
+  free(buf);
+  logf("payload lance : %s (pid %d)", path, p);
+  return p < 0 ? -1 : 0;
+}
+
 /* envoie un ELF au chargeur de la console (port 9021) */
 static int send_to_loader(const char *path) {
   FILE *f = fopen(path, "rb");
@@ -415,7 +437,7 @@ static void single_instance(void) {
   if (f) { fprintf(f, "%d\n", getpid()); fclose(f); }
 }
 
-int main(void) {
+int main(int argc, char **argv) {
   mkdir(DATA_DIR, 0755);
   logf("--- demarrage --- Launcher5 v" L5_VERSION " par " L5_AUTHOR);
   {
@@ -426,6 +448,19 @@ int main(void) {
   }
   if (sceUserServiceInitialize(0)) { logf("UserService indisponible"); return EXIT_FAILURE; }
   if (elevate_self()) { notify("Launcher5 : droits insuffisants (jailbreak actif ?)"); return EXIT_FAILURE; }
+  /* Mise a jour lancee par la v2.5.1 / 2.5.2 : elle demarrait dans la tuile (application)
+     au lieu d'un payload, et ne pouvait pas ouvrir l'interface. Dans ce cas on s'arrete
+     tout de suite : ces versions renvoient alors le fichier au chargeur ELF. */
+  {
+    int spawned = argc > 1 && argv[1] && !strcmp(argv[1], "--spawned");
+    /* l'ancienne methode passait le chemin du fichier en argument ; le chargeur ELF, non */
+    int in_tile = !spawned && argc > 0 && argv[0] && !strcmp(argv[0], DATA_DIR "/launcher5.elf");
+    logf("lancement : %d argument(s), %s", argc, argc > 0 && argv[0] ? argv[0] : "-");
+    if (in_tile) {                               /* l'ancienne version la relance par le chargeur ELF */
+      logf("demarre dans la tuile : on laisse l'ancienne version relancer correctement");
+      return EXIT_SUCCESS;
+    }
+  }
   single_instance();
   if (install_relay_app()) { notify("Launcher5 : impossible d'installer l'application relais"); return EXIT_FAILURE; }
   install_wallpapers();
@@ -456,11 +491,8 @@ int main(void) {
              ce bootstrap. Si elle ne prend pas la main, le chargeur ELF (port 9021) essaie. */
           for (int i = 0; i < 30 && alive(ui); i++) usleep(100 * 1000);
           if (alive(ui)) kill(ui, SIGKILL);
-          char *ea[] = { value, NULL };
-          char *ee[] = { NULL };
-          pid_t p = hbldr_launch(DATA_DIR, value, -1, ea, ee);
-          logf("mise a jour : %s lancee directement (pid %d)", value, p);
-          sleep(8);                              /* la nouvelle version nous arrete avant la fin */
+          if (spawn_payload(value)) logf("mise a jour : lancement direct impossible");
+          else sleep(8);                              /* la nouvelle version nous arrete avant la fin */
           logf("mise a jour : pas de relais, essai par le chargeur ELF");
           if (!send_to_loader(value)) sleep(8);
           logf("mise a jour impossible : on garde cette version");
