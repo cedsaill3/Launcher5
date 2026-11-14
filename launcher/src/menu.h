@@ -28,6 +28,8 @@ enum {
 
 /* Presentation des jeux */
 enum { VIEW_FLOW, VIEW_GRID, VIEW_CLASSIC, VIEW_COUNT };
+#define SFX_PACKS 5
+#define BOOT_SOUNDS 6
 
 /* Precisions sur le contenu */
 #define APPF_MEDIA     1   /* lecture video / musique (aussi pour les homebrews) */
@@ -46,6 +48,12 @@ typedef struct App {
   void *bgtex;              /* fond flou (gere par l'interface) */
   void *tex_s, *tex_l, *tex_xl; /* tuiles pre-calculees (petite, selectionnee, cover flow) */
   int  tex_failed, bg_failed;
+  uint32_t vibe, vibe2;     /* couleurs tirees de la jaquette (theme « couleurs auto ») */
+  int  has_vibe;
+  void *boxtex;              /* jaquette boite fabriquee (geree par l'interface) */
+  int  box_state, box_custom; /* 0 a faire, 1 en cours, 2 prete, 3 impossible */
+  long long box_sig;         /* jaquette perso vue lors de la fabrication */
+  int  box_pref;             /* jaquette deja preparee sur le disque (prechargement) */
 } App;
 
 typedef struct Node {
@@ -62,6 +70,7 @@ typedef struct Stat {
   char id[ID_LEN];
   int launches;
   time_t last;
+  long playtime;            /* temps de jeu cumule, en secondes */
 } Stat;
 
 typedef struct Menu {
@@ -73,6 +82,13 @@ typedef struct Menu {
   char theme[32];                     /* theme choisi */
   int show_folders;                   /* section « Mes dossiers » visible */
   int view;                           /* VIEW_* : presentation des jeux */
+  char (*favs)[ID_LEN]; int nfavs;    /* favoris */
+  int saver;                          /* economiseur d'ecran apres N minutes (0 = jamais) */
+  int sfx_pack;                       /* style des sons d'interface (0..SFX_PACKS-1) */
+  int boot_snd;                       /* son de demarrage (0..BOOT_SOUNDS-1, le dernier = aucun) */
+  int hide_ip;                        /* ne pas afficher l'adresse IP a l'ecran */
+  int boxes;                          /* jaquettes boites verticales (sinon icones carrees) */
+  int covers_online;                  /* jaquettes officielles telechargees (catalogue PlayStation) */
 } Menu;
 
 /* Applications */
@@ -90,10 +106,13 @@ Node *menu_new_folder(Menu *m, Node *parent, int index, const char *name, uint32
 int  menu_is_hidden(Menu *m, const char *id);
 void menu_set_hidden(Menu *m, const char *id, int hidden);
 void menu_rename_app(Menu *m, const char *id, const char *name);
+int  menu_is_fav(Menu *m, const char *id);
+void menu_set_fav(Menu *m, const char *id, int fav);
 
 /* Statistiques (sections intelligentes) */
 Stat *menu_stat(Menu *m, const char *id, int create);
 void  menu_record_launch(Menu *m, const char *id);
+int   menu_import_sessions(Menu *m, const char *path);   /* temps de jeu note par le bootstrap */
 
 /* Chargement / enregistrement */
 int  menu_load(Menu *m, const char *path);

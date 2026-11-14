@@ -16,7 +16,8 @@ UI_LIBS := $(HB)/lib/libSDL2main.a $(HB)/lib/libSDL2_mixer.a $(HB)/lib/libvorbis
            $(HB)/lib/libmodplug.a $(HB)/lib/libsamplerate.a $(HB)/lib/libSDL2.a $(HB)/lib/libSDL2_image.a \
            $(HB)/lib/libSDL2_ttf.a $(HB)/lib/libjansson.a $(HB)/lib/libfreetype.a \
            $(HB)/lib/libpng.a $(HB)/lib/libjpeg.a $(HB)/lib/libwebp.a $(HB)/lib/libwebpdemux.a \
-           $(HB)/lib/libsharpyuv.a \
+           $(HB)/lib/libsharpyuv.a $(HB)/lib/libcurl.a $(HB)/lib/libpsl.a $(HB)/lib/libssl.a \
+           $(HB)/lib/libcrypto.a $(HB)/lib/libzstd.a \
            -lSceSystemService -lSceUserService -lSceVideoOut -lSceAudioOut -lScePad \
            -lSceKeyboard -lSceImeDialog -lkernel_sys -lm -lz -lbz2 -liconv
 
@@ -32,7 +33,7 @@ build/launcher5-ui.elf: $(UI_SRCS) src/menu.h src/platform.h src/theme.h src/i18
 	$(CC) $(CFLAGS) -o $@ $(UI_SRCS) $(UI_LIBS)
 	$(STRIP) --strip-debug $@
 
-build/launcher5.elf: src/bootstrap.c src/i18n.c src/i18n.h src/version.h $(GPL_SRCS) build/launcher5-ui.elf assets/relay/param.json assets/relay/icon0.png
+build/launcher5.elf: src/bootstrap.c src/i18n.c src/i18n.h src/version.h $(GPL_SRCS) build/launcher5-ui.elf assets/relay/param.json assets/relay/icon0.png $(wildcard assets/fonds/*.jpg)
 	$(CC) $(CFLAGS) -o $@ src/bootstrap.c src/i18n.c $(GPL_SRCS) $(HB)/lib/libsqlite3.a -lkernel_sys -lSceSystemService -lSceUserService -lSceAppInstUtil -lpthread
 	$(STRIP) --strip-debug $@
 

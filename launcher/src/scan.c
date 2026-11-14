@@ -221,6 +221,7 @@ void scan_all(Menu *m) {
   /* section Parametres du launcher (les titres sont mis a jour par l'interface) */
   add_system(m, "cfg:theme", "Thème");
   add_system(m, "cfg:view", "Affichage");
+  add_system(m, "cfg:saver", "Économiseur d'écran");
   add_system(m, "cfg:return", "Retour automatique");
   add_system(m, "cfg:folders", "Mes dossiers");
   add_system(m, "cfg:hidden", "Éléments masqués");

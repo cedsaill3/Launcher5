@@ -2,22 +2,39 @@
 
 # Launcher5 — game loader pour PS5
 
-**par cedsaill** · v1.0.0 · [English below](#english)
+**par cedsaill** · v2.0.0 · [English below](#english)
 
 Launcher5 remplace la navigation dans tes jeux et homebrews par un vrai game loader :
-mur de jaquettes, cover flow en 3D, thèmes animés, dossiers, musique d'ambiance.
+jaquettes officielles, cover flow en 3D, thèmes animés, sons, dossiers, musique d'ambiance.
 
-![Cover Flow](docs/coverflow.png)
+![Cover Flow](docs/coverflow.jpg)
 
-| Grille | Studio Thème |
+| Grille | Carrousel |
 |---|---|
-| ![Grille](docs/grille.png) | ![Studio Thème](docs/studio-theme.png) |
+| ![Grille](docs/grille.jpg) | ![Carrousel](docs/carrousel.jpg) |
+
+| Paramètres (avec aperçu) | Studio Thème |
+|---|---|
+| ![Paramètres](docs/parametres.jpg) | ![Studio Thème](docs/studio-theme.png) |
+
+## Nouveautés de la v2
+- **Jaquettes officielles** des jeux PS5, téléchargées toutes seules depuis la
+  [base Launcher5](https://github.com/cedsaill3/Launcher5-covers) sur GitHub :
+  ça marche même quand les serveurs Sony sont bloqués par DNS
+- **Jaquettes boîtes** pour tous les autres jeux, fabriquées à partir de leur illustration
+  (bandeau PS5 / PS4), ou ta propre jaquette dans `jaquettes/`
+- **Menu Paramètres** complet, avec **aperçu en direct** de l'affichage choisi
+- **Sons** : 5 styles d'interface (Néon, Rétro 8-bit, Doux, Sci-fi, Cristal) et 6 sons de démarrage
+- **Masquer l'IP** à l'écran, pour les captures et les lives
+- 22 thèmes et 7 fonds d'écran inclus, effets animés (grille, hyperespace, pluie),
+  couleurs automatiques selon le jeu
+- Économiseur d'écran, temps de jeu, favoris
 
 ## Fonctions
 - **3 affichages** : Cover Flow (perspective 3D avec reflets), Grille, Carrousel — au **pavé tactile**
 - Sections : Jeux PS5, Jeux PS4, Médias, Homebrews, Émulateurs, Payloads, Récents, Mes dossiers
-- **Studio Thème** à la manette : 17 thèmes (Glitch, Acid, Blood, Terminal, Néon, Synthwave…),
-  couleurs, fond (illustration du jeu, dégradé ou image perso), halos, particules, horloge, musique
+- **Studio Thème** à la manette : couleurs, fond (illustration du jeu, dégradé ou image perso),
+  halos, particules, effets, horloge, musique
 - Dossiers colorés, noms personnalisés, jeux masqués, retour automatique après un jeu
 - **Multilingue automatique** selon la langue de la console : français, anglais, espagnol,
   allemand, italien, portugais — noms des jeux compris
@@ -44,8 +61,16 @@ Testé sur CFI-1216A, firmware 13.60.
 | ○ | retour |
 
 ## Personnaliser
-Dans `/data/launcher5` sur la PS5 : `fonds/` (images), `musique/` (ogg, mp3, flac, wav, mod…),
-`themes/` (.json) — par FTP. Le launcher recharge tout seul un menu ou un thème modifié.
+Dans `/data/launcher5` sur la PS5, par FTP :
+
+| Dossier | Contenu |
+|---|---|
+| `fonds/` | images de fond |
+| `musique/` | musiques d'ambiance (ogg, mp3, flac, wav, mod…) |
+| `themes/` | thèmes (.json) |
+| `jaquettes/` | jaquettes perso : `<ID du jeu>.jpg` ou `.png` (ex. `PPSA01234.jpg`) |
+
+Le launcher recharge tout seul un menu, un thème ou une jaquette modifiés.
 
 ## Compiler
 - PS5 : SDK [ps5-payload-dev](https://github.com/ps5-payload-dev/sdk), dans Ubuntu (WSL) :
@@ -56,15 +81,22 @@ Dans `/data/launcher5` sur la PS5 : `fonds/` (images), `musique/` (ogg, mp3, fla
 Launcher5 © 2026 cedsaill. Les chargeurs ELF (`launcher/gpl/`) et la méthode
 d'installation de la tuile viennent des projets de John Törnblom (GPL v3) : `launcher5.elf`
 est distribué sous **GPL v3** (voir [launcher/COPYING](launcher/COPYING)).
-Polices DejaVu : licence libre.
+Polices DejaVu : licence libre. Les jaquettes appartiennent à leurs éditeurs.
 
 ---
 
 ## English
 
-**Launcher5** is a game loader for jailbroken PS5 consoles, by **cedsaill**: Cover Flow with 3D
-perspective and reflections, cover grid, carousel, animated themes, folders, background music.
-The interface follows the console language (French, English, Spanish, German, Italian, Portuguese).
+**Launcher5** is a game loader for jailbroken PS5 consoles, by **cedsaill**: official covers,
+Cover Flow with 3D perspective and reflections, cover grid, carousel, animated themes,
+interface sounds, folders, background music. The interface follows the console language
+(French, English, Spanish, German, Italian, Portuguese).
+
+**New in v2:** official PS5 covers downloaded automatically from the
+[Launcher5 cover database](https://github.com/cedsaill3/Launcher5-covers) on GitHub (works even
+when Sony servers are blocked by DNS) · box covers for every other game · full Settings menu with
+live layout preview · 5 interface sound styles and 6 startup sounds · hide IP option ·
+22 themes, 7 bundled wallpapers and animated effects.
 
 **Install:** download `launcher5.elf` from [Releases](../../releases) and send
 `launcher5.elf` to your ELF loader (port 9021). A *Launcher5* tile is added to the PS5 home screen.
@@ -72,5 +104,7 @@ The interface follows the console language (French, English, Spanish, German, It
 **Controls:** touchpad = Cover Flow / Grid / Carousel · L1/R1 = sections · ✕ play · △ options ·
 □ move · ○ back.
 
+**Custom covers:** put `<game ID>.jpg` in `/data/launcher5/jaquettes/` over FTP.
+
 **License:** © 2026 cedsaill. Bundled ELF loaders by John Törnblom (GPL v3), so `launcher5.elf`
-is distributed under GPL v3.
+is distributed under GPL v3. Cover art belongs to its publishers.

@@ -18,6 +18,7 @@ enum { PART_NONE, PART_FEW, PART_MANY, PART_COUNT };         /* quantite de part
 enum { PSTYLE_DOTS, PSTYLE_SPARKS, PSTYLE_SNOW, PSTYLE_COUNT };
 enum { CORNER_SQUARE, CORNER_ROUND, CORNER_SOFT, CORNER_COUNT };
 enum { CLOCK_24, CLOCK_12, CLOCK_HIDDEN, CLOCK_COUNT };
+enum { FX_NONE, FX_GRID, FX_WARP, FX_RAIN, FX_COUNT };       /* effet anime du fond */
 
 typedef struct Theme {
   char name[48];
@@ -34,6 +35,9 @@ typedef struct Theme {
   int clock;                      /* CLOCK_* */
   char music[THEME_FILE_LEN];     /* "" aucune, "*" toutes a la suite, sinon un fichier de musique/ */
   int volume;                     /* 0..100 */
+  int fx;                         /* FX_* : grille synthwave, hyperespace, pluie de code */
+  int auto_color;                 /* 1 : couleurs prises sur la jaquette du jeu choisi */
+  int sfx;                        /* volume des sons d'interface, 0 = muets */
 } Theme;
 
 int theme_builtin_count(void);

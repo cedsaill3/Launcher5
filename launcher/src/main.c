@@ -29,26 +29,32 @@
 #endif
 #include <sys/stat.h>
 #include <unistd.h>
+#include <ctype.h>
+#include <jansson.h>
 
 extern const unsigned char font_regular[], font_bold[];
 extern const unsigned int font_regular_len, font_bold_len;
 
 #define W 1920
 #define H 1080
-#define TILE 230          /* tuiles carrees : image du jeu fournie par la PS5 */
-#define TILE_SEL 300
-#define FLOW 400          /* jaquette centrale du cover flow */
-#define FLOW_SIDE 300     /* jaquettes laterales */
+/* Tailles des jaquettes (largeur) : boites verticales ou icones carrees */
+#define BOXES (S.menu.boxes)
+#define TH(w) (BOXES ? (w) * 3 / 2 : (w))          /* hauteur d'une jaquette de largeur w (2:3) */
+#define TILE (BOXES ? 172 : 230)
+#define TILE_SEL (BOXES ? 224 : 300)
+#define FLOW (BOXES ? 300 : 400)                   /* jaquette centrale du cover flow */
+#define FLOW_SIDE (BOXES ? 224 : 300)              /* jaquettes laterales */
 #define FLOW_CY 440       /* centre vertical du cover flow */
-#define GRID_COLS 6
-#define GRID_CELL 210
+#define GRID_COLS (BOXES ? 7 : 6)
+#define GRID_CELL (BOXES ? 156 : 210)
 #define GRID_GAP 40
-#define GRID_ROWH 274
+#define GRID_ROWH (BOXES ? 278 : 274)
 #define GRID_Y 170
 #define ED_W 820          /* largeur du studio de theme */
 #define GAP 30
 #define CAR_X 110
 #define CAR_Y 690
+#define CAR_BOT (CAR_Y + 300)   /* bas des tuiles du carrousel */
 #define MAX_DEPTH 8
 
 /* ------------------------------------------------------------------ */
@@ -93,10 +99,13 @@ static const char *PALETTE_NAMES[] = {
 /* ------------------------------------------------------------------ */
 /* Sections                                                            */
 /* ------------------------------------------------------------------ */
-enum { SEC_HOME, SEC_PS5, SEC_PS4, SEC_MEDIA, SEC_HB, SEC_EMU, SEC_PAYLOAD, SEC_RECENT, SEC_SYS, SEC_COUNT };
+enum { SEC_HOME, SEC_FAV, SEC_PS5, SEC_PS4, SEC_MEDIA, SEC_HB, SEC_EMU, SEC_PAYLOAD, SEC_TOP, SEC_RECENT, SEC_SYS, SEC_COUNT };
 static const char *SEC_NAMES[SEC_COUNT] = {
-  "Mes dossiers", "Jeux PS5", "Jeux PS4", "Médias", "Homebrews", "Émulateurs", "Payloads", "Récents", "Paramètres"
+  "Mes dossiers", "Favoris", "Jeux PS5", "Jeux PS4", "Médias", "Homebrews", "Émulateurs", "Payloads", "Plus joués",
+  "Récents", "Paramètres"
 };
+/* sections triees par nom : saut par lettre (L2 / R2) */
+#define SEC_SORTED_BY_NAME(s) ((s) != SEC_HOME && (s) != SEC_RECENT && (s) != SEC_TOP)
 static const char *KIND_LABEL[KIND_COUNT] = { "JEU PS5", "JEU PS4", "HOMEBREW", "PAYLOAD", "MÉDIA", "RÉGLAGE" };
 static const char *VIEW_NAMES[VIEW_COUNT] = { "Cover Flow", "Grille", "Carrousel" };
 
@@ -119,12 +128,12 @@ static int sec_match(int sec, const App *a) {
 /* ------------------------------------------------------------------ */
 enum { MODE_BROWSE, MODE_CONTEXT, MODE_MOVE, MODE_KEYBOARD, MODE_PICKFOLDER, MODE_COLOR, MODE_THEME };
 /* lignes de l'editeur de theme */
-enum { R_PRESET, R_ACCENT, R_ACCENT2, R_TOP, R_BOTTOM, R_BG, R_WALL, R_ART, R_GLOW, R_PART, R_PSTYLE, R_FALL,
-       R_CORNERS, R_CLOCK, R_MUSIC, R_VOLUME, R_SAVE, R_DELETE, R_COUNT };
+enum { R_PRESET, R_AUTO, R_ACCENT, R_ACCENT2, R_TOP, R_BOTTOM, R_BG, R_WALL, R_ART, R_FX, R_GLOW, R_PART, R_PSTYLE,
+       R_FALL, R_CORNERS, R_CLOCK, R_SFX, R_MUSIC, R_VOLUME, R_SAVE, R_DELETE, R_COUNT };
 enum {
   ACT_LAUNCH, ACT_OPEN, ACT_MOVE, ACT_TO_FOLDER, ACT_OUT_OF_FOLDER, ACT_RENAME, ACT_HIDE,
   ACT_SHOW, ACT_COLOR, ACT_DELETE_FOLDER, ACT_NEW_FOLDER, ACT_TOGGLE_HIDDEN, ACT_RESET_NAME, ACT_THEME, ACT_SAVE_THEME,
-  ACT_VIEW,
+  ACT_VIEW, ACT_FAV, ACT_UNFAV,
 };
 
 typedef struct { int is_folder; int index; App *app; Node *node; } Entry;
@@ -139,8 +148,12 @@ static struct {
   Menu menu;
   char menu_path[PATH_LEN];
   int running;
-  Theme *th;                          /* theme affiche (cur, ou edit pendant l'edition) */
+  Theme *th;                          /* theme affiche a l'image en cours (copie de base, couleurs auto) */
+  Theme *base;                        /* theme de reference : cur, ou edit pendant l'edition */
+  Theme fth;                          /* theme de l'image en cours */
   Theme cur, edit;                    /* theme applique / en cours de modification */
+  uint32_t acc_now, acc2_now;         /* couleurs affichees (glissent vers celles du jeu) */
+  Uint32 sel_since;                   /* moment ou la selection a change */
   int th_ver;                         /* change a chaque modification (caches a refaire) */
   long long menu_sig, theme_sig;      /* fichiers tels que le launcher les connait */
   int tiles_corners;                  /* forme des tuiles deja calculees */
@@ -174,6 +187,7 @@ static struct {
   SDL_Texture *bgcache, *tile_glow, *btn_glow;
   App *bg_key_app;
   int bg_key_ver;
+  uint32_t bg_key_acc;
 
   Entry *entries; int nentries, capentries;
   int last_sel_key;
@@ -194,6 +208,18 @@ static struct {
   float dt;                           /* duree de la derniere image, en secondes */
 
   struct { float x, y, s, v; } part[70];
+
+  /* V2 */
+  struct { float x, y, z, px, py; } star[160];      /* hyperespace */
+  struct { float y, v; int len, seed; } drop[64];   /* pluie de code */
+  SDL_Texture *glyph[36];                           /* lettres de la pluie de code */
+  float grid_phase;
+  Uint32 last_input;                                /* economiseur d'ecran */
+  int saver_on, saver_idx, saver_prev; Uint32 saver_t;
+  Uint32 boot_t0; int boot_done;                    /* intro au demarrage */
+  char letter[8]; Uint32 letter_until;              /* saut par lettre */
+  char sysline[160]; Uint32 sys_t;                  /* IP, espace libre, temperature */
+  SDL_GameController *pads[4];
 } S;
 
 /* ------------------------------------------------------------------ */
@@ -411,6 +437,11 @@ static int cmp_recent(const void *a, const void *b) {
   time_t tx = x ? x->last : 0, ty = y ? y->last : 0;
   return ty > tx ? 1 : ty < tx ? -1 : 0;
 }
+static int cmp_playtime(const void *a, const void *b) {
+  Stat *x = menu_stat(&S.menu, ((const Entry *)a)->app->id, 0), *y = menu_stat(&S.menu, ((const Entry *)b)->app->id, 0);
+  long tx = x ? x->playtime : 0, ty = y ? y->playtime : 0;
+  return ty > tx ? 1 : ty < tx ? -1 : 0;
+}
 static int cmp_name(const void *a, const void *b) {
   return strcasecmp(menu_display_name(&S.menu, ((const Entry *)a)->app), menu_display_name(&S.menu, ((const Entry *)b)->app));
 }
@@ -434,15 +465,18 @@ static void build_entries(void) {
   for (int i = 0; i < S.menu.napps; i++) {
     App *a = &S.menu.apps[i];
     if (!S.show_hidden && menu_is_hidden(&S.menu, a->id)) continue;
-    if (S.sec == SEC_RECENT) {
+    if (S.sec == SEC_RECENT || S.sec == SEC_TOP) {
       Stat *st = menu_stat(&S.menu, a->id, 0);
-      if (!st || !st->last) continue;
+      if (!st || !(S.sec == SEC_RECENT ? st->last : st->playtime)) continue;
+    } else if (S.sec == SEC_FAV) {
+      if (!menu_is_fav(&S.menu, a->id)) continue;
     } else if (!sec_match(S.sec, a)) continue;
     Entry e = { 0, -1, a, NULL };
     push_entry(e);
   }
-  qsort(S.entries, S.nentries, sizeof(Entry), S.sec == SEC_RECENT ? cmp_recent : cmp_name);
-  if (S.sec == SEC_RECENT && S.nentries > 20) S.nentries = 20;
+  qsort(S.entries, S.nentries, sizeof(Entry),
+        S.sec == SEC_RECENT ? cmp_recent : S.sec == SEC_TOP ? cmp_playtime : cmp_name);
+  if ((S.sec == SEC_RECENT || S.sec == SEC_TOP) && S.nentries > 20) S.nentries = 20;
 }
 
 static void update_sections(void) {
@@ -450,9 +484,11 @@ static void update_sections(void) {
   for (int i = 0; i < S.menu.napps; i++) {
     App *a = &S.menu.apps[i];
     if (menu_is_hidden(&S.menu, a->id) && !S.show_hidden) continue;
-    for (int s = 1; s < SEC_COUNT; s++) if (s != SEC_RECENT && sec_match(s, a)) S.sec_has[s] = 1;
+    for (int s = 1; s < SEC_COUNT; s++) if (sec_match(s, a)) S.sec_has[s] = 1;
     Stat *st = menu_stat(&S.menu, a->id, 0);
     if (st && st->last) S.sec_has[SEC_RECENT] = 1;
+    if (st && st->playtime) S.sec_has[SEC_TOP] = 1;
+    if (menu_is_fav(&S.menu, a->id)) S.sec_has[SEC_FAV] = 1;
   }
 }
 
@@ -494,10 +530,53 @@ static SDL_Texture *load_tex(const char *path) {  /* charge une image */
   return t;
 }
 
+/* Couleur dominante et vive d'une image : teintes ponderees par leur eclat */
+static uint32_t hsv_rgb(float h, float s, float v) {
+  h = fmodf(h, 360.0f); if (h < 0) h += 360.0f;
+  float c = v * s, x = c * (1 - fabsf(fmodf(h / 60.0f, 2) - 1)), m = v - c, r, g, b;
+  if (h < 60) { r = c; g = x; b = 0; } else if (h < 120) { r = x; g = c; b = 0; }
+  else if (h < 180) { r = 0; g = c; b = x; } else if (h < 240) { r = 0; g = x; b = c; }
+  else if (h < 300) { r = x; g = 0; b = c; } else { r = c; g = 0; b = x; }
+  return (uint32_t)((int)((r + m) * 255) << 16 | (int)((g + m) * 255) << 8 | (int)((b + m) * 255));
+}
+
+static void compute_vibe(App *a, SDL_Surface *src) {
+  SDL_Surface *s = SDL_ConvertSurfaceFormat(src, SDL_PIXELFORMAT_ARGB8888, 0);
+  if (!s) return;
+  float bins[36] = { 0 };
+  int step = s->w > 64 ? s->w / 64 : 1;
+  for (int y = 0; y < s->h; y += step) {
+    Uint32 *row = (Uint32 *)((Uint8 *)s->pixels + y * s->pitch);
+    for (int x = 0; x < s->w; x += step) {
+      Uint32 p = row[x];
+      float r = ((p >> 16) & 255) / 255.0f, g = ((p >> 8) & 255) / 255.0f, b = (p & 255) / 255.0f;
+      float mx = fmaxf(r, fmaxf(g, b)), mn = fminf(r, fminf(g, b)), d = mx - mn;
+      if (d < 0.15f || mx < 0.2f || ((p >> 24) & 255) < 128) continue;   /* gris, sombre, transparent */
+      float h = mx == r ? 60 * fmodf((g - b) / d, 6) : mx == g ? 60 * ((b - r) / d + 2) : 60 * ((r - g) / d + 4);
+      if (h < 0) h += 360;
+      bins[(int)(h / 10) % 36] += (d / mx) * mx;
+    }
+  }
+  SDL_FreeSurface(s);
+  int best = 0;
+  float total = 0;
+  for (int i = 0; i < 36; i++) { total += bins[i]; if (bins[i] > bins[best]) best = i; }
+  if (total < 1) return;                       /* image sans couleur vive : on garde le theme */
+  float h = best * 10 + 5;
+  a->vibe = hsv_rgb(h, 0.85f, 1.0f);
+  a->vibe2 = hsv_rgb(h + 150, 0.75f, 1.0f);
+  a->has_vibe = 1;
+}
+
 /* Icone carree (icon0) */
 static SDL_Texture *cover(App *a) {
   if (a->tex || a->tex_failed) return a->tex;
-  a->tex = load_tex(a->icon);
+  SDL_Surface *s = a->icon[0] ? IMG_Load(a->icon) : NULL;
+  if (s) {
+    if (!a->has_vibe) compute_vibe(a, s);
+    a->tex = SDL_CreateTextureFromSurface(S.r, s);
+    SDL_FreeSurface(s);
+  }
   if (!a->tex) a->tex_failed = 1;
   return a->tex;
 }
@@ -520,21 +599,378 @@ static void mask_corners(int w, int h, int rad) {
   SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_BLEND);
 }
 
+/* ------------------------------------------------------------------ */
+/* Jaquettes « boite » : la PS5 ne fournit qu'une icone carree et une   */
+/* illustration large. On fabrique une jaquette verticale (illustration */
+/* recadree + icone) sur un fil a part, gardee en cache sur le disque.  */
+/* Une jaquette perso dans jaquettes/<ID>.jpg ou .png passe en premier. */
+/* ------------------------------------------------------------------ */
+#define BOXW 300
+#define BOXH 450
+static void drop_tiles(App *a);
+
+static struct {
+  SDL_mutex *mx;
+  int busy, done, custom, online, offline, prefetch;
+  char id[ID_LEN], bg[PATH_LEN], icon[PATH_LEN], mine[2][PATH_LEN], cache[PATH_LEN], off[PATH_LEN], none[PATH_LEN];
+  SDL_Surface *out;
+} BX;
+
+static SDL_Surface *argb(SDL_Surface *s) {       /* charge -> format unique ARGB8888 */
+  if (!s) return NULL;
+  if (s->format->format == SDL_PIXELFORMAT_ARGB8888) return s;
+  SDL_Surface *c = SDL_ConvertSurfaceFormat(s, SDL_PIXELFORMAT_ARGB8888, 0);
+  SDL_FreeSurface(s);
+  return c;
+}
+
+/* reduction lissee (par moities puis bilineaire) */
+static void stretch_smooth(SDL_Surface *src, SDL_Rect sr, SDL_Surface *dst, SDL_Rect *dr) {
+  int dw = dr ? dr->w : dst->w, dh = dr ? dr->h : dst->h;
+  SDL_Surface *cur = src, *tmp = NULL;
+  while (sr.w > dw * 2 && sr.h > dh * 2) {
+    SDL_Surface *n = SDL_CreateRGBSurfaceWithFormat(0, sr.w / 2, sr.h / 2, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (!n) break;
+    SDL_SoftStretchLinear(cur, &sr, n, NULL);
+    if (tmp) SDL_FreeSurface(tmp);
+    cur = tmp = n;
+    sr = (SDL_Rect){ 0, 0, n->w, n->h };
+  }
+  SDL_SoftStretchLinear(cur, &sr, dst, dr);
+  if (tmp) SDL_FreeSurface(tmp);
+}
+
+static SDL_Rect crop_to(SDL_Surface *s, int w, int h) {   /* recadrage centre au format w:h */
+  SDL_Rect r = { 0, 0, s->w, s->h };
+  if ((long)s->w * h > (long)s->h * w) { r.w = s->h * w / h; r.x = (s->w - r.w) / 2; }
+  else { r.h = s->w * h / w; r.y = (s->h - r.h) / 2; }
+  return r;
+}
+
+static void darken(SDL_Surface *s, int x0, int y0, int w, int h, int rad, float k) {
+  Uint32 *px = s->pixels;
+  int pitch = s->pitch / 4;
+  for (int y = y0; y < y0 + h; y++) {
+    if (y < 0 || y >= s->h) continue;
+    for (int x = x0; x < x0 + w; x++) {
+      if (x < 0 || x >= s->w) continue;
+      int dx = x < x0 + rad ? x0 + rad - x : x >= x0 + w - rad ? x - (x0 + w - rad - 1) : 0;
+      int dy = y < y0 + rad ? y0 + rad - y : y >= y0 + h - rad ? y - (y0 + h - rad - 1) : 0;
+      if (dx * dx + dy * dy > rad * rad) continue;
+      Uint32 p = px[y * pitch + x];
+      int r = (int)(((p >> 16) & 255) * k), g = (int)(((p >> 8) & 255) * k), b = (int)((p & 255) * k);
+      px[y * pitch + x] = 0xff000000u | (Uint32)(r << 16 | g << 8 | b);
+    }
+  }
+}
+
+static SDL_Surface *box_compose(const char *bg, const char *icon) {
+  SDL_Surface *ic = icon[0] ? argb(IMG_Load(icon)) : NULL;
+  SDL_Surface *art = bg[0] ? argb(IMG_Load(bg)) : NULL;
+  SDL_Surface *src = art ? art : ic;
+  if (!src) return NULL;
+  SDL_Surface *d = SDL_CreateRGBSurfaceWithFormat(0, BOXW, BOXH, 32, SDL_PIXELFORMAT_ARGB8888);
+  if (d) {
+    stretch_smooth(src, crop_to(src, BOXW, BOXH), d, NULL);
+    if (!art) darken(d, 0, 0, BOXW, BOXH, 0, 0.45f);   /* pas d'illustration : l'icone agrandie en fond */
+    /* bas assombri pour faire ressortir l'icone */
+    for (int y = BOXH * 45 / 100; y < BOXH; y++) {
+      float k = 1 - 0.7f * (y - BOXH * 45 / 100) / (float)(BOXH * 55 / 100);
+      darken(d, 0, y, BOXW, 1, 0, k);
+    }
+    if (ic) {
+      int is = BOXW * 60 / 100, x = (BOXW - is) / 2, y = BOXH - is - BOXW * 9 / 100, rad = is / 10;
+      darken(d, x + 4, y + 8, is, is, rad, 0.45f);  /* ombre */
+      SDL_Surface *t = SDL_CreateRGBSurfaceWithFormat(0, is, is, 32, SDL_PIXELFORMAT_ARGB8888);
+      if (t) {
+        stretch_smooth(ic, (SDL_Rect){ 0, 0, ic->w, ic->h }, t, NULL);
+        Uint32 *px = t->pixels;                  /* coins arrondis */
+        for (int yy = 0; yy < is; yy++)
+          for (int xx = 0; xx < is; xx++) {
+            int dx = xx < rad ? rad - xx : xx >= is - rad ? xx - (is - rad - 1) : 0;
+            int dy = yy < rad ? rad - yy : yy >= is - rad ? yy - (is - rad - 1) : 0;
+            if (dx * dx + dy * dy > rad * rad) px[yy * (t->pitch / 4) + xx] = 0;
+          }
+        SDL_SetSurfaceBlendMode(t, SDL_BLENDMODE_BLEND);
+        SDL_Rect dr = { x, y, is, is };
+        SDL_BlitSurface(t, NULL, d, &dr);
+        SDL_FreeSurface(t);
+      }
+    }
+  }
+  if (art) SDL_FreeSurface(art);
+  if (ic) SDL_FreeSurface(ic);
+  return d;
+}
+
+/* Base de jaquettes Launcher5 sur GitHub : index.txt (identifiant -> jeu) puis c/<jeu>.jpg.
+   Les serveurs Sony sont souvent bloques (DNS anti mises a jour), GitHub non. */
+#define COVERS_URL "https://raw.githubusercontent.com/cedsaill3/Launcher5-covers/main/"
+static char *cov_index;                          /* "\nPPSA01234 10000229\n..." */
+static int cov_index_tried;
+static const char *covers_url(void) {           /* L5_COVERS_URL : base locale pour les essais */
+  const char *e = getenv("L5_COVERS_URL");
+  return e && *e ? e : COVERS_URL;
+}
+
+static int recent_file(const char *path, int days) {
+  struct stat st;
+  return !stat(path, &st) && time(NULL) - st.st_mtime < (time_t)days * 86400;
+}
+
+/* 1 index pret, -1 indisponible (pas de reseau ou base absente) */
+static int covers_index(void) {
+  if (cov_index) return 1;
+  char path[PATH_LEN];
+  snprintf(path, sizeof path, "%s/cache/index.txt", plat_data_dir());
+  if (!recent_file(path, 7) && !cov_index_tried) {   /* rafraichi chaque semaine */
+    cov_index_tried = 1;
+    unsigned char *d; size_t n;
+    char url[300];
+    snprintf(url, sizeof url, "%sindex.txt", covers_url());
+    long code = plat_https_get(url, &d, &n, 8 << 20);
+    if (code == 200) {
+      FILE *f = fopen(path, "wb");
+      if (f) { fwrite(d, 1, n, f); fclose(f); }
+      free(d);
+    }
+  }
+  FILE *f = fopen(path, "rb");
+  if (!f) return -1;                             /* base pas encore en ligne : on reessaiera plus tard */
+  fseek(f, 0, SEEK_END);
+  long n = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  char *buf = n > 0 ? malloc((size_t)n + 2) : NULL;
+  if (buf) {
+    buf[0] = '\n';
+    buf[1 + fread(buf + 1, 1, (size_t)n, f)] = 0;
+  }
+  fclose(f);
+  cov_index = buf;
+  return buf ? 1 : -1;
+}
+
+/* Jaquette de la base. 1 : trouvee, 0 : ce jeu n'en a pas, -1 : pas de reseau */
+static int official_cover(const char *id, SDL_Surface **out) {
+  *out = NULL;
+  if (strlen(id) != 9) return 0;                 /* PPSA01234 */
+  for (int i = 0; i < 9; i++) if (i < 4 ? !isupper((unsigned char)id[i]) : !isdigit((unsigned char)id[i])) return 0;
+  int r = covers_index();
+  if (r <= 0) return r;
+  char key[16], concept[16] = "";
+  snprintf(key, sizeof key, "\n%s ", id);
+  const char *l = strstr(cov_index, key);
+  if (!l) return 0;
+  l += strlen(key);
+  for (int i = 0; i < 15 && isdigit((unsigned char)l[i]); i++) { concept[i] = l[i]; concept[i + 1] = 0; }
+  if (!concept[0]) return 0;
+  char url[256];
+  snprintf(url, sizeof url, "%sc/%s.jpg", covers_url(), concept);
+  unsigned char *d; size_t n;
+  long code = plat_https_get(url, &d, &n, 4 << 20);
+  if (!code) return -1;
+  if (code != 200) return 0;
+  SDL_Surface *s = argb(IMG_Load_RW(SDL_RWFromConstMem(d, (int)n), 1));
+  free(d);
+  if (!s) return 0;
+  SDL_Surface *b = SDL_CreateRGBSurfaceWithFormat(0, BOXW, BOXH, 32, SDL_PIXELFORMAT_ARGB8888);
+  if (b) stretch_smooth(s, crop_to(s, BOXW, BOXH), b, NULL);
+  SDL_FreeSurface(s);
+  if (!b) return 0;
+  *out = b;
+  return 1;
+}
+
+static int box_worker(void *u) {
+  (void)u;
+  for (;;) {
+    char id[ID_LEN], bg[PATH_LEN], icon[PATH_LEN], mine[2][PATH_LEN], cache[PATH_LEN], off[PATH_LEN], none[PATH_LEN];
+    SDL_LockMutex(BX.mx);
+    int go = BX.busy && !BX.done, online = BX.online;
+    if (go) {
+      memcpy(id, BX.id, sizeof id); memcpy(bg, BX.bg, sizeof bg); memcpy(icon, BX.icon, sizeof icon);
+      memcpy(mine, BX.mine, sizeof mine); memcpy(cache, BX.cache, sizeof cache);
+      memcpy(off, BX.off, sizeof off); memcpy(none, BX.none, sizeof none);
+    }
+    SDL_UnlockMutex(BX.mx);
+    if (!go) { SDL_Delay(15); continue; }
+    SDL_Surface *s = NULL;
+    int custom = 0;
+    for (int i = 0; i < 2 && !s; i++)            /* jaquette perso */
+      if (access(mine[i], R_OK) == 0 && (s = argb(IMG_Load(mine[i])))) {
+        SDL_Surface *d = SDL_CreateRGBSurfaceWithFormat(0, BOXW, BOXH, 32, SDL_PIXELFORMAT_ARGB8888);
+        if (d) stretch_smooth(s, crop_to(s, BOXW, BOXH), d, NULL);
+        SDL_FreeSurface(s);
+        s = d; custom = 1;
+      }
+    if (!s && online) {                          /* jaquette officielle : en cache, sinon telechargee */
+      if (access(off, R_OK) == 0) {
+        s = argb(IMG_Load(off));
+        if (s && (s->w != BOXW || s->h != BOXH)) { SDL_FreeSurface(s); s = NULL; }
+      }
+      if (!s && !BX.offline && !recent_file(none, 7)) {   /* « pas de jaquette » redemande chaque semaine */
+        int r = official_cover(id, &s);
+        if (r > 0) { IMG_SaveJPG(s, off, 90); plat_log("jaquette officielle : %s", id); }
+        else if (r == 0) { FILE *f = fopen(none, "w"); if (f) fclose(f); }   /* pas de jaquette : on ne redemande pas */
+        else { BX.offline = 1; plat_log("jaquettes officielles : pas d'acces a la base (GitHub)"); }
+      }
+      if (s) custom = 1;                         /* telle quelle, sans bandeau */
+    }
+    if (!s && access(cache, R_OK) == 0) {        /* deja fabriquee */
+      s = argb(IMG_Load(cache));
+      if (s && (s->w != BOXW || s->h != BOXH)) { SDL_FreeSurface(s); s = NULL; }
+    }
+    if (!s && (s = box_compose(bg, icon))) IMG_SaveJPG(s, cache, 90);
+    SDL_LockMutex(BX.mx);
+    if (BX.prefetch && s) { SDL_FreeSurface(s); s = NULL; }
+    BX.out = s; BX.custom = custom; BX.done = 1;
+    SDL_UnlockMutex(BX.mx);
+  }
+  return 0;
+}
+
+static void safe_id(const char *id, char *out, size_t n) {
+  size_t i = 0;
+  for (; id[i] && i + 1 < n; i++) out[i] = isalnum((unsigned char)id[i]) || id[i] == '-' ? id[i] : '_';
+  out[i] = 0;
+}
+
+/* signature de la jaquette perso d'un jeu (0 = aucune) */
+static long long cover_sig(App *a) {
+  char sid[ID_LEN], path[PATH_LEN];
+  long long sig = 0;
+  safe_id(a->id, sid, sizeof sid);
+  for (int i = 0; i < 2; i++) {
+    struct stat st;
+    snprintf(path, sizeof path, "%s/jaquettes/%s.%s", plat_data_dir(), sid, i ? "png" : "jpg");
+    if (!stat(path, &st)) sig = sig * 31 + (long long)st.st_mtime * 1000003 + st.st_size + i + 1;
+  }
+  return sig;
+}
+
+/* confie un jeu au fil ; prefetch : seulement preparer sa jaquette sur le disque */
+static int box_submit(App *a, int prefetch) {
+  if (!BX.mx) {
+    BX.mx = SDL_CreateMutex();
+    SDL_Thread *th = BX.mx ? SDL_CreateThread(box_worker, "boxes", NULL) : NULL;
+    if (!th) { plat_log("jaquettes boites : fil impossible"); a->box_state = 3; return 0; }
+    SDL_DetachThread(th);
+  }
+  SDL_LockMutex(BX.mx);
+  int ok = !BX.busy;
+  if (ok) {
+    char sid[ID_LEN];
+    safe_id(a->id, sid, sizeof sid);
+    snprintf(BX.id, sizeof BX.id, "%s", a->id);
+    snprintf(BX.bg, sizeof BX.bg, "%s", a->bg);
+    snprintf(BX.icon, sizeof BX.icon, "%s", a->icon);
+    snprintf(BX.mine[0], sizeof BX.mine[0], "%s/jaquettes/%s.jpg", plat_data_dir(), sid);
+    snprintf(BX.mine[1], sizeof BX.mine[1], "%s/jaquettes/%s.png", plat_data_dir(), sid);
+    snprintf(BX.cache, sizeof BX.cache, "%s/cache/%s.jpg", plat_data_dir(), sid);
+    snprintf(BX.off, sizeof BX.off, "%s/cache/%s.off.jpg", plat_data_dir(), sid);
+    snprintf(BX.none, sizeof BX.none, "%s/cache/%s.none", plat_data_dir(), sid);
+    BX.online = S.menu.covers_online;
+    BX.prefetch = prefetch;
+    BX.busy = 1; BX.done = 0;
+    if (!prefetch) { a->box_state = 1; a->box_sig = cover_sig(a); }
+  }
+  SDL_UnlockMutex(BX.mx);
+  return ok;
+}
+
+/* jaquette boite prete, ou NULL (elle arrive : une version provisoire est affichee) */
+static SDL_Texture *box_art(App *a) {
+  if (a->box_state == 2) return a->boxtex;
+  if (a->box_state && a->box_state != 4) return NULL;
+  if (!box_submit(a, 0)) a->box_state = 4;       /* en attente : lancee des que le fil est libre */
+  return NULL;
+}
+
+/* a chaque image : recupere la jaquette terminee par le fil */
+static void box_poll(void) {
+  if (!BX.mx) return;
+  SDL_LockMutex(BX.mx);
+  SDL_Surface *s = NULL;
+  char id[ID_LEN] = "";
+  int custom = 0, got = BX.busy && BX.done, busy = BX.busy, pref = BX.prefetch;
+  if (got) { s = BX.out; BX.out = NULL; custom = BX.custom; snprintf(id, sizeof id, "%s", BX.id); BX.busy = BX.done = 0; }
+  SDL_UnlockMutex(BX.mx);
+  if (!got) {                                    /* fil libre : jaquette demandee, sinon prechargement */
+    if (busy || !BOXES) return;
+    for (int i = 0; i < S.menu.napps; i++) if (S.menu.apps[i].box_state == 4) { box_art(&S.menu.apps[i]); return; }
+    if (S.launching || !S.boot_done) return;
+    for (int i = 0; i < S.menu.napps; i++) {
+      App *a = &S.menu.apps[i];
+      if (!a->box_state && !a->box_pref && a->kind != KIND_SYSTEM) { if (box_submit(a, 1)) a->box_pref = 1; return; }
+    }
+    return;
+  }
+  App *a = menu_find_app(&S.menu, id);
+  if (pref) { if (s) SDL_FreeSurface(s); return; }   /* prechargement : rien a afficher */
+  if (a && s) {
+    a->boxtex = SDL_CreateTextureFromSurface(S.r, s);
+    a->box_state = a->boxtex ? 2 : 3;
+    a->box_custom = custom;
+    drop_tiles(a);                               /* la version provisoire est remplacee */
+  } else if (a) a->box_state = 3;
+  if (s) SDL_FreeSurface(s);
+}
+
+/* jaquette perso ajoutee, changee ou retiree (Forge5, FTP) : on la refait */
+static void box_check_custom(void) {
+  if (!BOXES) return;
+  for (int i = 0; i < S.menu.napps; i++) {
+    App *a = &S.menu.apps[i];
+    if (a->box_state != 2 && a->box_state != 3) continue;
+    if (cover_sig(a) == a->box_sig) continue;
+    if (a->boxtex) { SDL_DestroyTexture(a->boxtex); a->boxtex = NULL; }
+    a->box_state = 0;
+    drop_tiles(a);
+    plat_log("jaquette mise a jour : %s", a->id);
+  }
+}
+
+/* contenu d'une jaquette boite (w x h) dans la cible de rendu courante */
+static void draw_box_contents(App *a, int w, int h) {
+  SDL_Texture *art = box_art(a);
+  if (art) SDL_RenderCopy(S.r, art, NULL, NULL);
+  else {                                         /* provisoire : icone sur fond sombre */
+    uint32_t c = a->has_vibe ? a->vibe : hash_color(a->id);
+    fill_round(0, 0, w, h, 0, shade(c, 0.22f), 255);
+    SDL_Texture *ic = cover(a);
+    int is = w * 80 / 100;
+    if (ic) { SDL_Rect d = { (w - is) / 2, (h - is) / 2, is, is }; SDL_RenderCopy(S.r, ic, NULL, &d); }
+  }
+  if (a->box_state == 2 && a->box_custom) return; /* jaquette perso : telle quelle */
+  /* bandeau du haut, facon boitier */
+  int bh = h * 9 / 100;
+  uint32_t bc = a->kind == KIND_PS5 ? 0xf4f4f4 : a->kind == KIND_PS4 ? 0x0a3d91 : S.th->accent;
+  uint32_t tc = a->kind == KIND_PS5 ? 0x0a0a12 : 0xffffff;
+  fill_round(0, 0, w, bh, 0, bc, 255);
+  const char *lab = a->kind == KIND_PS5 ? "PS5" : a->kind == KIND_PS4 ? "PS4" : KIND_LABEL[a->kind];
+  if (w >= 300) draw_text(S.f26, lab, w / 2, (bh - 30) / 2, tc, 1, w - 60);
+}
+
 /* Tuile complete au format boite (w x h), calculee une seule fois :
    jaquette verticale si on l'a, sinon carte avec l'icone et le nom. */
 static SDL_Texture *tile_tex(App *a, int w, int h) {
   void **slot = w == TILE ? &a->tex_s : w == TILE_SEL ? &a->tex_l : w == FLOW ? &a->tex_xl : NULL;
   if (!slot) return NULL;                    /* seules ces tailles sont mises en cache */
   if (*slot) return *slot;
+  SDL_Texture *big = BOXES && w != FLOW ? tile_tex(a, FLOW, TH(FLOW)) : NULL;   /* petites boites : reduites */
   SDL_Texture *t = SDL_CreateTexture(S.r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, w, h);
   if (!t) return NULL;
   SDL_Texture *prev_rt = SDL_GetRenderTarget(S.r);
   SDL_SetRenderTarget(S.r, t);
   SDL_SetRenderDrawColor(S.r, 0, 0, 0, 0);
   SDL_RenderClear(S.r);
-  SDL_Texture *img = cover(a);
-  if (img) SDL_RenderCopy(S.r, img, NULL, NULL);
-  else draw_card_contents(a, w, h);
+  if (big) SDL_RenderCopy(S.r, big, NULL, NULL);
+  else if (BOXES) draw_box_contents(a, w, h);
+  else {
+    SDL_Texture *img = cover(a);
+    if (img) SDL_RenderCopy(S.r, img, NULL, NULL);
+    else draw_card_contents(a, w, h);
+  }
   mask_corners(w, h, tile_rad() * w / TILE_SEL);
   SDL_SetRenderTarget(S.r, prev_rt);   /* cible d'avant (dessin imbrique) */
   SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
@@ -659,10 +1095,12 @@ static void draw_background(Entry *e) {
   static App *pending = NULL; static Uint32 since = 0;
   if (key_app != pending) { pending = key_app; since = SDL_GetTicks(); }
   int stable = SDL_GetTicks() - since > 150 || !S.bgcache;
-  if (stable && (S.bg_key_app != key_app || S.bg_key_ver != S.th_ver || (key_app && !key_app->bgtex && !key_app->bg_failed) || !S.bgcache)) {
+  if (stable && (S.bg_key_app != key_app || S.bg_key_ver != S.th_ver || S.bg_key_acc != (S.th->accent ^ S.th->accent2 << 1) ||
+                 (key_app && !key_app->bgtex && !key_app->bg_failed) || !S.bgcache)) {
     if (!S.bgcache) S.bgcache = SDL_CreateTexture(S.r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, W, H);
     S.bg_key_app = key_app;
     S.bg_key_ver = S.th_ver;
+    S.bg_key_acc = S.th->accent ^ S.th->accent2 << 1;
     SDL_SetRenderTarget(S.r, S.bgcache);
     S.bg_cur = S.bg_prev = NULL;
     S.bg_fade = 1;
@@ -723,7 +1161,113 @@ static void draw_background_full(Entry *e, int animated) {
   SDL_Rect bottom = { 0, H / 2, W, H / 2 };
   SDL_RenderCopy(S.r, S.shade_bottom, NULL, &bottom);
 
+  if (S.th->fx == FX_GRID) {                     /* soleil retro pose sur l'horizon */
+    int cx = W / 2, cy = 560, R = 250;
+    for (int y = -R; y < R / 3; y += 2) {
+      float k = (float)(y + R) / (R * 4 / 3);
+      if (y > -R / 4 && ((y + R) / 2) % (6 + (y + R / 4) / 14) < 2 + (y + R / 4) / 10) continue;   /* bandes */
+      int hw = (int)sqrtf((float)R * R - (float)y * y);
+      uint32_t c1 = S.th->accent, c2 = S.th->accent2;
+      uint32_t c = (uint32_t)(((int)(((c2 >> 16) & 255) * (1 - k) + ((c1 >> 16) & 255) * k)) << 16 |
+                              ((int)(((c2 >> 8) & 255) * (1 - k) + ((c1 >> 8) & 255) * k)) << 8 |
+                              ((int)((c2 & 255) * (1 - k) + (c1 & 255) * k)));
+      set_color(c, 150);
+      SDL_Rect rr = { cx - hw, cy + y, hw * 2, 2 };
+      SDL_RenderFillRect(S.r, &rr);
+    }
+  }
+
   if (animated) draw_particles(0);
+}
+
+/* ------------------------------------------------------------------ */
+/* Effets de fond animes (V2)                                          */
+/* ------------------------------------------------------------------ */
+static void fx_grid(void) {                      /* grille synthwave qui avance vers toi */
+  int hz = 600, vx = W / 2;
+  S.grid_phase += S.dt * 0.6f;
+  if (S.grid_phase > 1) S.grid_phase -= 1;
+  set_color(S.th->accent, 120);
+  SDL_RenderDrawLine(S.r, 0, hz, W, hz);
+  int n = S.lite ? 12 : 18;
+  for (int k = 0; k < n; k++) {
+    float t = (k + S.grid_phase) / n, y = hz + (H - hz) * t * t;
+    set_color(S.th->accent, (int)(20 + 90 * t));
+    SDL_RenderDrawLine(S.r, 0, (int)y, W, (int)y);
+  }
+  for (int i = -12; i <= 12; i++) {
+    set_color(S.th->accent, 50);
+    SDL_RenderDrawLine(S.r, vx + i * 30, hz, vx + i * 260, H);
+  }
+}
+
+static void fx_warp(void) {                      /* hyperespace : etoiles qui filent */
+  int n = S.lite ? 80 : 160;
+  float sp = S.dt * 60;
+  for (int i = 0; i < n; i++) {
+    if (S.star[i].z <= 0.02f) {
+      S.star[i].x = (rand() % 2000 - 1000) / 1000.0f; S.star[i].y = (rand() % 2000 - 1000) / 1000.0f;
+      S.star[i].z = 1; S.star[i].px = S.star[i].py = -1;
+    }
+    S.star[i].z -= 0.006f * sp * (0.5f + S.star[i].z);
+    if (S.star[i].z <= 0.02f) continue;
+    float sx = W / 2 + S.star[i].x / S.star[i].z * W * 0.5f, sy = H / 2 + S.star[i].y / S.star[i].z * H * 0.5f;
+    if (sx < 0 || sx > W || sy < 0 || sy > H) { S.star[i].z = 0; continue; }
+    if (S.star[i].px >= 0) {
+      int a = (int)(255 * (1.15f - S.star[i].z));
+      if (a > 255) a = 255;
+      set_color(i % 3 ? 0xffffff : S.th->accent, a);
+      /* trainee allongee vers le centre, epaisse de 2 pixels quand l'etoile est proche */
+      float tx = sx - (sx - W / 2) * 0.06f, ty = sy - (sy - H / 2) * 0.06f;
+      SDL_RenderDrawLine(S.r, (int)tx, (int)ty, (int)sx, (int)sy);
+      if (S.star[i].z < 0.5f) SDL_RenderDrawLine(S.r, (int)tx + 1, (int)ty, (int)sx + 1, (int)sy);
+    }
+    S.star[i].px = sx; S.star[i].py = sy;
+  }
+}
+
+static void fx_rain(void) {                      /* pluie de code */
+  static const char CH[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  if (!S.glyph[0]) {
+    for (int i = 0; i < 36; i++) {
+      char s[2] = { CH[i], 0 };
+      SDL_Color w = { 255, 255, 255, 255 };
+      SDL_Surface *g = TTF_RenderUTF8_Blended(S.f22, s, w);
+      if (!g) return;
+      S.glyph[i] = SDL_CreateTextureFromSurface(S.r, g);
+      SDL_FreeSurface(g);
+      if (!S.glyph[i]) return;
+      SDL_SetTextureBlendMode(S.glyph[i], SDL_BLENDMODE_BLEND);
+    }
+  }
+  int cols = S.lite ? 32 : 48, cw = W / cols, gh = 26;
+  for (int c = 0; c < cols; c++) {
+    if (S.drop[c].v <= 0) { S.drop[c].v = 3 + rand() % 6; S.drop[c].y = -(rand() % H); S.drop[c].len = 8 + rand() % 14; S.drop[c].seed = rand(); }
+    S.drop[c].y += S.drop[c].v * S.dt * 60;
+    if (S.drop[c].y - S.drop[c].len * gh > H) S.drop[c].v = 0;
+    int head = (int)(S.drop[c].y / gh);
+    for (int k = 0; k < S.drop[c].len; k++) {
+      int row = head - k, y = row * gh;
+      if (y < -gh || y > H) continue;
+      SDL_Texture *t = S.glyph[(unsigned)(S.drop[c].seed + row * 7 + (k == 0 ? S.frame / 4 : 0)) % 36];
+      uint32_t col = k == 0 ? 0xffffff : S.th->accent;
+      SDL_SetTextureColorMod(t, (col >> 16) & 255, (col >> 8) & 255, col & 255);
+      int al = k == 0 ? 150 : 95 * (S.drop[c].len - k) / S.drop[c].len;
+      if (y < 150) al = al * (y < 0 ? 0 : y) / 150 / 3;      /* presque invisible derriere la barre du haut */
+      SDL_SetTextureAlphaMod(t, (Uint8)al);
+      int w, h; SDL_QueryTexture(t, NULL, NULL, &w, &h);
+      SDL_Rect d = { c * cw + (cw - w) / 2, y, w, h };
+      SDL_RenderCopy(S.r, t, NULL, &d);
+    }
+  }
+}
+
+static void draw_fx(void) {
+  switch (S.th->fx) {
+  case FX_GRID: fx_grid(); break;
+  case FX_WARP: fx_warp(); break;
+  case FX_RAIN: fx_rain(); break;
+  }
 }
 
 static void draw_topbar(void) {
@@ -734,22 +1278,42 @@ static void draw_topbar(void) {
   draw_text(S.f36, "5", lx + lw + 4, 44, S.th->accent, 0, 0);
   draw_text_a(S.f22, "v" L5_VERSION "  ·  by " L5_AUTHOR, lx + 2, 90, 0x9aa4b5, 0, 0, 150);
 
-  /* sections */
-  int x = lx + lw + 90, tx = 0, tw = 0;
+  /* sections : la bande defile si elles ne tiennent pas toutes */
+  int x0 = lx + lw + 90, x1 = S.mode == MODE_THEME ? W - 880 : W - CAR_X - 230;
+  int total = 0, cur_x = 0, cur_w = 0;
   for (int s = 0; s < SEC_COUNT; s++) {
     if (!S.sec_has[s]) continue;
     int w = text_w(S.f26, SEC_NAMES[s]);
-    if (S.mode == MODE_THEME && x + w > W - 880) break;   /* sous le studio de theme */
+    if (s == S.sec) { cur_x = total; cur_w = w; }
+    total += w + 46;
+  }
+  static float off;
+  float want = 0;
+  if (total - 46 > x1 - x0) {
+    want = cur_x + cur_w / 2.0f - (x1 - x0) / 2.0f;
+    if (want < 0) want = 0;
+    if (want > total - 46 - (x1 - x0)) want = (float)(total - 46 - (x1 - x0));
+  }
+  off += (want - off) * ease(0.25f);
+  SDL_Rect clip = { x0 - 4, 30, x1 - x0 + 8, 90 };
+  SDL_RenderSetClipRect(S.r, &clip);
+  int x = x0 - (int)off, tx = 0, tw = 0;
+  for (int s = 0; s < SEC_COUNT; s++) {
+    if (!S.sec_has[s]) continue;
+    int w = text_w(S.f26, SEC_NAMES[s]);
     int on = s == S.sec;
     draw_text(S.f26, SEC_NAMES[s], x, 52, on ? 0xffffff : 0x9aa4b5, 0, 0);
     if (on) { tx = x; tw = w; }
     x += w + 46;
   }
+  if (off > 1) draw_text(S.f26, "‹", x0 - 26, 50, S.th->accent, 0, 0);
+  if (want < total - 46 - (x1 - x0) - 1 && total - 46 > x1 - x0) draw_text(S.f26, "›", x1 - 6, 50, S.th->accent, 0, 0);
   if (!S.tab_w) { S.tab_x = (float)tx; S.tab_w = (float)tw; }
   S.tab_x += (tx - S.tab_x) * ease(0.25f);
   S.tab_w += (tw - S.tab_w) * ease(0.25f);
   fill_round((int)S.tab_x, 92, (int)S.tab_w, 5, 2, S.th->accent, 255);
   if (!S.lite) glow((int)(S.tab_x + S.tab_w / 2), 94, (int)(S.tab_w * 0.9f), S.th->accent, ga(90));
+  SDL_RenderSetClipRect(S.r, NULL);
 
   /* heure et date */
   time_t now = time(NULL);
@@ -764,6 +1328,28 @@ static void draw_topbar(void) {
   snprintf(day, sizeof day, "%s %d/%02d", tr(JOURS[tm->tm_wday]), tm->tm_mday, tm->tm_mon + 1);
   draw_text(S.f36, clk, W - CAR_X, 40, 0xffffff, 2, 0);
   draw_text(S.f22, day, W - CAR_X, 86, 0x9aa4b5, 2, 0);
+  /* IP (pratique pour le FTP), espace libre, temperature : mis a jour toutes les 5 s */
+  if (!S.sys_t || SDL_GetTicks() - S.sys_t > 5000) {
+    char ip[64]; long long mb; int tc;
+    plat_sysinfo(ip, sizeof ip, &mb, &tc);
+    char part[3][48] = { "", "", "" };
+    if (ip[0] && !S.menu.hide_ip) snprintf(part[0], sizeof part[0], "%s", ip);
+    if (mb >= 0) snprintf(part[1], sizeof part[1], mb >= 10240 ? tr("%lld Go libres") : tr("%lld Mo libres"),
+                          mb >= 10240 ? mb / 1024 : mb);
+    if (tc > 0) snprintf(part[2], sizeof part[2], "%d°C", tc);
+    S.sysline[0] = 0;
+    for (int i = 0; i < 3; i++) if (part[i][0]) {
+      if (S.sysline[0]) strncat(S.sysline, "  ·  ", sizeof S.sysline - strlen(S.sysline) - 1);
+      strncat(S.sysline, part[i], sizeof S.sysline - strlen(S.sysline) - 1);
+    }
+    S.sys_t = SDL_GetTicks();
+  }
+  if (S.sysline[0]) draw_text_a(S.f22, S.sysline, W - CAR_X, 114, 0x9aa4b5, 2, 0, 170);
+}
+
+static void playtime_str(long secs, char *out, size_t n) {
+  if (secs < 3600) snprintf(out, n, tr("%ld min de jeu"), secs / 60 > 0 ? secs / 60 : 1);
+  else snprintf(out, n, tr("%ld h %02ld de jeu"), secs / 3600, (secs % 3600) / 60);
 }
 
 static void ago(time_t when, char *out, size_t n) {
@@ -792,6 +1378,7 @@ static void meta_line(Entry *e, char *meta, size_t n) {
       { "cfg:return", "Revenir au launcher tout seul quand tu fermes un jeu" },
       { "cfg:folders", "Affiche la section où tu ranges tes jeux dans tes dossiers" },
       { "cfg:hidden", "Montre ou cache les jeux que tu as masqués" },
+      { "cfg:saver", "Diaporama de tes jaquettes quand la manette ne bouge plus" },
       { "sys:home", "Ferme le launcher et revient à l'accueil de la PS5" },
     };
     snprintf(meta, n, "Réglage");
@@ -799,7 +1386,13 @@ static void meta_line(Entry *e, char *meta, size_t n) {
       if (!strcmp(DESC[i][0], e->app->id)) snprintf(meta, n, "%s", DESC[i][1]);
   } else {
     Stat *st = menu_stat(&S.menu, e->app->id, 0);
-    if (st && st->launches) {
+    if (st && st->playtime > 0) {
+      char when[40], pt[48];
+      ago(st->last, when, sizeof when);
+      playtime_str(st->playtime, pt, sizeof pt);
+      if (st->last) snprintf(meta, n, tr("%s  ·  Dernière session %s"), pt, when);
+      else snprintf(meta, n, "%s", pt);
+    } else if (st && st->launches) {
       char when[40];
       ago(st->last, when, sizeof when);
       snprintf(meta, n, tr("Lancé %d fois  ·  Dernière session %s"), st->launches, when);
@@ -868,19 +1461,26 @@ static void draw_hero(Entry *e) {
 
 static int show_badges(void) { return S.sec == SEC_HOME || S.sec == SEC_RECENT || S.sec == SEC_MEDIA || S.sec == SEC_EMU; }
 
+static void fav_badge(int x, int y, int w) {
+  int s = w >= 300 ? 44 : 36;
+  fill_round(x + w - s - 10, y + 10, s, s, s / 2, 0x000000, 180);
+  draw_text(s >= 44 ? S.f30 : S.f22, "★", x + w - 10 - s / 2, y + (s >= 44 ? 13 : 13), S.th->accent, 1, 0);
+}
+
 static void draw_app_tile(App *a, int x, int y, int w, int h) {
   int ts = w <= TILE ? TILE : TILE_SEL;
-  SDL_Texture *t = tile_tex(a, ts, ts);
+  SDL_Texture *t = tile_tex(a, ts, TH(ts));
   if (t) {
     SDL_Rect d = { x, y, w, h };
     SDL_RenderCopy(S.r, t, NULL, &d);
   }
-  if (show_badges() && a->kind != KIND_PS5) {
+  if (show_badges() && a->kind != KIND_PS5 && !BOXES) {
     const char *b = KIND_LABEL[a->kind];
     int bw = text_w(S.f22, b);
     fill_round(x + 10, y + 10, bw + 18, 32, 9, 0x000000, 175);
     draw_text(S.f22, b, x + 19, y + 13, 0xffffff, 0, 0);
   }
+  if (menu_is_fav(&S.menu, a->id)) fav_badge(x, y, w);
   if (menu_is_hidden(&S.menu, a->id)) {
     fill_round(x, y, w, h, tile_rad() * w / TILE_SEL, 0x000000, 160);
     draw_text(S.f26, "masqué", x + w / 2, y + h / 2 - 16, 0xcccccc, 1, 0);
@@ -902,8 +1502,12 @@ static void draw_folder_tile(Node *f, int x, int y, int w, int h) {
     else {
       App *a = menu_find_app(&S.menu, n->ref);
       if (!a) continue;
-      SDL_Texture *t = tile_tex(a, TILE, TILE);
-      if (t) { SDL_Rect d = { mx, my, mw, mh }; SDL_RenderCopy(S.r, t, NULL, &d); }
+      SDL_Texture *t = tile_tex(a, TILE, TH(TILE));
+      if (t) {
+        int sh = TILE * mh / mw;
+        SDL_Rect sr = { 0, (TH(TILE) - sh) / 2, TILE, sh }, d = { mx, my, mw, mh };
+        SDL_RenderCopy(S.r, t, &sr, &d);
+      }
     }
     shown++;
   }
@@ -932,8 +1536,8 @@ static void draw_carousel(void) {
     float x = CAR_X + rel * (TILE + GAP) + push * (TILE_SEL - TILE);
     if (x > W + 20 || x < -TILE_SEL - 40) continue;
     int w = is_sel ? (int)(TILE + (TILE_SEL - TILE) * S.sel_anim) : TILE;
-    int h = w;
-    int ix = (int)x, iy = CAR_Y + (TILE_SEL - h);
+    int h = TH(w);
+    int ix = (int)x, iy = CAR_BOT - h;
     int fade = rel < -0.5f ? (int)(255 * (1 + (rel + 0.5f) * 0.9f)) : 255;
     if (fade < 30) continue;
     Entry *e = &S.entries[i];
@@ -1011,7 +1615,7 @@ static uint32_t folder_key(Node *f) {
   uint32_t h = 2166136261u;
 #define MIX(x) h = (h ^ (uint32_t)(x)) * 16777619u
   for (const char *s = f->name; *s; s++) MIX((unsigned char)*s);
-  MIX(f->color); MIX(f->count); MIX(S.th_ver); MIX(S.th->corners);
+  MIX(f->color); MIX(f->count); MIX(S.th_ver); MIX(S.th->corners); MIX(BOXES);
   for (int i = 0; i < f->count && i < 4; i++) {
     const char *r = f->items[i].is_folder ? f->items[i].name : f->items[i].ref;
     for (; *r; r++) MIX((unsigned char)*r);
@@ -1029,7 +1633,7 @@ static SDL_Texture *folder_tex(Node *f) {
     if (!FCACHE[i].t || (FCACHE[slot].t && FCACHE[i].used < FCACHE[slot].used)) slot = i;
   }
   if (!FCACHE[slot].t) {
-    FCACHE[slot].t = SDL_CreateTexture(S.r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, FLOW, FLOW);
+    FCACHE[slot].t = SDL_CreateTexture(S.r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, FLOW, TH(FLOW));
     if (!FCACHE[slot].t) return NULL;
     SDL_SetTextureBlendMode(FCACHE[slot].t, SDL_BLENDMODE_BLEND);
   }
@@ -1037,8 +1641,8 @@ static SDL_Texture *folder_tex(Node *f) {
   SDL_SetRenderTarget(S.r, FCACHE[slot].t);
   SDL_SetRenderDrawColor(S.r, 0, 0, 0, 0);
   SDL_RenderClear(S.r);
-  draw_folder_tile(f, 0, 0, FLOW, FLOW);
-  mask_corners(FLOW, FLOW, tile_rad() * FLOW / TILE_SEL);
+  draw_folder_tile(f, 0, 0, FLOW, TH(FLOW));
+  mask_corners(FLOW, TH(FLOW), tile_rad() * FLOW / TILE_SEL);
   SDL_SetRenderTarget(S.r, prev_rt);   /* cible d'avant (dessin imbrique) */
   FCACHE[slot].key = key;
   FCACHE[slot].used = S.frame;
@@ -1049,8 +1653,8 @@ static SDL_Texture *folder_tex(Node *f) {
    jaquette centrale : calcules une fois puis simplement recopies. Sans carte
    graphique (PS5), deformer des images a chaque image coute trop cher. */
 #define SIDE_W (FLOW_SIDE * 55 / 100)
-#define SIDE_H (FLOW_SIDE + 6 + FLOW_SIDE * 35 / 100 + 1)
-#define REFL_H (6 + FLOW * 35 / 100 + 1)
+#define SIDE_H (TH(FLOW_SIDE) + 6 + TH(FLOW_SIDE) * 35 / 100 + 1)
+#define REFL_H (6 + TH(FLOW) * 35 / 100 + 1)
 enum { WARP_LEFT, WARP_RIGHT, WARP_REFL };
 static struct { SDL_Texture *src, *t; uint32_t ver; int kind; Uint32 used; } WCACHE[40];
 
@@ -1080,10 +1684,10 @@ static SDL_Texture *warp_tex(SDL_Texture *src, uint32_t ver, int kind) {
   SDL_RenderClear(S.r);
   /* copie brute (sans melange) : la transparence est gardee telle quelle */
   SDL_SetTextureBlendMode(src, SDL_BLENDMODE_NONE);
-  if (kind == WARP_REFL) draw_persp(src, 0, FLOW, -6.0f - FLOW / 2.0f, FLOW, FLOW, 255, 255, 2);
+  if (kind == WARP_REFL) draw_persp(src, 0, FLOW, -6.0f - TH(FLOW) / 2.0f, TH(FLOW), TH(FLOW), 255, 255, 2);
   else {
-    float near = FLOW_SIDE, far = FLOW_SIDE * 0.8f;
-    draw_persp(src, 0, SIDE_W, FLOW_SIDE / 2.0f, kind == WARP_LEFT ? far : near, kind == WARP_LEFT ? near : far, 255, 255, 1);
+    float near = TH(FLOW_SIDE), far = near * 0.8f;
+    draw_persp(src, 0, SIDE_W, near / 2.0f, kind == WARP_LEFT ? far : near, kind == WARP_LEFT ? near : far, 255, 255, 1);
   }
   SDL_SetTextureBlendMode(src, SDL_BLENDMODE_BLEND);
   SDL_SetRenderTarget(S.r, prev_rt);   /* cible d'avant (dessin imbrique) */
@@ -1120,12 +1724,12 @@ static void draw_flow(void) {
     int i = items[k].i;
     float rel = items[k].rel, a = fabsf(rel), s = rel < 0 ? -1.0f : 1.0f, t = a < 1 ? a : 1;
     float off = a <= 1 ? rel * 330 : s * (330 + (a - 1) * 165);
-    float size = FLOW + (FLOW_SIDE - FLOW) * t;
+    float size = FLOW + (FLOW_SIDE - FLOW) * t, hsz = TH(FLOW) + (TH(FLOW_SIDE) - TH(FLOW)) * t;
     float wf = 1 - 0.45f * t, ratio = 1 - 0.2f * t;
     float cx = S.flow_cx + off, w = size * wf;
     if (cx + w / 2 < -20 || cx - w / 2 > W + 20) continue;
     if (S.mode == MODE_THEME && cx - w / 2 > W - ED_W - 30) continue;   /* cachee par le studio de theme */
-    float near = size, far = size * ratio;
+    float near = hsz, far = hsz * ratio;
     float hl = rel < 0 ? far : near, hr = rel < 0 ? near : far;
     int bright = (int)(255 - 95 * t - (a > 1 ? (a - 1) * 18 : 0));
     if (bright < 90) bright = 90;
@@ -1146,7 +1750,7 @@ static void draw_flow(void) {
         SDL_RenderCopy(S.r, S.tile_glow, NULL, &gd);
       } else glow((int)cx, FLOW_CY, (int)(size * (0.85f + 0.08f * pulse)), gc, ga(150));
     }
-    SDL_Texture *tex = e->is_folder ? folder_tex(e->node) : tile_tex(e->app, FLOW, FLOW);
+    SDL_Texture *tex = e->is_folder ? folder_tex(e->node) : tile_tex(e->app, FLOW, TH(FLOW));
     uint32_t ver = e->is_folder ? folder_key(e->node) : 0;
     float cy = FLOW_CY + (moving ? 8 * sinf(S.frame * 0.25f) : 0);
     SDL_Texture *cached = NULL;
@@ -1155,14 +1759,14 @@ static void draw_flow(void) {
       if (cached) {
         SDL_SetTextureColorMod(cached, bright, bright, bright);
         SDL_SetTextureAlphaMod(cached, alpha);
-        SDL_Rect d = { (int)(cx - SIDE_W / 2.0f), (int)(cy - FLOW_SIDE / 2.0f), SIDE_W, SIDE_H };
+        SDL_Rect d = { (int)(cx - SIDE_W / 2.0f), (int)(cy - TH(FLOW_SIDE) / 2.0f), SIDE_W, SIDE_H };
         SDL_RenderCopy(S.r, cached, NULL, &d);
       }
     } else if (tex && a < 0.001f) {               /* au centre, immobile : image droite + reflet en cache */
-      SDL_Rect d = { (int)(cx - FLOW / 2.0f), (int)(cy - FLOW / 2.0f), FLOW, FLOW };
+      SDL_Rect d = { (int)(cx - FLOW / 2.0f), (int)(cy - TH(FLOW) / 2.0f), FLOW, TH(FLOW) };
       SDL_RenderCopy(S.r, tex, NULL, &d);
       cached = warp_tex(tex, ver, WARP_REFL);
-      if (cached) { SDL_Rect r = { d.x, d.y + FLOW, FLOW, REFL_H }; SDL_RenderCopy(S.r, cached, NULL, &r); }
+      if (cached) { SDL_Rect r = { d.x, d.y + TH(FLOW), FLOW, REFL_H }; SDL_RenderCopy(S.r, cached, NULL, &r); }
     }
     if (cached) {}
     else if (tex && S.lite) {
@@ -1176,21 +1780,22 @@ static void draw_flow(void) {
       SDL_SetTextureAlphaMod(tex, 255);
     }
     else if (tex) draw_persp(tex, cx - w / 2, cx + w / 2, cy, hl, hr, bright, alpha, a < reflrel);
-    else if (e->is_folder) draw_folder_tile(e->node, (int)(cx - w / 2), (int)(cy - size / 2), (int)w, (int)size);
+    else if (e->is_folder) draw_folder_tile(e->node, (int)(cx - w / 2), (int)(cy - hsz / 2), (int)w, (int)hsz);
 
     if (center && a < 0.05f) {
-      int x = (int)(cx - size / 2), y = (int)(cy - size / 2), sz = (int)size, rad = tile_rad() * sz / TILE_SEL;
+      int x = (int)(cx - size / 2), y = (int)(cy - hsz / 2), sz = (int)size, szh = (int)hsz, rad = tile_rad() * sz / TILE_SEL;
       if (!e->is_folder && menu_is_hidden(&S.menu, e->app->id)) {
-        fill_round(x, y, sz, sz, rad, 0x000000, 160);
-        draw_text(S.f26, "masqué", x + sz / 2, y + sz / 2 - 16, 0xcccccc, 1, 0);
+        fill_round(x, y, sz, szh, rad, 0x000000, 160);
+        draw_text(S.f26, "masqué", x + sz / 2, y + szh / 2 - 16, 0xcccccc, 1, 0);
       }
-      if (!e->is_folder && show_badges() && e->app->kind != KIND_PS5) {
+      if (!e->is_folder && show_badges() && e->app->kind != KIND_PS5 && !BOXES) {
         const char *b = KIND_LABEL[e->app->kind];
         int bw = text_w(S.f22, b);
         fill_round(x + 12, y + 12, bw + 18, 32, 9, 0x000000, 175);
         draw_text(S.f22, b, x + 21, y + 15, 0xffffff, 0, 0);
       }
-      outline_round(x, y, sz, sz, rad, 4, moving ? 0xffc53d : 0xffffff, 255);
+      if (!e->is_folder && menu_is_fav(&S.menu, e->app->id)) fav_badge(x, y, sz);
+      outline_round(x, y, sz, szh, rad, 4, moving ? 0xffc53d : 0xffffff, 255);
     }
   }
 }
@@ -1245,7 +1850,7 @@ static void draw_grid(void) {
       Entry *e = &S.entries[i];
       int is_sel = i == sel && S.mode != MODE_KEYBOARD, sz = GRID_CELL;
       if (is_sel) sz = (int)(GRID_CELL * (1 + 0.12f * S.sel_anim));
-      int ix = x + (GRID_CELL - sz) / 2, iy = (int)y + (GRID_CELL - sz) / 2;
+      int szh = TH(sz), ix = x + (GRID_CELL - sz) / 2, iy = (int)y + (TH(GRID_CELL) - szh) / 2;
       int moving = S.mode == MODE_MOVE && is_sel;
       if (is_sel) {
         uint32_t gc = moving ? 0xffc53d : S.th->accent;
@@ -1254,16 +1859,16 @@ static void draw_grid(void) {
           SDL_SetTextureColorMod(S.tile_glow, (gc >> 16) & 255, (gc >> 8) & 255, gc & 255);
           SDL_SetTextureAlphaMod(S.tile_glow, (Uint8)ga((int)(110 + 40 * pulse)));
           int gs = sz * 8 / 5;
-          SDL_Rect gd = { ix + sz / 2 - gs / 2, iy + sz / 2 - gs / 2, gs, gs };
+          SDL_Rect gd = { ix + sz / 2 - gs / 2, iy + szh / 2 - gs / 2, gs, gs };
           SDL_RenderCopy(S.r, S.tile_glow, NULL, &gd);
-        } else glow(ix + sz / 2, iy + sz / 2, (int)(sz * (0.8f + 0.08f * pulse)), gc, ga(150));
-        fill_round(ix + 8, iy + 14, sz, sz, tile_rad() * sz / TILE_SEL, 0x000000, 120);
+        } else glow(ix + sz / 2, iy + szh / 2, (int)(szh * (0.8f + 0.08f * pulse)), gc, ga(150));
+        fill_round(ix + 8, iy + 14, sz, szh, tile_rad() * sz / TILE_SEL, 0x000000, 120);
       }
-      if (e->is_folder) draw_folder_tile(e->node, ix, iy, sz, sz);
-      else draw_app_tile(e->app, ix, iy, sz, sz);
-      if (is_sel) outline_round(ix, iy, sz, sz, tile_rad() * sz / TILE_SEL, 4, moving ? 0xffc53d : 0xffffff, 255);
+      if (e->is_folder) draw_folder_tile(e->node, ix, iy, sz, szh);
+      else draw_app_tile(e->app, ix, iy, sz, szh);
+      if (is_sel) outline_round(ix, iy, sz, szh, tile_rad() * sz / TILE_SEL, 4, moving ? 0xffc53d : 0xffffff, 255);
       const char *name = e->is_folder ? e->node->name : menu_display_name(&S.menu, e->app);
-      draw_text(is_sel ? S.f26 : S.f22, name, x + GRID_CELL / 2, (int)y + GRID_CELL + (is_sel ? 22 : 14),
+      draw_text(is_sel ? S.f26 : S.f22, name, x + GRID_CELL / 2, (int)y + TH(GRID_CELL) + (is_sel ? 22 : 14),
                 is_sel ? 0xffffff : 0x9aa4b5, 1, GRID_CELL + GRID_GAP - 6);
     }
   SDL_RenderSetClipRect(S.r, NULL);
@@ -1289,6 +1894,7 @@ static void draw_footer(void) {
   case MODE_THEME: hint = ""; break;
   case MODE_KEYBOARD: hint = "✕  Touche      □  Effacer      △  Espace      OPTIONS  Valider      ○  Annuler"; break;
   default:
+    if (S.sec == SEC_SYS) { hint = "▲▼  Choisir      ◀ ▶  Modifier      ✕  Valider      L1 R1  Sections"; break; }
     snprintf(buf, sizeof buf, tr("%s      L1 R1  Sections      Pavé tactile  Vue : %s"),
              tr(S.sec == SEC_HOME ? (S.depth ? "✕  Ouvrir      ○  Retour      △  Options      □  Déplacer"
                                              : "✕  Ouvrir / Jouer      △  Options      □  Déplacer")
@@ -1297,7 +1903,7 @@ static void draw_footer(void) {
     hint = buf;
   }
   draw_text(S.f22, hint, CAR_X, H - 56, 0x9aa4b5, 0, 0);
-  if (S.menu.view != VIEW_CLASSIC && S.nentries && S.mode != MODE_THEME) {
+  if (S.menu.view != VIEW_CLASSIC && S.nentries && S.mode != MODE_THEME && S.sec != SEC_SYS) {
     char pos[32];
     snprintf(pos, sizeof pos, "%d / %d", *cur_sel() + 1, S.nentries);
     draw_text(S.f22, pos, W - CAR_X, H - 56, 0x9aa4b5, 2, 0);
@@ -1313,6 +1919,9 @@ static void glass_panel(int x, int y, int w, int h) {
   outline_round(x, y, w, h, 26, 2, S.th->accent, 160);
 }
 
+enum { SFX_MOVE, SFX_SECTION, SFX_OK, SFX_BACK, SFX_LAUNCH, SFX_ERROR, SFX_BOOT, SFX_COUNT };
+static void sfx(int id);
+static void draw_settings(void);
 static void draw_launching(void);
 static void draw_theme_editor(void);
 static void refresh_settings(void);
@@ -1416,7 +2025,125 @@ static void draw_toast(void) {
   draw_text(S.f26, S.toast, cx, 137, 0xffffff, 1, 0);
 }
 
+/* Theme de l'image en cours : couleurs du jeu choisi si « couleurs auto » */
+static uint32_t mix_color(uint32_t c, uint32_t t, float k) {
+  uint32_t out = 0;
+  for (int sh = 0; sh <= 16; sh += 8) {
+    int a = (c >> sh) & 255, b = (t >> sh) & 255, v = a + (int)((b - a) * k);
+    if (abs(b - v) < 3) v = b;
+    out |= (uint32_t)v << sh;
+  }
+  return out;
+}
+
+static void frame_theme(Entry *e) {
+  S.fth = *S.base;
+  uint32_t ta = S.base->accent, ta2 = S.base->accent2;
+  if (S.base->auto_color && e && !e->is_folder && e->app->kind != KIND_SYSTEM) {
+    cover(e->app);
+    if (e->app->has_vibe) { ta = e->app->vibe; ta2 = e->app->vibe2; }
+  }
+  if (!S.base->auto_color || (!S.acc_now && !S.acc2_now)) { S.acc_now = ta; S.acc2_now = ta2; }
+  else if (S.lite) {                             /* PS5 : changement net une fois la selection posee */
+    if (SDL_GetTicks() - S.sel_since > 150) { S.acc_now = ta; S.acc2_now = ta2; }
+  } else {
+    S.acc_now = mix_color(S.acc_now, ta, ease(0.08f));
+    S.acc2_now = mix_color(S.acc2_now, ta2, ease(0.08f));
+  }
+  S.fth.accent = S.acc_now;
+  S.fth.accent2 = S.acc2_now;
+  S.th = &S.fth;
+}
+
+/* Intro au demarrage : le logo s'allume lettre par lettre */
+static void draw_boot(void) {
+  if (S.boot_done) return;
+  Uint32 el = SDL_GetTicks() - S.boot_t0;
+  if (el > 1700) { S.boot_done = 1; return; }
+  int a = el < 1150 ? 255 : (int)(255 * (1 - (el - 1150) / 550.0f));
+  set_color(0x030408, a);
+  SDL_Rect full = { 0, 0, W, H };
+  SDL_RenderFillRect(S.r, &full);
+  const char *word = "LAUNCHER";
+  int ww = text_w(S.fbig, word), w5 = text_w(S.fbig, "5"), x = (W - ww - w5 - 16) / 2, y = H / 2 - 90;
+  if (!S.lite) glow(W / 2, H / 2 - 20, 520, S.th->accent, (int)(a * 0.45f));
+  char one[2] = { 0, 0 };
+  for (int i = 0; word[i]; i++) {
+    one[0] = word[i];
+    int t = (int)el - i * 55, la = t <= 0 ? 0 : t > 200 ? a : a * t / 200;
+    if (la > 0) draw_text_a(S.fbig, one, x, y + (t < 200 ? (200 - t) / 8 : 0), 0xffffff, 0, 0, la);
+    x += text_w(S.fbig, one);
+  }
+  int t5 = (int)el - 560;
+  if (t5 > 0) {
+    int a5 = t5 > 160 ? a : a * t5 / 160;
+    if (!S.lite) glow(x + 16 + w5 / 2, y + 70, 160, S.th->accent, a5 / 2);
+    draw_text_a(S.fbig, "5", x + 16, y, S.th->accent, 0, 0, a5);
+  }
+  int lw = el < 700 ? 0 : el > 1000 ? 420 : (int)(420 * (el - 700) / 300.0f);
+  fill_round(W / 2 - lw / 2, y + 160, lw, 6, 3, S.th->accent2, a);
+  draw_text_a(S.f26, "by " L5_AUTHOR, W / 2, y + 190, 0x9aa4b5, 1, 0, el > 900 ? a : 0);
+}
+
+/* Economiseur d'ecran : tes jaquettes en diaporama */
+static void draw_saver(void) {
+  Uint32 now = SDL_GetTicks();
+  if (!S.saver_t || now - S.saver_t > 7000) {
+    int cand[256], n = 0;
+    for (int i = 0; i < S.menu.napps && n < 256; i++)
+      if (S.menu.apps[i].kind != KIND_SYSTEM && S.menu.apps[i].icon[0] && !menu_is_hidden(&S.menu, S.menu.apps[i].id)) cand[n++] = i;
+    if (!n) { S.saver_on = 0; return; }
+    int pick = cand[rand() % n];
+    if (n > 1) while (pick == S.saver_idx) pick = cand[rand() % n];
+    S.saver_idx = pick;
+    S.saver_t = now;
+  }
+  float k = (now - S.saver_t) / 7000.0f, fade = k < 0.14f ? k / 0.14f : k > 0.9f ? (1 - k) / 0.1f : 1;
+  SDL_SetRenderDrawColor(S.r, 0, 0, 0, 255);
+  SDL_RenderClear(S.r);
+  App *a = &S.menu.apps[S.saver_idx];
+  SDL_Texture *bg = blurred(a);
+  if (bg) {
+    SDL_SetTextureAlphaMod(bg, (Uint8)(180 * fade));
+    SDL_Rect full = { -60 - (int)(40 * k), -40, W + 140, H + 80 };
+    SDL_RenderCopy(S.r, bg, NULL, &full);
+  }
+  SDL_SetTextureAlphaMod(S.shade_left, 255);
+  SDL_Rect left = { 0, 0, W * 3 / 4, H };
+  SDL_RenderCopy(S.r, S.shade_left, NULL, &left);
+  SDL_Texture *t = tile_tex(a, FLOW, TH(FLOW));
+  if (t) {
+    SDL_SetTextureAlphaMod(t, (Uint8)(255 * fade));
+    SDL_Rect d = { 200 + (int)(50 * k), (H - TH(FLOW)) / 2, FLOW, TH(FLOW) };
+    SDL_RenderCopy(S.r, t, NULL, &d);
+    SDL_SetTextureAlphaMod(t, 255);
+  }
+  int al = (int)(255 * fade);
+  draw_text_a(S.f48, menu_display_name(&S.menu, a), 700, H / 2 - 70, 0xffffff, 0, 1100, al);
+  Stat *st = menu_stat(&S.menu, a->id, 0);
+  if (st && st->playtime > 0) {
+    char pt[48];
+    playtime_str(st->playtime, pt, sizeof pt);
+    draw_text_a(S.f26, pt, 702, H / 2 + 10, S.th->accent, 0, 0, al);
+  }
+  time_t tnow = time(NULL);
+  char clk[16];
+  strftime(clk, sizeof clk, S.th->clock == CLOCK_12 ? "%I:%M" : "%H:%M", localtime(&tnow));
+  draw_text_a(S.fbig, clk, W - CAR_X, H - 230, 0xffffff, 2, 0, 200);
+  draw_text_a(S.f22, "Appuie sur une touche pour revenir", W - CAR_X, H - 80, 0x9aa4b5, 2, 0, 160);
+  draw_particles(S.lite);
+}
+
+static void draw_letter(void) {
+  if (!S.letter[0] || SDL_GetTicks() > S.letter_until) return;
+  int a = (int)(255 * fminf(1.0f, (S.letter_until - SDL_GetTicks()) / 250.0f));
+  fill_round(W / 2 - 110, H / 2 - 150, 220, 220, 40, 0x000000, a * 200 / 255);
+  outline_round(W / 2 - 110, H / 2 - 150, 220, 220, 40, 3, S.th->accent, a);
+  draw_text_a(S.fbig, S.letter, W / 2, H / 2 - 120, 0xffffff, 1, 0, a);
+}
+
 static void draw(void) {
+  frame_theme(selected());
   refresh_settings();
   check_tile_shape();
   update_sections();
@@ -1425,14 +2152,20 @@ static void draw(void) {
   clamp_sel();
   Entry *e = selected();
   int key = (S.sec << 20) ^ (S.depth << 16) ^ *cur_sel();
-  if (key != S.last_sel_key) { S.last_sel_key = key; S.hero_anim = 0; }
+  if (key != S.last_sel_key) { S.last_sel_key = key; S.hero_anim = 0; S.sel_since = SDL_GetTicks(); }
+  frame_theme(e);
 
+  if (S.saver_on) {
+    draw_saver();
+    if (S.saver_on) { SDL_RenderPresent(S.r); return; }
+  }
   draw_background(e);
+  draw_fx();
   draw_topbar();
   switch (S.menu.view) {
-  case VIEW_GRID: draw_grid(); break;
-  case VIEW_CLASSIC: draw_hero(e); draw_carousel(); break;
-  default: draw_flow(); draw_flow_info(e); break;
+  case VIEW_GRID: if (S.sec == SEC_SYS) draw_settings(); else draw_grid(); break;
+  case VIEW_CLASSIC: if (S.sec == SEC_SYS) draw_settings(); else { draw_hero(e); draw_carousel(); } break;
+  default: if (S.sec == SEC_SYS) draw_settings(); else { draw_flow(); draw_flow_info(e); } break;
   }
   draw_footer();
   if (S.mode == MODE_CONTEXT) draw_list_panel(S.ctx_title, S.nchoices, choice_label, S.csel, NULL);
@@ -1441,7 +2174,9 @@ static void draw(void) {
   if (S.mode == MODE_THEME) draw_theme_editor();
   if (S.mode == MODE_KEYBOARD) draw_keyboard();
   draw_launching();
+  draw_letter();
   draw_toast();
+  draw_boot();
   SDL_RenderPresent(S.r);
 }
 
@@ -1476,6 +2211,10 @@ static void open_context(void) {
     }
     add_choice("Renommer", ACT_RENAME);
     if (strcmp(menu_display_name(&S.menu, e->app), e->app->title)) add_choice("Remettre le nom d'origine", ACT_RESET_NAME);
+    if (e->app->kind != KIND_SYSTEM) {
+      int fav = menu_is_fav(&S.menu, e->app->id);
+      add_choice(fav ? "★ Retirer des favoris" : "★ Ajouter aux favoris", fav ? ACT_UNFAV : ACT_FAV);
+    }
     int hid = menu_is_hidden(&S.menu, e->app->id);
     add_choice(hid ? "Ne plus masquer" : "Masquer", hid ? ACT_SHOW : ACT_HIDE);
   } else {
@@ -1576,6 +2315,9 @@ static void refresh_settings(void) {
   set_title("cfg:return", plat_auto_return(-1) ? "Retour auto après un jeu : oui" : "Retour auto après un jeu : non");
   set_title("cfg:folders", S.menu.show_folders ? "Section Mes dossiers : oui" : "Section Mes dossiers : non");
   set_title("cfg:hidden", S.show_hidden ? "Éléments masqués : visibles" : "Éléments masqués : cachés");
+  if (S.menu.saver > 0) snprintf(t, sizeof t, tr("Économiseur d'écran : %d min"), S.menu.saver);
+  else snprintf(t, sizeof t, "%s", tr("Économiseur d'écran : non"));
+  set_title("cfg:saver", t);
 }
 
 static int launcher_setting(App *a) {
@@ -1585,6 +2327,13 @@ static int launcher_setting(App *a) {
   else if (!strcmp(a->id, "cfg:return")) plat_auto_return(!plat_auto_return(-1));
   else if (!strcmp(a->id, "cfg:folders")) { S.menu.show_folders = !S.menu.show_folders; save(); }
   else if (!strcmp(a->id, "cfg:hidden")) S.show_hidden = !S.show_hidden;
+  else if (!strcmp(a->id, "cfg:saver")) {
+    static const int V[] = { 0, 2, 5, 10, 30 };
+    int i = 0;
+    while (i < 5 && V[i] != S.menu.saver) i++;
+    S.menu.saver = V[(i + 1) % 5];
+    save();
+  }
   refresh_settings();
   return 1;
 }
@@ -1597,8 +2346,14 @@ static void launch(App *a) {
   if (!rc) {
     if (a->kind != KIND_SYSTEM) { menu_record_launch(&S.menu, a->id); save(); }
     /* les jeux et applications ferment le launcher : ecran de transition */
-    if (a->kind != KIND_PAYLOAD && a->kind != KIND_SYSTEM) { S.launching = a; S.launch_t = SDL_GetTicks(); music_fade(); return; }
-  }
+    if (a->kind != KIND_PAYLOAD && a->kind != KIND_SYSTEM) {
+      S.launching = a; S.launch_t = SDL_GetTicks(); music_fade();
+      sfx(SFX_LAUNCH);
+      for (int i = 0; i < 4; i++) if (S.pads[i]) SDL_GameControllerRumble(S.pads[i], 0x3000, 0xC000, 180);
+      return;
+    }
+    sfx(SFX_OK);
+  } else sfx(SFX_ERROR);
   if (msg[0]) toast(msg);
 }
 
@@ -1685,6 +2440,13 @@ static void do_action(int act) {
   case ACT_TOGGLE_HIDDEN: S.show_hidden = !S.show_hidden; break;
   case ACT_THEME: open_theme_editor(); break;
   case ACT_VIEW: set_view(S.menu.view + 1); break;
+  case ACT_FAV: case ACT_UNFAV:
+    if (e && !e->is_folder) {
+      menu_set_fav(&S.menu, e->app->id, act == ACT_FAV);
+      save();
+      toast(act == ACT_FAV ? "★ Ajouté aux favoris" : "Retiré des favoris");
+    }
+    break;
   }
 }
 
@@ -1732,7 +2494,8 @@ static void kb_backspace(void) {
 /* ------------------------------------------------------------------ */
 /* Entrees                                                             */
 /* ------------------------------------------------------------------ */
-enum { IN_UP, IN_DOWN, IN_LEFT, IN_RIGHT, IN_OK, IN_BACK, IN_MENU, IN_MOVE, IN_L1, IN_R1, IN_START, IN_VIEW, IN_COUNT };
+enum { IN_UP, IN_DOWN, IN_LEFT, IN_RIGHT, IN_OK, IN_BACK, IN_MENU, IN_MOVE, IN_L1, IN_R1, IN_START, IN_VIEW, IN_L2, IN_R2,
+       IN_COUNT };
 
 /* ------------------------------------------------------------------ */
 /* Themes : application, editeur a la manette, musique d'ambiance       */
@@ -1791,7 +2554,7 @@ static int find_preset(const char *name) {
 /* theme applique : enregistre dans theme.json (et son nom dans menu.json) */
 static void apply_theme(const Theme *t) {
   S.cur = *t;
-  S.th = &S.cur;
+  S.base = &S.cur;
   theme_changed();
   char path[PATH_LEN];
   data_path(path, sizeof path, "theme.json");
@@ -1805,7 +2568,7 @@ static void open_theme_editor(void) {
   scan_media_files();
   load_presets();
   S.edit = S.cur;
-  S.th = &S.edit;
+  S.base = &S.edit;
   S.preset = find_preset(S.cur.name);
   S.ed_dirty = S.preset < 0;
   S.ed_row = R_PRESET;
@@ -1826,9 +2589,9 @@ static int row_visible(int r) {
 }
 
 static const char *ROW_LABEL[R_COUNT] = {
-  "Thème de base", "Couleur principale", "Couleur secondaire", "Fond : haut", "Fond : bas", "Arrière-plan",
-  "Image", "Illustration du jeu", "Halos lumineux", "Particules", "Forme", "Sens", "Coins des jaquettes",
-  "Horloge", "Musique", "Volume", "Enregistrer comme mon thème…", "Supprimer ce thème",
+  "Thème de base", "Couleurs", "Couleur principale", "Couleur secondaire", "Fond : haut", "Fond : bas", "Arrière-plan",
+  "Image", "Illustration du jeu", "Effet animé", "Halos lumineux", "Particules", "Forme", "Sens", "Coins des jaquettes",
+  "Horloge", "Sons d'interface", "Musique", "Volume", "Enregistrer comme mon thème…", "Supprimer ce thème",
 };
 
 static int color_index(const NamedColor *list, int n, uint32_t c) {
@@ -1895,10 +2658,10 @@ static void theme_row_change(int d) {
     int i = S.preset < 0 ? (d > 0 ? 0 : S.npresets - 1) : cyc(S.preset, d, S.npresets);
     Theme keep = *t;
     *t = S.presets[i];
-    if (i < S.nbuiltin) {  /* les themes fournis gardent ta musique et ton image */
+    if (i < S.nbuiltin) {  /* les themes fournis gardent ta musique, et ton image s'ils n'ont pas la leur */
       snprintf(t->music, sizeof t->music, "%s", keep.music);
       t->volume = keep.volume;
-      snprintf(t->wallpaper, sizeof t->wallpaper, "%s", keep.wallpaper);
+      if (!t->wallpaper[0]) snprintf(t->wallpaper, sizeof t->wallpaper, "%s", keep.wallpaper);
     }
     S.preset = i;
     S.ed_dirty = 0;
@@ -1942,6 +2705,9 @@ static void theme_row_change(int d) {
     break;
   }
   case R_VOLUME: t->volume = step(t->volume, d); break;
+  case R_AUTO: t->auto_color = !t->auto_color; break;
+  case R_FX: t->fx = cyc(t->fx, d, FX_COUNT); break;
+  case R_SFX: t->sfx = step(t->sfx, d); if (t->sfx) { S.th = t; sfx(SFX_OK); } break;
   default: return;
   }
   if (!memcmp(&before, t, sizeof before)) return;   /* deja au minimum / maximum */
@@ -1977,7 +2743,7 @@ static void theme_editor_input(int in) {
   case IN_RIGHT: theme_row_change(1); return;
   case IN_L1: case IN_R1: { int keep = S.ed_row; S.ed_row = R_PRESET; theme_row_change(in == IN_L1 ? -1 : 1); S.ed_row = keep; return; }
   case IN_BACK:
-    S.th = &S.cur;            /* annule : on revient au theme applique */
+    S.base = &S.cur;            /* annule : on revient au theme applique */
     theme_changed();
     S.mode = MODE_BROWSE;
     return;
@@ -2023,7 +2789,7 @@ static void theme_editor_input(int in) {
 /* titre de groupe affiche avant certaines lignes */
 static const char *row_group(int r) {
   switch (r) {
-  case R_ACCENT: return "COULEURS";
+  case R_AUTO: return "COULEURS";
   case R_BG: return "ARRIÈRE-PLAN";
   case R_GLOW: return "EFFETS";
   case R_CLOCK: return "INTERFACE ET SON";
@@ -2039,8 +2805,12 @@ static int row_chips(int r, const char *const **opts, int *cur) {
   static const char *const FALL[] = { "Montent", "Tombent" };
   static const char *const COR[] = { "Droits", "Arrondis", "Ronds" };
   static const char *const CLK[] = { "24 h", "12 h", "Masquée" };
+  static const char *const AUTO[] = { "Du thème", "Du jeu" };
+  static const char *const FXN[] = { "Aucun", "Grille", "Hyperespace", "Pluie" };
   const Theme *t = &S.edit;
   switch (r) {
+  case R_AUTO: *opts = AUTO; *cur = t->auto_color ? 1 : 0; return 2;
+  case R_FX: *opts = FXN; *cur = t->fx; return FX_COUNT;
   case R_BG: *opts = BG; *cur = t->bg_mode; return BG_COUNT;
   case R_PART: *opts = PART; *cur = t->particles; return PART_COUNT;
   case R_PSTYLE: *opts = PST; *cur = t->pstyle; return PSTYLE_COUNT;
@@ -2114,7 +2884,7 @@ static void draw_theme_editor(void) {
   /* lignes de reglages, defilantes */
   int top = sy + ch + 70, bottom = py + ph - 64;
   int total = 0, fy = 0;
-  for (int r = R_ACCENT; r < R_COUNT; r++) {
+  for (int r = R_AUTO; r < R_COUNT; r++) {
     if (!row_visible(r)) continue;
     if (row_group(r) || r == R_SAVE) total += ED_HEAD;
     if (r == S.ed_row) fy = total;
@@ -2130,7 +2900,7 @@ static void draw_theme_editor(void) {
   SDL_RenderSetClipRect(S.r, &clip);
   int y = top - (int)S.ed_scroll;
   int lx = px + 44, cx0 = px + 330, cx1 = px + pw - 44;
-  for (int r = R_ACCENT; r < R_COUNT; r++) {
+  for (int r = R_AUTO; r < R_COUNT; r++) {
     if (!row_visible(r)) continue;
     const char *grp = row_group(r);
     if (grp) {
@@ -2183,8 +2953,8 @@ static void draw_theme_editor(void) {
         if (i18n_lang() == L_FR) draw_text(S.f22, color_name(list, nl, val, buf), sx - 16, y + 14, 0x9aa4b5, 2, 170);
         else { snprintf(buf, sizeof buf, "#%06X", val & 0xffffff); draw_text(S.f22, buf, sx - 16, y + 14, 0x9aa4b5, 2, 170); }
       }
-    } else if (r == R_ART || r == R_GLOW || r == R_VOLUME) {
-      int v = r == R_ART ? S.edit.art : r == R_GLOW ? S.edit.glow : S.edit.volume;
+    } else if (r == R_ART || r == R_GLOW || r == R_VOLUME || r == R_SFX) {
+      int v = r == R_ART ? S.edit.art : r == R_GLOW ? S.edit.glow : r == R_SFX ? S.edit.sfx : S.edit.volume;
       int tx = cx0 + 10, tw = cx1 - tx - 120;
       fill_round(tx, my - 4, tw, 8, 4, 0xffffff, 40);
       fill_round(tx, my - 4, tw * v / 100, 8, 4, S.th->accent, 255);
@@ -2291,11 +3061,250 @@ static void music_pause(int on) {
   if (on) Mix_PauseMusic(); else Mix_ResumeMusic();
 }
 static void music_fade(void) { if (MU.m) Mix_FadeOutMusic(600); }
+
+/* --- sons d'interface : fabriques au premier usage ----------------------- */
+static Mix_Chunk *SFXC[SFX_COUNT];
+static Sint16 *SFXB[SFX_COUNT];                  /* echantillons (liberes avec le son) */
+static int sfx_state;                            /* 0 pas encore, 1 prets, -1 impossibles */
+static int sfx_rate, sfx_chans, sfx_pack_built = -1, sfx_boot_built = -1;
+
+#define TAU 6.2831853f
+static float osc(float *ph, float f) {           /* oscillateur : phase qui avance a la frequence f */
+  *ph += TAU * f / sfx_rate;
+  if (*ph >= TAU) *ph -= TAU * floorf(*ph / TAU);
+  return *ph;
+}
+static float sq(float ph) { return ph < TAU / 2 ? 1.0f : -1.0f; }
+static float saw(float ph) { return ph / (TAU / 2) - 1; }
+/* cloche : fondamentale + partiels inharmoniques qui s'eteignent plus vite */
+static float bell(float f, float t, float dec) {
+  if (t < 0) return 0;
+  float e = expf(-t * dec);
+  return (sinf(TAU * f * t) + 0.5f * sinf(TAU * 2.76f * f * t) * e + 0.25f * sinf(TAU * 5.4f * f * t) * e * e) * e;
+}
+
+/* duree des sons de chaque style : deplacement, section, valider, retour, lancement, erreur */
+static const float SFX_DUR[SFX_PACKS][SFX_BOOT] = {
+  { 0.035f, 0.07f, 0.11f, 0.11f, 0.65f, 0.16f },   /* Neon */
+  { 0.04f,  0.08f, 0.15f, 0.15f, 0.70f, 0.25f },   /* Retro 8-bit */
+  { 0.07f,  0.14f, 0.22f, 0.22f, 0.90f, 0.30f },   /* Doux */
+  { 0.05f,  0.09f, 0.14f, 0.14f, 0.85f, 0.25f },   /* Sci-fi */
+  { 0.14f,  0.25f, 0.40f, 0.40f, 1.10f, 0.45f },   /* Cristal */
+};
+static const float BOOT_DUR[BOOT_SOUNDS] = { 1.0f, 1.7f, 1.9f, 1.0f, 1.5f, 0 };
+
+static float sfx_sample(int id, int pack, float t, float k, float *p, float nz) {
+  switch (pack) {
+  case 1:                                        /* Retro 8-bit : ondes carrees, notes en escalier */
+    switch (id) {
+    case SFX_MOVE: return sq(osc(&p[0], 1760)) * 0.07f;
+    case SFX_SECTION: return sq(osc(&p[0], k < 0.5f ? 988 : 1319)) * 0.07f;
+    case SFX_OK: return sq(osc(&p[0], k < 0.33f ? 659 : k < 0.66f ? 988 : 1319)) * 0.07f;
+    case SFX_BACK: return sq(osc(&p[0], k < 0.33f ? 1319 : k < 0.66f ? 988 : 659)) * 0.07f;
+    case SFX_LAUNCH: return sq(osc(&p[0], 220 * powf(2, floorf(k * 16) / 8))) * 0.07f
+                            + (2 * fabsf(saw(osc(&p[1], 110))) - 1) * 0.10f * (1 - k);
+    case SFX_ERROR: return sq(osc(&p[0], k < 0.5f ? 196 : 147)) * 0.08f;
+    }
+    break;
+  case 2:                                        /* Doux : sinus feutres, graves */
+    switch (id) {
+    case SFX_MOVE: return (sinf(osc(&p[0], 600)) + 0.2f * sinf(osc(&p[1], 1200))) * expf(-t * 55) * 0.16f;
+    case SFX_SECTION: return (sinf(osc(&p[0], 523)) + 0.5f * sinf(osc(&p[1], 784))) * expf(-t * 22) * 0.13f;
+    case SFX_OK: return sinf(TAU * 523 * t) * expf(-t * 14) * 0.15f + (t > 0.08f ? sinf(TAU * 784 * t) * expf(-(t - 0.08f) * 14) * 0.15f : 0);
+    case SFX_BACK: return sinf(TAU * 784 * t) * expf(-t * 14) * 0.15f + (t > 0.08f ? sinf(TAU * 523 * t) * expf(-(t - 0.08f) * 14) * 0.15f : 0);
+    case SFX_LAUNCH: return (sinf(TAU * 262 * t) + sinf(TAU * 330 * t) + sinf(TAU * 392 * t) + 0.7f * sinf(TAU * 523 * t))
+                            * 0.055f * sinf(k * 3.14159f);
+    case SFX_ERROR: return sinf(osc(&p[0], 220 * (1 + 0.03f * sinf(TAU * 12 * t)))) * 0.16f * (1 - k);
+    }
+    break;
+  case 3:                                        /* Sci-fi : glissandos et modulation */
+    switch (id) {
+    case SFX_MOVE: return sinf(osc(&p[0], 2600 - 1800 * k)) * 0.12f * (1 - k);
+    case SFX_SECTION: return sinf(osc(&p[0], 900) + 3 * sinf(osc(&p[1], 450))) * expf(-t * 30) * 0.12f;
+    case SFX_OK: return sinf(osc(&p[0], 500 + 1500 * k * k)) * 0.15f * (1 - 0.5f * k);
+    case SFX_BACK: return sinf(osc(&p[0], 2000 - 1500 * sqrtf(k))) * 0.15f * (1 - 0.5f * k);
+    case SFX_LAUNCH: return (sinf(osc(&p[0], 80 + 1600 * k * k * k)) * 0.14f + sinf(osc(&p[1], (80 + 1600 * k * k * k) * 1.01f)) * 0.10f
+                             + nz * 0.06f * k) * sinf(k * 3.14159f);
+    case SFX_ERROR: return saw(osc(&p[0], 140)) * 0.08f * (0.6f + 0.4f * sinf(TAU * 30 * t)) * (1 - k);
+    }
+    break;
+  case 4:                                        /* Cristal : clochettes */
+    switch (id) {
+    case SFX_MOVE: return bell(2093, t, 40) * 0.09f;
+    case SFX_SECTION: return bell(1568, t, 18) * 0.10f;
+    case SFX_OK: return (bell(1319, t, 9) + bell(1976, t - 0.08f, 9)) * 0.08f;
+    case SFX_BACK: return (bell(1976, t, 9) + bell(1319, t - 0.08f, 9)) * 0.08f;
+    case SFX_LAUNCH: {
+      static const float N[5] = { 1047, 1319, 1568, 2093, 2637 };
+      float v = 0;
+      for (int i = 0; i < 5; i++) v += bell(N[i], t - i * 0.1f, 5);
+      return v * 0.06f;
+    }
+    case SFX_ERROR: return (bell(330, t, 8) + bell(349, t, 8)) * 0.08f;
+    }
+    break;
+  default:                                       /* Neon : bips nets, le son d'origine */
+    switch (id) {
+    case SFX_MOVE: return sinf(osc(&p[0], 1500 - 400 * k)) * expf(-t * 90) * 0.20f;
+    case SFX_SECTION: return (sinf(osc(&p[0], 700)) + 0.6f * sinf(osc(&p[1], 1050))) * expf(-t * 40) * 0.15f;
+    case SFX_OK: return sinf(osc(&p[0], k < 0.45f ? 880 : 1320)) * 0.20f * (1 - k * 0.7f);
+    case SFX_BACK: return sinf(osc(&p[0], k < 0.45f ? 990 : 660)) * 0.18f * (1 - k * 0.7f);
+    case SFX_LAUNCH: {
+      float f = 220 + 1000 * k * k;
+      return (sinf(osc(&p[0], f)) * 0.16f + sinf(osc(&p[1], f * 1.5f)) * 0.08f + nz * 0.05f * (1 - k)) * sinf(k * 3.14159f);
+    }
+    case SFX_ERROR: return sq(osc(&p[0], 180)) * 0.10f * (1 - k);
+    }
+  }
+  return 0;
+}
+
+static float boot_sample(int v, float t, float k, float *p, float nz, float *lp) {
+  switch (v) {
+  case 1: {                                      /* Synthwave : nappe qui monte + arpege */
+    static const float PAD[3] = { 220, 261.63f, 329.63f };
+    float env = (k < 0.3f ? k / 0.3f : 1) * (k > 0.7f ? (1 - k) / 0.3f : 1), x = 0;
+    for (int i = 0; i < 3; i++)
+      for (int d = -1; d <= 1; d += 2) {
+        float ph = osc(&p[i * 2 + (d > 0)], PAD[i] * (1 + d * 0.004f));
+        x += sinf(ph) + 0.3f * sinf(2 * ph) + 0.15f * sinf(3 * ph);
+      }
+    static const float ARP[4] = { 440, 523.25f, 659.25f, 880 };
+    float a = 0;
+    for (int i = 0; i < 4; i++) { float tn = t - 0.25f - i * 0.18f; if (tn > 0) a += sinf(TAU * ARP[i] * tn) * expf(-tn * 6); }
+    return x * 0.022f * env + a * 0.11f;
+  }
+  case 2: {                                      /* Console : impact grave puis accord lumineux */
+    float boom = sinf(osc(&p[0], 40 + 70 * expf(-t * 3))) * 0.38f * expf(-t * 3.2f);
+    float sh = 0;
+    if (t > 0.3f) {
+      float tn = t - 0.3f, env = (tn < 0.4f ? tn / 0.4f : 1) * (1 - k) * (0.85f + 0.15f * sinf(TAU * 5 * t));
+      sh = (sinf(TAU * 523.25f * tn) + sinf(TAU * 659.25f * tn) + sinf(TAU * 783.99f * tn) + 0.6f * sinf(TAU * 1046.5f * tn)) * 0.045f * env;
+    }
+    return boom + sh;
+  }
+  case 3: {                                      /* 8-bit : petite fanfare en ondes carrees */
+    static const float N[7] = { 523.25f, 659.25f, 783.99f, 1046.5f, 1318.5f, 1568, 2093 };
+    int i = (int)(t / 0.07f); if (i > 6) i = 6;
+    float tn = t - i * 0.07f;
+    return sq(osc(&p[0], N[i])) * 0.07f * (i == 6 ? expf(-tn * 3) : 1);
+  }
+  case 4: {                                      /* Hyperespace : souffle qui accelere puis etincelle */
+    *lp += (nz - *lp) * (0.02f + 0.2f * k);
+    float sweep = k < 0.7f ? sinf(osc(&p[0], 100 + 1900 * (k / 0.7f) * (k / 0.7f))) * 0.14f * sinf(k / 0.7f * 3.14159f) : 0;
+    return sweep + *lp * 0.5f * sinf(k * 3.14159f) + bell(2093, t - 0.95f, 5) * 0.10f + bell(3136, t - 1.02f, 6) * 0.06f;
+  }
+  default: {                                     /* Arpege neon : le son d'origine */
+    static const float NOTES[4] = { 523.25f, 659.25f, 783.99f, 1046.5f };
+    int note = (int)(t / 0.14f); if (note > 3) note = 3;
+    float tn = t - note * 0.14f;
+    return sinf(osc(&p[0], NOTES[note])) * 0.18f * expf(-tn * (note == 3 ? 3.0f : 9.0f)) + sinf(osc(&p[1], 130.81f)) * 0.05f * (1 - k);
+  }
+  }
+}
+
+/* fabrique un son : id < SFX_BOOT -> son d'interface du style `var`, sinon son de demarrage `var` */
+static void sfx_build(int id, int var) {
+  float dur = id == SFX_BOOT ? BOOT_DUR[var] : SFX_DUR[var][id];
+  int n = (int)(dur * sfx_rate);
+  if (n <= 0) return;
+  Sint16 *buf = malloc((size_t)n * sfx_chans * sizeof(Sint16));
+  if (!buf) return;
+  float p[8] = { 0 }, lp = 0;
+  unsigned seed = 0x1234567u;
+  for (int i = 0; i < n; i++) {
+    float t = (float)i / sfx_rate, k = t / dur;
+    seed = seed * 1103515245u + 12345u;
+    float nz = ((seed >> 16) & 0x7fff) / 16384.0f - 1;
+    float v = id == SFX_BOOT ? boot_sample(var, t, k, p, nz, &lp) : sfx_sample(id, var, t, k, p, nz);
+    float atk = t < 0.003f ? t / 0.003f : 1, end = k > 0.92f ? (1 - k) / 0.08f : 1;
+    int sv = (int)(v * atk * end * 32767);
+    if (sv > 32767) sv = 32767;
+    if (sv < -32768) sv = -32768;
+    for (int c = 0; c < sfx_chans; c++) buf[i * sfx_chans + c] = (Sint16)sv;
+  }
+  SFXC[id] = Mix_QuickLoad_RAW((Uint8 *)buf, (Uint32)(n * sfx_chans * sizeof(Sint16)));
+  if (SFXC[id]) SFXB[id] = buf; else free(buf);
+}
+
+static void sfx_drop(int id) {
+  if (SFXC[id]) Mix_FreeChunk(SFXC[id]);         /* coupe aussi le son s'il joue encore */
+  SFXC[id] = NULL;
+  free(SFXB[id]); SFXB[id] = NULL;
+}
+
+static void sfx(int id) {
+  int vol = S.th ? S.th->sfx : 0;
+  if (vol <= 0 || id < 0 || id >= SFX_COUNT) return;
+  if (!sfx_state) {
+    sfx_state = -1;
+    Uint16 fmt;
+    if (!music_ready() || !Mix_QuerySpec(&sfx_rate, &fmt, &sfx_chans) || fmt != AUDIO_S16SYS) { plat_log("sons d'interface indisponibles"); return; }
+    Mix_AllocateChannels(8);
+    sfx_state = 1;
+  }
+  if (sfx_state < 0) return;
+  if (id == SFX_BOOT) {                          /* son de demarrage choisi dans les parametres */
+    if (sfx_boot_built != S.menu.boot_snd) {
+      sfx_drop(SFX_BOOT);
+      sfx_boot_built = S.menu.boot_snd;
+      sfx_build(SFX_BOOT, sfx_boot_built);
+    }
+  } else if (sfx_pack_built != S.menu.sfx_pack) {  /* style des sons change : on refait les sons */
+    for (int i = 0; i < SFX_BOOT; i++) sfx_drop(i);
+    sfx_pack_built = S.menu.sfx_pack;
+    for (int i = 0; i < SFX_BOOT; i++) sfx_build(i, sfx_pack_built);
+  }
+  if (!SFXC[id]) return;
+  Mix_VolumeChunk(SFXC[id], vol * MIX_MAX_VOLUME / 100);
+  Mix_PlayChannel(-1, SFXC[id], 0);
+}
 #else
 static void music_update(void) {}
 static void music_pause(int on) { (void)on; }
 static void music_fade(void) {}
+static void sfx(int id) { (void)id; }
 #endif
+
+static char letter_of(Entry *e) {
+  const unsigned char *n = (const unsigned char *)menu_display_name(&S.menu, e->app);
+  unsigned c = n[0];
+  if (c >= 'a' && c <= 'z') return (char)(c - 32);
+  if (c >= 'A' && c <= 'Z') return (char)c;
+  if (c == 0xC3 && n[1]) {                       /* lettres accentuees courantes */
+    unsigned d = n[1] & ~0x20u;
+    if (d >= 0x80 && d <= 0x86) return 'A';
+    if (d == 0x87) return 'C';
+    if (d >= 0x88 && d <= 0x8B) return 'E';
+    if (d >= 0x8C && d <= 0x8F) return 'I';
+    if (d >= 0x92 && d <= 0x96) return 'O';
+    if (d >= 0x99 && d <= 0x9C) return 'U';
+  }
+  return '#';
+}
+
+static void jump_letter(int dir) {
+  if (S.mode != MODE_BROWSE || !SEC_SORTED_BY_NAME(S.sec) || S.nentries < 2) return;
+  int *sel = cur_sel(), n = S.nentries, i = *sel;
+  char cur = letter_of(&S.entries[i]);
+  if (dir > 0) {
+    while (i < n && letter_of(&S.entries[i]) == cur) i++;
+    if (i >= n) i = 0;
+  } else {
+    int j = i;
+    while (j > 0 && letter_of(&S.entries[j - 1]) == cur) j--;
+    if (j < i) i = j;
+    else {
+      i = j == 0 ? n - 1 : j - 1;
+      char p = letter_of(&S.entries[i]);
+      while (i > 0 && letter_of(&S.entries[i - 1]) == p) i--;
+    }
+  }
+  *sel = i;
+  S.letter[0] = letter_of(&S.entries[i]); S.letter[1] = 0;
+  S.letter_until = SDL_GetTicks() + 750;
+  S.sel_anim = 0.3f;
+}
 
 static void change_section(int dir) {
   int s = S.sec;
@@ -2341,8 +3350,376 @@ static void move_cursor(int dx, int dy) {
   S.sel_anim = 0.3f;
 }
 
+/* ------------------------------------------------------------------ */
+/* Menu Parametres : une vraie liste de reglages + une carte d'infos    */
+/* ------------------------------------------------------------------ */
+enum { SR_THEME, SR_VIEW, SR_COVERS, SR_ONLINE, SR_SAVER, SR_SFX, SR_SFXPACK, SR_BOOT, SR_RETURN, SR_FOLDERS, SR_HIDDEN, SR_HIDEIP,
+       SR_QUIT, SR_COUNT };
+#define SR_VISIBLE 8                             /* lignes affichees a la fois */
+static int set_row, set_top;
+
+static const int SAVER_STEPS[] = { 0, 2, 5, 10, 30 };
+static const char *PACK_NAMES[SFX_PACKS] = { "Néon", "Rétro 8-bit", "Doux", "Sci-fi", "Cristal" };
+static const char *BOOT_NAMES[BOOT_SOUNDS] = { "Arpège néon", "Synthwave", "Console", "8-bit", "Hyperespace", "Aucun" };
+
+static int wrap_step(int v, int d, int n) { return ((v + (d ? d : 1)) % n + n) % n; }
+
+/* boites <-> icones : toutes les tuiles calculees sont refaites */
+static void boxes_changed(void) {
+  for (int i = 0; i < S.menu.napps; i++) drop_tiles(&S.menu.apps[i]);
+  for (int i = 0; i < 12; i++)
+    if (FCACHE[i].t) { warp_forget(FCACHE[i].t); SDL_DestroyTexture(FCACHE[i].t); FCACHE[i].t = NULL; }
+  S.flow_cx = 0;
+}
+
+static void settings_change(int d, int activate) {
+  switch (set_row) {
+  case SR_THEME:
+    if (activate) open_theme_editor();
+    else {                                       /* ◀ ▶ : theme fourni ou enregistre suivant */
+      load_presets();
+      if (!S.npresets) return;
+      int i = find_preset(S.cur.name);
+      i = i < 0 ? 0 : ((i + d) % S.npresets + S.npresets) % S.npresets;
+      Theme t = S.presets[i];
+      if (i < S.nbuiltin) {                      /* garde la musique, et l'image si le theme n'en a pas */
+        snprintf(t.music, sizeof t.music, "%s", S.cur.music);
+        t.volume = S.cur.volume;
+        if (!t.wallpaper[0]) snprintf(t.wallpaper, sizeof t.wallpaper, "%s", S.cur.wallpaper);
+      }
+      apply_theme(&t);
+    }
+    break;
+  case SR_VIEW: set_view(S.menu.view + (d ? d : 1)); break;
+  case SR_COVERS: S.menu.boxes = !S.menu.boxes; boxes_changed(); save(); break;
+  case SR_ONLINE:                              /* les boites sont refaites avec ou sans les officielles */
+    S.menu.covers_online = !S.menu.covers_online;
+    for (int i = 0; i < S.menu.napps; i++) {
+      App *a = &S.menu.apps[i];
+      if (a->box_state == 1) continue;
+      if (a->boxtex) { SDL_DestroyTexture(a->boxtex); a->boxtex = NULL; }
+      a->box_state = 0;
+      drop_tiles(a);
+    }
+    if (BX.mx) { SDL_LockMutex(BX.mx); BX.offline = 0; SDL_UnlockMutex(BX.mx); }
+    save();
+    break;
+  case SR_SAVER: {
+    int i = 0;
+    while (i < 5 && SAVER_STEPS[i] != S.menu.saver) i++;
+    i = i >= 5 ? 2 : wrap_step(i, d, 5);
+    S.menu.saver = SAVER_STEPS[i];
+    save();
+    break;
+  }
+  case SR_SFX: {
+    Theme t = S.cur;
+    int v = t.sfx + (d ? d : 1) * 10;
+    if (!d && v > 100) v = 0;                    /* ✕ : fait le tour */
+    t.sfx = v < 0 ? 0 : v > 100 ? 100 : v;
+    apply_theme(&t);
+    sfx(SFX_OK);                                 /* on entend le nouveau volume */
+    break;
+  }
+  case SR_SFXPACK:                               /* on ecoute le style choisi tout de suite */
+    S.menu.sfx_pack = wrap_step(S.menu.sfx_pack, d, SFX_PACKS);
+    save();
+    sfx(SFX_OK);
+    break;
+  case SR_BOOT:
+    S.menu.boot_snd = wrap_step(S.menu.boot_snd, d, BOOT_SOUNDS);
+    save();
+    sfx(SFX_BOOT);
+    break;
+  case SR_RETURN: plat_auto_return(!plat_auto_return(-1)); break;
+  case SR_FOLDERS: S.menu.show_folders = !S.menu.show_folders; save(); break;
+  case SR_HIDDEN: S.show_hidden = !S.show_hidden; break;
+  case SR_HIDEIP: S.menu.hide_ip = !S.menu.hide_ip; S.sys_t = 0; save(); break;
+  case SR_QUIT:
+    if (activate) { App *a = menu_find_app(&S.menu, "sys:home"); if (a) launch(a); }
+    break;
+  }
+}
+
+/* renvoie 1 si la touche est prise par le menu */
+static int settings_input(int in) {
+  switch (in) {
+  case IN_UP: if (set_row > 0) set_row--; return 1;
+  case IN_DOWN: if (set_row < SR_COUNT - 1) set_row++; return 1;
+  case IN_LEFT: settings_change(-1, 0); return 1;
+  case IN_RIGHT: settings_change(1, 0); return 1;
+  case IN_OK: settings_change(0, 1); return 1;
+  }
+  return 0;
+}
+
+static void settings_value(int r, char *v, size_t n, int *toggle) {
+  *toggle = -1;
+  switch (r) {
+  case SR_THEME: snprintf(v, n, "%s", tr(S.cur.name)); break;
+  case SR_VIEW: snprintf(v, n, "%s", tr(VIEW_NAMES[S.menu.view])); break;
+  case SR_COVERS: snprintf(v, n, "%s", tr(S.menu.boxes ? "Boîtes" : "Icônes")); break;
+  case SR_SAVER:
+    if (S.menu.saver > 0) snprintf(v, n, tr("%d min"), S.menu.saver);
+    else snprintf(v, n, "%s", tr("Jamais"));
+    break;
+  case SR_SFX:
+    if (S.cur.sfx > 0) snprintf(v, n, "%d %%", S.cur.sfx);
+    else snprintf(v, n, "%s", tr("Coupés"));
+    break;
+  case SR_SFXPACK: snprintf(v, n, "%s", tr(PACK_NAMES[S.menu.sfx_pack])); break;
+  case SR_BOOT: snprintf(v, n, "%s", tr(BOOT_NAMES[S.menu.boot_snd])); break;
+  case SR_RETURN: *toggle = plat_auto_return(-1); break;
+  case SR_FOLDERS: *toggle = S.menu.show_folders; break;
+  case SR_HIDDEN: *toggle = S.show_hidden; break;
+  case SR_HIDEIP: *toggle = S.menu.hide_ip; break;
+  case SR_ONLINE: *toggle = S.menu.covers_online; break;
+  default: v[0] = 0;
+  }
+}
+
+/* --- apercu de l'affichage des jeux, dans la carte de droite --- */
+static App *pv_app(int i) {                      /* i-eme jeu de la console (en boucle) */
+  int n = 0;
+  for (int k = 0; k < S.menu.napps; k++) if (S.menu.apps[k].kind != KIND_SYSTEM) n++;
+  if (!n) return NULL;
+  i = ((i % n) + n) % n;
+  for (int k = 0; k < S.menu.napps; k++)
+    if (S.menu.apps[k].kind != KIND_SYSTEM && !i--) return &S.menu.apps[k];
+  return NULL;
+}
+
+static void pv_tile(int i, int x, int y, int s, int alpha) {   /* s : largeur, hauteur TH(s) */
+  App *a = pv_app(i);
+  SDL_Texture *t = a ? tile_tex(a, TILE, TH(TILE)) : NULL;
+  if (t) {
+    SDL_Rect d = { x, y, s, TH(s) };
+    SDL_SetTextureAlphaMod(t, (Uint8)alpha);
+    SDL_RenderCopy(S.r, t, NULL, &d);
+    SDL_SetTextureAlphaMod(t, 255);
+  } else {
+    static const uint32_t C[4] = { 0x2b86c5, 0xb26bff, 0xff3cac, 0x00b4d8 };
+    fill_round(x, y, s, TH(s), s / 10, shade(C[((i % 4) + 4) % 4], 0.6f), alpha);
+  }
+}
+
+static void draw_view_preview(int cx, int cy, int cw, int ch) {
+  static const char *DESC[VIEW_COUNT] = {
+    "Jaquettes en 3D, le jeu choisi au centre",
+    "Toute ta collection d'un coup d'œil",
+    "Une rangée façon accueil PS5",
+  };
+  int v = S.menu.view, tx = cx + 40;
+  draw_text(S.f22, tr("APERÇU"), tx, cy + 30, S.th->accent, 0, 0);
+  draw_text(S.f48, tr(VIEW_NAMES[v]), tx, cy + 58, 0xffffff, 0, cw - 80);
+
+  /* petit ecran 16/9 */
+  int sx = cx + 30, sw = cw - 60, sh = sw * 9 / 16, sy = cy + 150;
+  float sc = (float)sw / W;
+  fill_round(sx - 6, sy - 6, sw + 12, sh + 12, 18, 0x000000, 200);
+  SDL_Rect clip = { sx, sy, sw, sh };
+  SDL_RenderSetClipRect(S.r, &clip);
+  fill_round(sx, sy, sw, sh, 0, S.th->top, 255);
+  fill_round(sx, sy + sh / 2, sw, sh - sh / 2, 0, S.th->bottom, 255);
+  SDL_Texture *wp = S.th->bg_mode == BG_IMAGE ? wallpaper() : NULL;
+  if (wp) { SDL_SetTextureAlphaMod(wp, 150); SDL_RenderCopy(S.r, wp, NULL, &clip); SDL_SetTextureAlphaMod(wp, 255); }
+
+  /* defilement : toutes les 1,6 s le choix avance d'un jeu, en douceur */
+  float tt = SDL_GetTicks() / 1000.0f, ph = fmodf(tt, 1.6f) / 1.6f;
+  int base = (int)(tt / 1.6f);
+  float sh_k = ph < 0.7f ? 0 : (ph - 0.7f) / 0.3f;
+  sh_k = sh_k * sh_k * (3 - 2 * sh_k);
+  if (S.lite) sh_k = 0;
+  float center = base + sh_k;
+  uint32_t ac = S.th->accent;
+
+  /* barre du haut : sections */
+  for (int i = 0; i < 4; i++)
+    fill_round(sx + (int)(CAR_X * sc) + i * (int)(150 * sc), sy + (int)(40 * sc), (int)(120 * sc), (int)(22 * sc), 4,
+               i == 0 ? ac : 0xffffff, i == 0 ? 255 : 70);
+
+  if (v == VIEW_FLOW) {
+    int cs = (int)(FLOW * sc), ss = (int)(FLOW_SIDE * sc), mx = sx + sw / 2, my = sy + (int)(FLOW_CY * sc);
+    for (int dist = 4; dist >= 0; dist--)        /* du plus loin au plus pres */
+      for (int sgn = -1; sgn <= 1; sgn += 2) {
+        if (!dist && sgn > 0) continue;
+        int j = (int)floorf(center) + sgn * dist;
+        float d = j - center, ad = fabsf(d);
+        if (ad > 4) continue;
+        float m = ad < 1 ? ad : 1;
+        int s = (int)(cs + (ss - cs) * m);
+        float xo = (d < 0 ? -1 : 1) * (m * (cs * 0.5f + ss * 0.55f) + (ad > 1 ? (ad - 1) * ss * 0.5f : 0));
+        int x = mx + (int)xo - s / 2, y = my - TH(s) / 2;
+        if (ad < 0.5f) glow(x + s / 2, y + TH(s) / 2, TH(s), ac, 70);
+        pv_tile(j, x, y, s, 255 - (int)(fminf(ad, 3) * 55));
+      }
+    fill_round(mx - (int)(260 * sc), my + TH(cs) / 2 + (int)(50 * sc), (int)(520 * sc), (int)(26 * sc), 4, 0xffffff, 200);
+  } else if (v == VIEW_GRID) {
+    int cell = (int)(GRID_CELL * sc), gap = (int)(GRID_GAP * sc), rowh = (int)(GRID_ROWH * sc);
+    int x0 = sx + (sw - (GRID_COLS * cell + (GRID_COLS - 1) * gap)) / 2;
+    int sel = base % (GRID_COLS * 3);
+    for (int i = 0; i < GRID_COLS * 3; i++) {
+      int x = x0 + (i % GRID_COLS) * (cell + gap), y = sy + (int)(GRID_Y * sc) + (i / GRID_COLS) * rowh;
+      if (i == sel) {
+        int s = cell * 112 / 100, ox = x - (s - cell) / 2, oy = y - (TH(s) - TH(cell)) / 2;
+        glow(x + cell / 2, y + TH(cell) / 2, TH(s), ac, 90);
+        pv_tile(i, ox, oy, s, 255);
+        outline_round(ox - 2, oy - 2, s + 4, TH(s) + 4, 6, 2, ac, 255);
+      } else pv_tile(i, x, y, cell, 210);
+    }
+  } else {                                       /* carrousel facon accueil PS5 */
+    App *a = pv_app(base);
+    SDL_Texture *bl = a && a->bg[0] ? blurred(a) : NULL;   /* illustration du jeu seulement */
+    if (bl) { SDL_SetTextureAlphaMod(bl, 200); SDL_RenderCopy(S.r, bl, NULL, &clip); SDL_SetTextureAlphaMod(bl, 255); }
+    fill_round(sx, sy + sh / 2, sw, sh - sh / 2, 0, 0x000000, 90);
+    int ts = (int)(TILE * sc), sel = (int)(TILE_SEL * sc), gap = (int)(GAP * sc);
+    int x = sx + (int)(CAR_X * sc), bot = sy + (int)(CAR_BOT * sc), y = bot - TH(sel);
+    glow(x + sel / 2, y + TH(sel) / 2, TH(sel), ac, 80);
+    pv_tile(base, x, y, sel, 255);
+    outline_round(x - 2, y - 2, sel + 4, TH(sel) + 4, 6, 2, ac, 255);
+    for (int i = 1; i < 8; i++) pv_tile(base + i, x + sel + gap + (i - 1) * (ts + gap), bot - TH(ts), ts, 220);
+    fill_round(x, y - (int)(70 * sc), (int)(460 * sc), (int)(34 * sc), 4, 0xffffff, 220);
+  }
+  SDL_RenderSetClipRect(S.r, NULL);
+  outline_round(sx, sy, sw, sh, 4, 1, 0xffffff, 40);
+
+  /* les trois choix, celui en cours en couleur */
+  int py = sy + sh + 40, bw = (sw - 20) / VIEW_COUNT;
+  for (int i = 0; i < VIEW_COUNT; i++) {
+    int bx = sx + i * (bw + 10), on = i == v;
+    fill_round(bx, py, bw, 52, 26, on ? ac : 0xffffff, on ? 255 : 22);
+    draw_text(S.f22, tr(VIEW_NAMES[i]), bx + bw / 2, py + 12, on ? 0x05070b : 0xc0c8d4, 1, bw - 16);
+  }
+  draw_text(S.f22, tr(DESC[v]), tx, py + 80, 0xc0c8d4, 0, cw - 80);
+  draw_text(S.f22, tr("◀ ▶  pour essayer un autre affichage"), tx, py + 118, 0x9aa4b5, 0, cw - 80);
+  (void)ch;
+}
+
+static void draw_settings(void) {
+  static const char *ICON[SR_COUNT] = { "◐", "▦", "▯", "⬇", "☾", "♪", "♫", "★", "↺", "▤", "◌", "⊘", "⌂" };
+  static const char *LABEL[SR_COUNT] = {
+    "Thème", "Affichage des jeux", "Jaquettes", "Jaquettes officielles", "Économiseur d'écran", "Sons d'interface", "Style des sons", "Son de démarrage",
+    "Retour automatique", "Section Mes dossiers", "Éléments masqués", "Masquer l'IP", "Quitter vers l'accueil PS5",
+  };
+  static const char *HELP[SR_COUNT] = {
+    "◀ ▶ change de thème  ·  ✕ ouvre le Studio Thème",
+    "Cover Flow, Grille ou Carrousel  ·  aperçu à droite",
+    "Boîtes verticales ou icônes carrées",
+    "Téléchargées depuis la base Launcher5 sur Internet",
+    "Diaporama de tes jaquettes au repos",
+    "Volume des clics et du lancement de jeu",
+    "Néon, Rétro 8-bit, Doux, Sci-fi, Cristal",
+    "Joué à l'ouverture  ·  écoute en changeant",
+    "Revenir au launcher tout seul quand tu fermes un jeu",
+    "Affiche la section où tu ranges tes jeux dans tes dossiers",
+    "Montre ou cache les jeux que tu as masqués",
+    "Pour tes captures et tes lives",
+    "Ferme le launcher et revient à l'accueil de la PS5",
+  };
+  /* liste des reglages (defile si elle depasse l'ecran) */
+  if (set_row < set_top) set_top = set_row;
+  if (set_row >= set_top + SR_VISIBLE) set_top = set_row - SR_VISIBLE + 1;
+  int px = CAR_X, py = 165, pw = 1010, rh = 96;
+  draw_text(S.f22, tr("PARAMÈTRES"), px + 4, py - 8, S.th->accent, 0, 0);
+  for (int r = set_top; r < set_top + SR_VISIBLE && r < SR_COUNT; r++) {
+    int y = py + 26 + (r - set_top) * rh, on = r == set_row, quit = r == SR_QUIT;
+    if (quit) y += 14;
+    uint32_t ac = quit ? 0xff4d6a : S.th->accent;
+    if (on) {
+      if (!S.lite) glow(px + 70, y + rh / 2 - 4, 140, ac, 70);
+      fill_round(px, y, pw, rh - 10, 18, ac, 46);
+      fill_round(px, y + 14, 6, rh - 38, 3, ac, 255);
+    } else fill_round(px, y, pw, rh - 10, 18, 0x05070b, 165);
+    /* icone ronde */
+    fill_round(px + 26, y + 15, 56, 56, 28, on ? ac : 0x1a2030, 255);
+    draw_text(S.f30, ICON[r], px + 54, y + 22, on ? 0x05070b : ac, 1, 0);
+    draw_text(S.f30, tr(LABEL[r]), px + 106, y + 12, quit ? 0xff8a9a : 0xffffff, 0, 560);
+    draw_text(S.f22, tr(HELP[r]), px + 108, y + 52, 0x9aa4b5, 0, 600);
+    /* valeur */
+    char v[96]; int tog;
+    settings_value(r, v, sizeof v, &tog);
+    int right = px + pw - 30, my = y + (rh - 10) / 2;
+    if (tog >= 0) {                              /* interrupteur */
+      int sw = 92, sh = 44, sx = right - sw;
+      fill_round(sx, my - sh / 2, sw, sh, sh / 2, tog ? ac : 0x2a3142, 255);
+      fill_round(tog ? sx + sw - sh + 4 : sx + 4, my - sh / 2 + 4, sh - 8, sh - 8, (sh - 8) / 2, 0xffffff, 255);
+      draw_text(S.f22, tr(tog ? "OUI" : "NON"), sx - 16, my - 14, tog ? 0xffffff : 0x9aa4b5, 2, 0);
+    } else if (v[0]) {
+      int vw = text_w(S.f26, v);
+      if (on) {
+        draw_text(S.f26, "▶", right, my - 17, ac, 2, 0);
+        draw_text(S.f26, v, right - 40, my - 17, 0xffffff, 2, 300);
+        draw_text(S.f26, "◀", right - 54 - (vw < 300 ? vw : 300), my - 17, ac, 2, 0);
+      } else draw_text(S.f26, v, right, my - 17, ac, 2, 300);
+    }
+  }
+  /* indicateur de defilement */
+  int lh = SR_VISIBLE * rh - 10, ly = py + 26;
+  fill_round(px + pw + 16, ly, 6, lh, 3, 0xffffff, 30);
+  int kh = lh * SR_VISIBLE / SR_COUNT, ky = ly + (lh - kh) * set_top / (SR_COUNT - SR_VISIBLE);
+  fill_round(px + pw + 16, ky, 6, kh, 3, S.th->accent, 220);
+
+  /* carte de droite : apercu de l'affichage, sinon infos */
+  int cx = px + pw + 50, cw = W - CAR_X - cx, cy = py + 26, ch = SR_VISIBLE * rh + 4;
+  fill_round(cx, cy, cw, ch, 22, 0x05070b, 185);
+  outline_round(cx, cy, cw, ch, 22, 1, 0xffffff, 30);
+  if (set_row == SR_VIEW) { draw_view_preview(cx, cy, cw, ch); return; }
+  int tx = cx + 40, ty = cy + 36;
+  draw_text(S.f48, "LAUNCHER", tx, ty, 0xffffff, 0, 0);
+  draw_text(S.f48, "5", tx + text_w(S.f48, "LAUNCHER") + 6, ty, S.th->accent, 0, 0);
+  draw_text(S.f26, "v" L5_VERSION "  ·  by " L5_AUTHOR, tx + 2, ty + 70, 0x9aa4b5, 0, 0);
+  fill_round(tx, ty + 116, 120, 5, 2, S.th->accent2, 255);
+
+  static char ip[64]; static long long mb = -1; static int tc = -1; static Uint32 t0;
+  if (!t0 || SDL_GetTicks() - t0 > 5000) { plat_sysinfo(ip, sizeof ip, &mb, &tc); t0 = SDL_GetTicks(); }
+  long total = 0; int napps = 0;
+  for (int i = 0; i < S.menu.napps; i++) if (S.menu.apps[i].kind != KIND_SYSTEM) napps++;
+  for (int i = 0; i < S.menu.nstats; i++) total += S.menu.stats[i].playtime;
+  static const char *LANGS[L_COUNT] = { "Français", "English", "Español", "Deutsch", "Italiano", "Português" };
+  char val[6][64];
+  if (S.menu.hide_ip) snprintf(val[0], 64, "%s", tr("Masquée"));
+  else snprintf(val[0], 64, "%s", ip[0] ? ip : "—");
+  if (mb >= 0) snprintf(val[1], 64, mb >= 10240 ? tr("%lld Go libres") : tr("%lld Mo libres"), mb >= 10240 ? mb / 1024 : mb);
+  else snprintf(val[1], 64, "—");
+  if (tc > 0) snprintf(val[2], 64, "%d°C", tc); else snprintf(val[2], 64, "—");
+  snprintf(val[3], 64, "%s", LANGS[i18n_lang()]);
+  snprintf(val[4], 64, "%d", napps);
+  if (total > 0) playtime_str(total, val[5], 64); else snprintf(val[5], 64, "—");
+  static const char *KEYS[6] = { "Adresse IP (FTP)", "Stockage", "Température", "Langue", "Jeux et applications", "Temps de jeu total" };
+  for (int i = 0; i < 6; i++) {
+    int y = ty + 160 + i * 86;
+    draw_text(S.f22, tr(KEYS[i]), tx, y, 0x9aa4b5, 0, cw - 80);
+    draw_text(S.f30, val[i], tx, y + 30, i == 0 && S.menu.hide_ip ? 0x9aa4b5 : 0xffffff, 0, cw - 80);
+  }
+}
+
+static void handle_inner(int in);
+
+/* Chaque appui : sortie de l'intro / de l'economiseur, puis son selon ce qui a change */
 static void handle(int in) {
+  S.last_input = SDL_GetTicks();
+  if (!S.boot_done) { S.boot_done = 1; return; }
+  if (S.saver_on) { S.saver_on = 0; S.saver_t = 0; return; }
   if (S.launching) return;
+  struct { int mode, sec, depth, sel, csel, fsel, color, kbr, kbc, row; size_t len; } a, b;
+  Theme before = S.edit;
+#define SNAP(x) x.mode = S.mode; x.sec = S.sec; x.depth = S.depth; x.sel = *cur_sel(); x.csel = S.csel; x.fsel = S.fsel; \
+  x.color = S.color_sel; x.kbr = S.kb_row; x.kbc = S.kb_col; x.row = S.ed_row * 64 + set_row; x.len = strlen(S.kb_buf)
+  SNAP(a);
+  handle_inner(in);
+  SNAP(b);
+#undef SNAP
+  if (S.launching) return;                       /* son de lancement deja joue */
+  if (b.mode != a.mode) sfx(in == IN_BACK ? SFX_BACK : SFX_OK);
+  else if (b.sec != a.sec || b.depth != a.depth) sfx(b.depth < a.depth ? SFX_BACK : SFX_SECTION);
+  else if (memcmp(&a, &b, sizeof a) || memcmp(&before, &S.edit, sizeof before)) sfx(in == IN_OK ? SFX_OK : SFX_MOVE);
+}
+
+static void handle_inner(int in) {
+  if (S.mode == MODE_BROWSE && S.sec == SEC_SYS) {     /* menu Parametres */
+    if (settings_input(in)) return;
+    if (in == IN_MENU || in == IN_START || in == IN_MOVE) return;
+  }
   if (S.mode == MODE_THEME) { theme_editor_input(in); return; }
   if (S.mode == MODE_KEYBOARD) {
     switch (in) {
@@ -2415,6 +3792,8 @@ static void handle(int in) {
   case IN_L1: change_section(-1); break;
   case IN_R1: change_section(1); break;
   case IN_VIEW: set_view(S.menu.view + 1); break;
+  case IN_L2: jump_letter(-1); break;
+  case IN_R2: jump_letter(1); break;
   }
 }
 
@@ -2431,6 +3810,8 @@ static int key_to_input(SDL_Keycode k) {
   case SDLK_PAGEUP: return IN_L1;
   case SDLK_PAGEDOWN: return IN_R1;
   case SDLK_v: case SDLK_F2: return IN_VIEW;
+  case SDLK_HOME: return IN_L2;
+  case SDLK_END: return IN_R2;
   }
   return -1;
 }
@@ -2474,7 +3855,11 @@ static void poll(void) {
       if (in >= 0) handle(in);
       break;
     }
-    case SDL_CONTROLLERDEVICEADDED: SDL_GameControllerOpen(ev.cdevice.which); break;
+    case SDL_CONTROLLERDEVICEADDED: {
+      SDL_GameController *c = SDL_GameControllerOpen(ev.cdevice.which);
+      for (int i = 0; i < 4 && c; i++) if (!S.pads[i] || S.pads[i] == c) { S.pads[i] = c; break; }
+      break;
+    }
     case SDL_CONTROLLERBUTTONDOWN: {
       int in = button_to_input(ev.cbutton.button);
       if (in >= 0) {
@@ -2491,6 +3876,13 @@ static void poll(void) {
       int v = ev.caxis.value, dir = -1;
       if (ev.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) dir = v < -16000 ? IN_LEFT : v > 16000 ? IN_RIGHT : -2;
       else if (ev.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) dir = v < -16000 ? IN_UP : v > 16000 ? IN_DOWN : -2;
+      else if (ev.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT || ev.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT) {
+        static int down[2];                      /* L2 / R2 : gachettes, un appui = un saut */
+        int k = ev.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT;
+        if (v > 20000 && !down[k]) { down[k] = 1; handle(k ? IN_R2 : IN_L2); }
+        else if (v < 8000) down[k] = 0;
+        break;
+      }
       else break;
       if (dir >= 0 && dir != last_dir) { handle(dir); held.input = dir; held.next = SDL_GetTicks() + 380; last_dir = dir; }
       if (dir == -2) { if (held.input == last_dir) held.input = -1; last_dir = -1; }
@@ -2554,6 +3946,7 @@ static void video_close(void) {
   S.glow = S.tile_glow = S.btn_glow = S.shade_left = S.shade_bottom = S.bgcache = NULL;
   S.bg_cur = S.bg_prev = NULL;
   S.bg_key_app = NULL;
+  for (int i = 0; i < 36; i++) S.glyph[i] = NULL;                 /* lettres de la pluie de code */
   S.wall = NULL; S.wall_key[0] = 0;
   warp_forget(NULL);                                      /* caches du cover flow */
   for (int i = 0; i < 12; i++) FCACHE[i].t = NULL;
@@ -2564,7 +3957,16 @@ static void video_close(void) {
 }
 
 /* Menu ou theme modifie depuis le PC (par FTP) : on recharge sans redemarrer */
+static void import_sessions(void) {
+  char path[PATH_LEN];
+  data_path(path, sizeof path, "sessions.txt");
+  int n = menu_import_sessions(&S.menu, path);
+  if (n > 0) { plat_log("temps de jeu : %d partie(s) ajoutee(s)", n); save(); }
+}
+
 static void check_external_changes(void) {
+  import_sessions();
+  box_check_custom();
   long long sig = file_sig(S.menu_path);
   if (sig && sig != S.menu_sig && S.mode == MODE_BROWSE) {
     /* nouveau menu lu a part : si le fichier est illisible (envoi en cours),
@@ -2575,6 +3977,8 @@ static void check_external_changes(void) {
     tmp.names = NULL; tmp.nnames = 0;
     tmp.stats = NULL; tmp.nstats = 0;
     tmp.show_folders = 0; tmp.view = VIEW_FLOW; tmp.theme[0] = 0;
+    tmp.favs = NULL; tmp.nfavs = 0; tmp.saver = 5;
+    tmp.sfx_pack = 0; tmp.boot_snd = 0; tmp.hide_ip = 0; tmp.boxes = 1; tmp.covers_online = 1;
     if (!menu_load(&tmp, S.menu_path)) {
       S.menu_sig = sig;
       menu_reset(&S.menu);       /* libere l'ancien menu (pas les applications) */
@@ -2599,7 +4003,7 @@ static void check_external_changes(void) {
     if (!theme_load(path, &t)) {   /* illisible (envoi en cours) : nouvel essai plus tard */
       S.theme_sig = sig;
       S.cur = t;
-      S.th = &S.cur;
+      S.base = &S.cur;
       theme_changed();
       plat_log("theme recharge (modifie depuis le PC) : %s", t.name);
       char msg[120];
@@ -2643,14 +4047,17 @@ int main(int argc, char **argv) {
 
   scan_all(&S.menu);
   snprintf(S.menu_path, sizeof S.menu_path, "%s/menu.json", plat_data_dir());
+  S.menu.saver = 5;                     /* economiseur apres 5 min par defaut */
+  S.menu.boxes = 1;                     /* jaquettes boites par defaut */
+  S.menu.covers_online = 1;
   menu_load(&S.menu, S.menu_path);
   menu_prune_missing(&S.menu);
   menu_merge_new_apps(&S.menu);
   /* theme : theme.json (complet), sinon le theme fourni du meme nom */
   {
     char dir[PATH_LEN];
-    static const char *const SUBS[] = { "themes", "fonds", "musique" };
-    for (int i = 0; i < 3; i++) { data_path(dir, sizeof dir, SUBS[i]); mkdir(dir, 0755); }
+    static const char *const SUBS[] = { "themes", "fonds", "musique", "jaquettes", "cache" };
+    for (int i = 0; i < 5; i++) { data_path(dir, sizeof dir, SUBS[i]); mkdir(dir, 0755); }
     data_path(dir, sizeof dir, "theme.json");
     S.theme_sig = file_sig(dir);
     if (theme_load(dir, &S.cur)) {
@@ -2658,7 +4065,8 @@ int main(int argc, char **argv) {
       for (int i = 0; i < theme_builtin_count(); i++)
         if (!strcmp(theme_builtin(i)->name, S.menu.theme)) S.cur = *theme_builtin(i);
     }
-    S.th = &S.cur;
+    S.base = &S.cur;
+    S.th = S.base;
     S.tiles_corners = S.cur.corners;
     scan_media_files();
     data_path(dir, sizeof dir, "catalog.json");
@@ -2674,9 +4082,15 @@ int main(int argc, char **argv) {
   char *steps = script ? strdup(script) : NULL, *cursor = steps;
   int wait = 0;
 
+  import_sessions();
   S.running = 1;
+  S.boot_t0 = S.last_input = SDL_GetTicks();
+  S.boot_done = steps && !getenv("L5_INTRO");    /* pas d'intro pendant les tests automatiques */
+  if (!S.boot_done) sfx(SFX_BOOT);
+  int saver_secs = getenv("L5_SAVER") ? atoi(getenv("L5_SAVER")) : 0;   /* test : economiseur plus rapide */
   Uint64 last = SDL_GetPerformanceCounter();
   while (S.running) {
+    box_poll();
     Uint64 now = SDL_GetPerformanceCounter();
     S.dt = (float)(now - last) / SDL_GetPerformanceFrequency();
     if (S.dt > 0.1f) S.dt = 0.1f;
@@ -2698,13 +4112,19 @@ int main(int argc, char **argv) {
     }
     music_pause(0);
     music_update();
-    if (S.frame % 90 == 45) check_external_changes();   /* environ toutes les 1,5 s */
+    if (S.frame % 90 == 45) check_external_changes();
+    {
+      Uint32 limit = saver_secs ? (Uint32)saver_secs * 1000 : (Uint32)S.menu.saver * 60000;
+      if (!S.saver_on && limit && S.mode == MODE_BROWSE && !S.launching && S.boot_done &&
+          SDL_GetTicks() - S.last_input > limit) { S.saver_on = 1; S.saver_t = 0; }
+    }   /* environ toutes les 1,5 s */
     if (overlaid == 2) SDL_Delay(30);                                                          /* menu PS ouvert */
     poll();
     if (steps && S.frame % 6 == 5) {
       char *tok = cursor ? strsep(&cursor, ",") : NULL;
       if (tok) {
-        static const char *names[IN_COUNT] = { "U", "D", "L", "R", "OK", "BACK", "MENU", "MOVE", "L1", "R1", "START", "VIEW" };
+        static const char *names[IN_COUNT] = { "U", "D", "L", "R", "OK", "BACK", "MENU", "MOVE", "L1", "R1", "START", "VIEW",
+                                               "L2", "R2" };
         if (!strncmp(tok, "TXT:", 4)) kb_type(tok + 4);
         else for (int i = 0; i < IN_COUNT; i++) if (!strcmp(tok, names[i])) handle(i);
       } else if (++wait > 8) {

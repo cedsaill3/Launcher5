@@ -104,6 +104,30 @@ void menu_set_hidden(Menu *m, const char *id, int hidden) {
   }
 }
 
+int menu_is_fav(Menu *m, const char *id) {
+  for (int i = 0; i < m->nfavs; i++)
+    if (!strcmp(m->favs[i], id)) return 1;
+  return 0;
+}
+
+void menu_set_fav(Menu *m, const char *id, int fav) {
+  for (int i = 0; i < m->nfavs; i++) {
+    if (!strcmp(m->favs[i], id)) {
+      if (!fav) {
+        memmove(&m->favs[i], &m->favs[i + 1], ID_LEN * (m->nfavs - i - 1));
+        m->nfavs--;
+      }
+      return;
+    }
+  }
+  if (fav) {
+    char (*p)[ID_LEN] = realloc(m->favs, ID_LEN * (m->nfavs + 1));
+    if (!p) return;
+    m->favs = p;
+    copy(m->favs[m->nfavs++], id, ID_LEN);
+  }
+}
+
 void menu_rename_app(Menu *m, const char *id, const char *name) {
   for (int i = 0; i < m->nnames; i++) {
     if (!strcmp(m->names[i].id, id)) {
@@ -135,6 +159,29 @@ void menu_record_launch(Menu *m, const char *id) {
   Stat *s = menu_stat(m, id, 1);
   s->launches++;
   s->last = time(NULL);
+}
+
+/* Le bootstrap ajoute une ligne « ID secondes » a chaque partie terminee.
+   Le fichier est mis de cote avant lecture : une partie qui se termine
+   pendant ce temps est simplement notee dans un nouveau fichier. */
+int menu_import_sessions(Menu *m, const char *path) {
+  char work[PATH_LEN + 8];
+  snprintf(work, sizeof work, "%s.lu", path);
+  if (rename(path, work)) return 0;
+  FILE *f = fopen(work, "r");
+  int n = 0;
+  if (f) {
+    char id[ID_LEN + 8];
+    long secs;
+    while (fscanf(f, "%47s %ld", id, &secs) == 2) {
+      if (secs <= 0 || secs > 7L * 24 * 3600 || strlen(id) >= ID_LEN) continue;
+      menu_stat(m, id, 1)->playtime += secs;
+      n++;
+    }
+    fclose(f);
+  }
+  remove(work);
+  return n;
 }
 
 /* ------------------------------------------------------------------ */
@@ -174,6 +221,9 @@ void menu_reset(Menu *m) {
   free(m->hidden); m->hidden = NULL; m->nhidden = 0;
   free(m->names); m->names = NULL; m->nnames = 0;
   free(m->stats); m->stats = NULL; m->nstats = 0;
+  free(m->favs); m->favs = NULL; m->nfavs = 0;
+  m->saver = 5;
+  m->sfx_pack = 0; m->boot_snd = 0; m->hide_ip = 0; m->boxes = 1; m->covers_online = 1;
   m->show_folders = 0;
   m->view = VIEW_FLOW;
   m->theme[0] = 0;
@@ -240,7 +290,22 @@ int menu_load(Menu *m, const char *path) {
     Stat *s = menu_stat(m, k, 1);
     s->launches = (int)json_integer_value(json_object_get(v, "n"));
     s->last = (time_t)json_integer_value(json_object_get(v, "last"));
+    s->playtime = (long)json_integer_value(json_object_get(v, "t"));
   }
+  json_array_foreach(json_object_get(j, "favorites"), i, v)
+    if (json_is_string(v)) menu_set_fav(m, json_string_value(v), 1);
+  json_t *sv = json_object_get(j, "saver");
+  m->saver = json_is_integer(sv) ? (int)json_integer_value(sv) : 5;
+  if (m->saver < 0 || m->saver > 120) m->saver = 5;
+  m->sfx_pack = (int)json_integer_value(json_object_get(j, "sfx_pack"));
+  if (m->sfx_pack < 0 || m->sfx_pack >= SFX_PACKS) m->sfx_pack = 0;
+  m->boot_snd = (int)json_integer_value(json_object_get(j, "boot_sound"));
+  if (m->boot_snd < 0 || m->boot_snd >= BOOT_SOUNDS) m->boot_snd = 0;
+  m->hide_ip = json_is_true(json_object_get(j, "hide_ip"));
+  json_t *bx = json_object_get(j, "boxes");
+  m->boxes = bx ? json_is_true(bx) : 1;
+  json_t *co = json_object_get(j, "covers_online");
+  m->covers_online = co ? json_is_true(co) : 1;
   m->show_folders = json_is_true(json_object_get(j, "folders"));
   const char *vw = json_string_value(json_object_get(j, "view"));
   m->view = !vw ? VIEW_FLOW : !strcmp(vw, "grid") ? VIEW_GRID : !strcmp(vw, "classic") ? VIEW_CLASSIC : VIEW_FLOW;
@@ -286,8 +351,19 @@ int menu_save(Menu *m, const char *path) {
   json_t *stats = json_object();
   for (int i = 0; i < m->nstats; i++)
     json_object_set_new(stats, m->stats[i].id,
-                        json_pack("{s:i, s:I}", "n", m->stats[i].launches, "last", (json_int_t)m->stats[i].last));
+                        json_pack("{s:i, s:I, s:I}", "n", m->stats[i].launches, "last", (json_int_t)m->stats[i].last,
+                                  "t", (json_int_t)m->stats[i].playtime));
   json_object_set_new(j, "stats", stats);
+
+  json_t *favs = json_array();
+  for (int i = 0; i < m->nfavs; i++) json_array_append_new(favs, json_string(m->favs[i]));
+  json_object_set_new(j, "favorites", favs);
+  json_object_set_new(j, "saver", json_integer(m->saver));
+  json_object_set_new(j, "sfx_pack", json_integer(m->sfx_pack));
+  json_object_set_new(j, "boot_sound", json_integer(m->boot_snd));
+  json_object_set_new(j, "hide_ip", json_boolean(m->hide_ip));
+  json_object_set_new(j, "boxes", json_boolean(m->boxes));
+  json_object_set_new(j, "covers_online", json_boolean(m->covers_online));
 
   /* ecriture sure : fichier temporaire puis renommage */
   char tmp[PATH_LEN + 8];
