@@ -2,7 +2,7 @@
 
 # Launcher5 — game loader pour PS5
 
-**par cedsaill** · v2.0.0 · [English below](#english)
+**par cedsaill** · v2.0.1 · [English below](#english)
 
 Launcher5 remplace la navigation dans tes jeux et homebrews par un vrai game loader :
 jaquettes officielles, cover flow en 3D, thèmes animés, sons, dossiers, musique d'ambiance.
@@ -28,7 +28,7 @@ jaquettes officielles, cover flow en 3D, thèmes animés, sons, dossiers, musiqu
 - **Masquer l'IP** à l'écran, pour les captures et les lives
 - 22 thèmes et 7 fonds d'écran inclus, effets animés (grille, hyperespace, pluie),
   couleurs automatiques selon le jeu
-- Économiseur d'écran, temps de jeu, favoris
+- Économiseur d'écran : diaporama de tes fonds d'écran avec l'horloge ; temps de jeu, favoris
 
 ## Fonctions
 - **3 affichages** : Cover Flow (perspective 3D avec reflets), Grille, Carrousel — au **pavé tactile**
