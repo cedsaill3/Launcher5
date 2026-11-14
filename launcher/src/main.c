@@ -141,7 +141,7 @@ enum {
   ACT_SHOW, ACT_COLOR, ACT_DELETE_FOLDER, ACT_NEW_FOLDER, ACT_TOGGLE_HIDDEN, ACT_RESET_NAME, ACT_THEME, ACT_SAVE_THEME,
   ACT_VIEW, ACT_FAV, ACT_UNFAV,
   /* menu rapide (touche OPTIONS) */
-  ACT_Q_RESTART, ACT_Q_CACHE,
+  ACT_Q_RESTART, ACT_Q_CACHE, ACT_Q_QUIT,
 };
 
 typedef struct { int is_folder; int index; App *app; Node *node; } Entry;
@@ -3081,6 +3081,7 @@ static void open_quick(void) {
   snprintf(S.ctx_title, sizeof S.ctx_title, "%s", tr("Menu rapide"));
   add_choice("Relancer le launcher", ACT_Q_RESTART);
   add_choice("Vider le cache des jaquettes", ACT_Q_CACHE);
+  add_choice("Quitter vers l'accueil PS5", ACT_Q_QUIT);
   S.mode = MODE_CONTEXT;
   sfx(SFX_OK);
 }
@@ -3154,6 +3155,7 @@ static void quick_action(int act) {
     if (plat_send_elf(path)) toast("Chargeur ELF introuvable : envoie /data/launcher5/launcher5.elf");
     break;
   case ACT_Q_CACHE: quick_clear_cache(); break;
+  case ACT_Q_QUIT: { App *a = menu_find_app(&S.menu, "sys:home"); if (a) launch(a); break; }   /* comme dans les Parametres */
   }
 }
 
