@@ -3147,7 +3147,6 @@ static void music_pause(int on) {
 static void music_fade(void) { if (MU.m) Mix_FadeOutMusic(600); }
 
 /* --- sons d'interface : fabriques au premier usage ----------------------- */
-#define BOOT_TECHNO 6                            /* son de demarrage : morceau fourni */
 static Mix_Chunk *SFXC[SFX_COUNT];
 static Sint16 *SFXB[SFX_COUNT];                  /* echantillons (liberes avec le son) */
 static int sfx_state;                            /* 0 pas encore, 1 prets, -1 impossibles */
@@ -3176,7 +3175,7 @@ static const float SFX_DUR[SFX_PACKS][SFX_BOOT] = {
   { 0.05f,  0.09f, 0.14f, 0.14f, 0.85f, 0.25f },   /* Sci-fi */
   { 0.14f,  0.25f, 0.40f, 0.40f, 1.10f, 0.45f },   /* Cristal */
 };
-static const float BOOT_DUR[BOOT_SOUNDS] = { 1.0f, 1.7f, 1.9f, 1.0f, 1.5f, 0, 0 };   /* 5 aucun, 6 fichier */
+static const float BOOT_DUR[BOOT_SOUNDS] = { 1.0f, 1.7f, 1.9f, 1.0f, 1.5f, 0 };
 
 static float sfx_sample(int id, int pack, float t, float k, float *p, float nz) {
   switch (pack) {
@@ -3333,11 +3332,7 @@ static void sfx(int id) {
     if (sfx_boot_built != S.menu.boot_snd) {
       sfx_drop(SFX_BOOT);
       sfx_boot_built = S.menu.boot_snd;
-      if (sfx_boot_built == BOOT_TECHNO) {         /* morceau fourni (sons/) */
-        char path[PATH_LEN];
-        snprintf(path, sizeof path, "%s/sons/demarrage-techno.mp3", plat_data_dir());
-        if (!(SFXC[SFX_BOOT] = Mix_LoadWAV(path))) plat_log("son de demarrage illisible : %s", Mix_GetError());
-      } else sfx_build(SFX_BOOT, sfx_boot_built);
+      sfx_build(SFX_BOOT, sfx_boot_built);
     }
   } else if (sfx_pack_built != S.menu.sfx_pack) {  /* style des sons change : on refait les sons */
     for (int i = 0; i < SFX_BOOT; i++) sfx_drop(i);
@@ -3626,8 +3621,7 @@ static int set_row, set_top;
 
 static const int SAVER_STEPS[] = { 0, 2, 5, 10, 30 };
 static const char *PACK_NAMES[SFX_PACKS] = { "Néon", "Rétro 8-bit", "Doux", "Sci-fi", "Cristal" };
-static const char *BOOT_NAMES[BOOT_SOUNDS] = { "Arpège néon", "Synthwave", "Console", "8-bit", "Hyperespace", "Aucun", "Techno" };
-static const int BOOT_ORDER[BOOT_SOUNDS] = { 6, 0, 1, 2, 3, 4, 5 };   /* ordre dans la liste (« Aucun » en dernier) */
+static const char *BOOT_NAMES[BOOT_SOUNDS] = { "Arpège néon", "Synthwave", "Console", "8-bit", "Hyperespace", "Aucun" };
 
 static int wrap_step(int v, int d, int n) { return ((v + (d ? d : 1)) % n + n) % n; }
 
@@ -3694,11 +3688,7 @@ static void settings_change(int d, int activate) {
     sfx(SFX_OK);
     break;
   case SR_BOOT:
-    {
-      int pos = 0;
-      while (pos < BOOT_SOUNDS - 1 && BOOT_ORDER[pos] != S.menu.boot_snd) pos++;
-      S.menu.boot_snd = BOOT_ORDER[wrap_step(pos, d, BOOT_SOUNDS)];
-    }
+    S.menu.boot_snd = wrap_step(S.menu.boot_snd, d, BOOT_SOUNDS);
     save();
     sfx(SFX_BOOT);
     break;

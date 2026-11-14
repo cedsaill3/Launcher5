@@ -1,5 +1,5 @@
 =====================================================================
-  LAUNCHER5  v2.1.1  
+  LAUNCHER5  v2.1.2  
   par cedsaill
 =====================================================================
 
@@ -83,4 +83,3 @@ LICENCE / LICENSE
   (voir COPYING).
   Sources / source code : https://github.com/cedsaill3/Launcher5
   Polices DejaVu : licence libre.
-  Musique de démarrage « Techno » : Dragon Studio, libre de droits.
