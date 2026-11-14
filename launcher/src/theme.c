@@ -28,6 +28,11 @@ static const Theme BUILTIN[] = {
   { .name = "Loader GX", .accent = 0x2fb5ea, .accent2 = 0xc4c9d1, .top = 0x000000, .bottom = 0x1d1f24, .bg_mode = BG_GRADIENT,
     .art = 0, .glow = 55, .particles = PART_NONE, .pstyle = PSTYLE_DOTS, .fall = 0, .corners = CORNER_ROUND,
     .clock = CLOCK_24, .volume = 60, .fx = FX_NONE, .auto_color = 0, .sfx = 60, .case_style = CASE_PHOTO, .layout = LAYOUT_GX },
+  /* facon XMB de la PS3 sous Rebug : noir et rouge, vagues, categories a l'horizontale */
+  { .name = "Rebug", .accent = 0xe3121c, .accent2 = 0xff8a8f, .top = 0x000000, .bottom = 0x2a0003, .bg_mode = BG_IMAGE,
+    .wallpaper = "rebug.jpg",                    /* fonds/rebug.jpg s'il existe, sinon vagues rouges */
+    .art = 0, .glow = 70, .particles = PART_NONE, .pstyle = PSTYLE_DOTS, .fall = 0, .corners = CORNER_ROUND,
+    .clock = CLOCK_24, .volume = 60, .fx = FX_NONE, .auto_color = 0, .sfx = 60, .case_style = CASE_PHOTO, .layout = LAYOUT_XMB },
   TW("Launcher5 Néon", 0x00e5ff, 0xff2bd6, 0x05081a, 0x170a33, 45, 80,  PART_FEW,  PSTYLE_DOTS,   0, CORNER_ROUND, FX_NONE, 0, "launcher5-02.jpg"),
   T("Néon",       0x00e5ff, 0xff2bd6, 0x05081a, 0x170a33, BG_ART,      45, 100, PART_FEW,  PSTYLE_DOTS,   0, CORNER_ROUND, FX_NONE, 0),
   T("Glitch",     0xff00c8, 0x00fff0, 0x07000f, 0x14002a, BG_ART,      40, 100, PART_MANY, PSTYLE_SPARKS, 0, CORNER_SQUARE, FX_WARP, 0),
@@ -62,7 +67,7 @@ static const char *PSTYLE_KEYS[] = { "points", "etincelles", "flocons" };
 static const char *CORNER_KEYS[] = { "droits", "arrondis", "tres_arrondis" };
 static const char *CLOCK_KEYS[] = { "24h", "12h", "masquee" };
 static const char *FX_KEYS[] = { "aucun", "grille", "hyperespace", "pluie" };
-static const char *LAYOUT_KEYS[] = { "launcher5", "gx" };
+static const char *LAYOUT_KEYS[] = { "launcher5", "gx", "xmb" };
 static const char *CASE_KEYS[] = { "bleu", "noir", "blanc", "cristal", "steelbook", "couleur", "images", "aucun" };
 
 static int key_index(json_t *v, const char **keys, int n, int def) {
@@ -156,7 +161,7 @@ int theme_save(const char *path, const Theme *t) {
   json_object_set_new(j, "effet", json_string(FX_KEYS[t->fx >= 0 && t->fx < FX_COUNT ? t->fx : 0]));
   json_object_set_new(j, "couleur_auto", json_boolean(t->auto_color));
   json_object_set_new(j, "sons", json_integer(t->sfx));
-  json_object_set_new(j, "interface", json_string(LAYOUT_KEYS[t->layout == LAYOUT_GX ? 1 : 0]));
+  json_object_set_new(j, "interface", json_string(LAYOUT_KEYS[t->layout >= 0 && t->layout < LAYOUT_COUNT ? t->layout : 0]));
   json_object_set_new(j, "boitier", json_string(CASE_KEYS[t->case_style >= 0 && t->case_style < CASE_COUNT ? t->case_style : 0]));
   char tmp[600];
   snprintf(tmp, sizeof tmp, "%s.tmp", path);

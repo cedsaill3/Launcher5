@@ -146,6 +146,7 @@ enum {
 
 typedef struct { int is_folder; int index; App *app; Node *node; } Entry;
 #define GXMODE (S.base && S.base->layout == LAYOUT_GX && S.sec != SEC_SYS)   /* ecran des jeux facon loader GX */
+#define XMBMODE (S.base && S.base->layout == LAYOUT_XMB && S.sec != SEC_SYS) /* ecran des jeux facon XMB */
 typedef struct { char label[96]; int action; } Choice;
 typedef struct { Node *folder; char label[128]; } FolderChoice;
 
@@ -2521,6 +2522,16 @@ static void gx_build_bg(void) {
     SDL_Rect r = { 0, y, W, 4 };
     SDL_RenderFillRect(S.r, &r);
   }
+  SDL_Texture *wp = wallpaper();                  /* image choisie dans le studio : a la place du fond clair */
+  if (wp) {
+    int iw, ih;
+    SDL_QueryTexture(wp, NULL, NULL, &iw, &ih);
+    SDL_Rect sr = { 0, 0, iw, ih };
+    if ((long)iw * H > (long)ih * W) { sr.w = ih * W / H; sr.x = (iw - sr.w) / 2; }
+    else { sr.h = iw * H / W; sr.y = (ih - sr.h) / 2; }
+    SDL_SetTextureAlphaMod(wp, 255);
+    SDL_RenderCopy(S.r, wp, &sr, NULL);
+  }
   /* la barre du bas va dans sa propre texture (transparente au-dessus de la vague) */
   SDL_SetRenderTarget(S.r, gx_bar_tex);
   SDL_SetTextureBlendMode(gx_bar_tex, SDL_BLENDMODE_BLEND);
@@ -2616,6 +2627,8 @@ static void gx_scene(int sel) {
     SDL_RenderCopy(S.r, gx_bg_tex, NULL, NULL);
   }
   uint32_t ac = S.base->accent;
+  draw_fx();                                     /* reglages du theme : effet anime et particules */
+  draw_particles(S.lite);
   gx_toolbar();
   gx_tri(46, 190, 104, 150, 104, 230, ac);       /* fleches bleues */
   gx_tri(W - 46, 190, W - 104, 150, W - 104, 230, ac);
@@ -2671,7 +2684,8 @@ static void draw_gx(Entry *e) {
   if (fabsf(sel - S.scroll) < 0.002f) S.scroll = (float)sel;
   uint32_t key = (((((uint32_t)sel * 31 + S.sec) * 31 + S.depth) * 31 + S.nentries) * 31 + S.th_ver) * 31 + tiles_gen;
   key = key * 31 + (S.mode == MODE_MOVE) + 2u * (uint32_t)S.th_ver;
-  if (S.scroll == (float)sel && S.mode != MODE_MOVE) {   /* immobile : image en cache */
+  int moving = S.th->fx != FX_NONE || S.th->particles != PART_NONE;   /* effet anime : pas d'image figee */
+  if (S.scroll == (float)sel && S.mode != MODE_MOVE && !moving) {   /* immobile : image en cache */
     if (!scene) scene = SDL_CreateTexture(S.r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, W, H);
     if (scene && key != scene_key) {
       SDL_Texture *prev = SDL_GetRenderTarget(S.r);
@@ -2718,6 +2732,203 @@ static void draw_gx(Entry *e) {
   draw_text(S.f30, l2, W / 2, 944, 0x4f5862, 1, 900);
 }
 
+/* ------------------------------------------------------------------ */
+/* Interface facon XMB (theme Rebug) : categories a l'horizontale,      */
+/* contenus a la verticale, vagues qui defilent sur un fond sombre.     */
+/* Le fond (degrade + vagues) est dessine une fois, deux ecrans de      */
+/* large, puis simplement decale a chaque image.                        */
+/* ------------------------------------------------------------------ */
+static SDL_Texture *xmb_bg_tex;
+static int xmb_bg_ver = -1, xmb_image;
+
+static void xmb_build_bg(void) {
+  if (xmb_bg_tex && xmb_bg_ver == S.th_ver) return;
+  if (!xmb_bg_tex) xmb_bg_tex = SDL_CreateTexture(S.r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, W * 2, H);
+  if (!xmb_bg_tex) return;
+  xmb_bg_ver = S.th_ver;
+  uint32_t top = S.base->top, bot = S.base->bottom, ac = S.base->accent;
+  SDL_Texture *prev = SDL_GetRenderTarget(S.r);
+  SDL_SetRenderTarget(S.r, xmb_bg_tex);
+  SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_NONE);
+  for (int y = 0; y < H; y += 4) {               /* degrade, un peu plus lumineux au niveau des vagues */
+    float k = (float)y / H, g = 1.0f - fabsf(k - 0.62f) * 1.7f;
+    if (g < 0) g = 0;
+    set_color(mix_color(mix_color(top, bot, k), mix_color(bot, ac, 0.3f), g * 0.6f), 255);
+    SDL_Rect r = { 0, y, W * 2, 4 };
+    SDL_RenderFillRect(S.r, &r);
+  }
+  SDL_Texture *wp = wallpaper();                  /* image du theme : fixe, assombrie a gauche pour la lecture */
+  xmb_image = wp != NULL;
+  if (wp) {
+    int iw, ih;
+    SDL_QueryTexture(wp, NULL, NULL, &iw, &ih);
+    SDL_Rect sr = { 0, 0, iw, ih };
+    if ((long)iw * H > (long)ih * W) { sr.w = ih * W / H; sr.x = (iw - sr.w) / 2; }
+    else { sr.h = iw * H / W; sr.y = (ih - sr.h) / 2; }
+    SDL_Rect dr = { 0, 0, W, H };
+    SDL_RenderCopy(S.r, wp, &sr, &dr);
+    SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_BLEND);
+    for (int x = 0; x < W; x += 4) {
+      float k = 1.0f - (float)x / (W * 0.75f);
+      set_color(0x000000, 60 + (int)(130 * (k > 0 ? k : 0)));
+      SDL_Rect r = { x, 0, 4, H };
+      SDL_RenderFillRect(S.r, &r);
+    }
+    SDL_SetRenderTarget(S.r, prev);
+    return;
+  }
+  /* rubans : frequences entieres, le motif se repete tous les W pixels */
+  static const struct { float y, a1, f1, p1, a2, f2, p2, th, ft, pt; int al; } RB[4] = {
+    { 640, 70, 1, 0.0f, 28, 3, 1.3f, 80, 2, 0.4f, 14 },
+    { 665, 55, 2, 2.1f, 20, 1, 0.2f, 44, 1, 2.0f, 18 },
+    { 700, 90, 1, 4.0f, 18, 2, 3.1f, 120, 3, 1.1f, 9 },
+    { 615, 40, 3, 1.0f, 30, 1, 5.0f, 26, 2, 3.3f, 24 },
+  };
+  uint32_t lc = mix_color(ac, 0xffffff, 0.35f);
+  SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_ADD);
+  for (int i = 0; i < 4; i++)
+    for (int x = 0; x < W * 2; x += 2) {
+      float t = x * 6.2831853f / W;
+      float cy = RB[i].y + RB[i].a1 * sinf(t * RB[i].f1 + RB[i].p1) + RB[i].a2 * sinf(t * RB[i].f2 + RB[i].p2);
+      float th = RB[i].th * (0.55f + 0.45f * sinf(t * RB[i].ft + RB[i].pt));
+      set_color(lc, RB[i].al);
+      SDL_Rect r = { x, (int)(cy - th / 2), 2, (int)th + 1 };
+      SDL_RenderFillRect(S.r, &r);
+      set_color(0xffffff, RB[i].al * 3);         /* bords plus brillants */
+      SDL_Rect e1 = { x, (int)(cy - th / 2), 2, 2 }, e2 = { x, (int)(cy + th / 2) - 1, 2, 2 };
+      SDL_RenderFillRect(S.r, &e1);
+      SDL_RenderFillRect(S.r, &e2);
+    }
+  SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_BLEND);
+  SDL_SetRenderTarget(S.r, prev);
+}
+
+static void xmb_glow(int cx, int cy, int rw, int rh, uint32_t c, int a) {
+  a = a * S.th->glow / 100;                      /* reglage « Halos lumineux » */
+  if (!S.glow || a <= 0) return;
+  SDL_SetTextureColorMod(S.glow, (c >> 16) & 255, (c >> 8) & 255, c & 255);
+  SDL_SetTextureBlendMode(S.glow, SDL_BLENDMODE_ADD);
+  SDL_SetTextureAlphaMod(S.glow, a);
+  SDL_Rect d = { cx - rw, cy - rh, rw * 2, rh * 2 };
+  SDL_RenderCopy(S.r, S.glow, NULL, &d);
+  SDL_SetTextureAlphaMod(S.glow, 255);
+}
+
+static void draw_xmb(Entry *e) {
+  static const char *const ICON[SEC_COUNT] = { "▤", "★", "PS5", "PS4", "▶", "HB", "EMU", "ELF", "↑", "◷", "⚙" };
+  static float wave, colx = -1, fade = 1;
+  static int last_sec = -1, last_depth = -1;
+  const int CX = 440, ROW = 262, XGAP = 250;      /* colonne choisie, ligne des categories */
+  uint32_t ac = S.base->accent, ac2 = S.base->accent2;
+  (void)e;
+  if (S.th->bg_mode == BG_ART) draw_background(e);   /* illustration du jeu : fond habituel du launcher */
+  else xmb_build_bg();
+  if (S.th->bg_mode == BG_ART) {
+  } else if (xmb_bg_tex) {
+    wave = xmb_image ? 0 : fmodf(wave + S.dt * 28.0f, (float)W);
+    SDL_Rect sr = { (int)wave, 0, W, H };
+    SDL_SetTextureBlendMode(xmb_bg_tex, SDL_BLENDMODE_NONE);
+    SDL_RenderCopy(S.r, xmb_bg_tex, &sr, NULL);
+  } else {
+    set_color(S.base->top, 255);
+    SDL_RenderClear(S.r);
+  }
+  draw_fx();                                     /* reglages du theme : effet anime et particules */
+  if (S.th->bg_mode != BG_ART) draw_particles(S.lite);
+
+  /* categories */
+  int vis[SEC_COUNT], nv = 0, ci = 0;
+  for (int k = 0; k < SEC_COUNT; k++) {
+    int s = SEC_ORDER[k];
+    if (!S.sec_has[s]) continue;
+    if (s == S.sec) ci = nv;
+    vis[nv++] = s;
+  }
+  if (colx < 0) colx = (float)ci;
+  colx += ((float)ci - colx) * ease(0.2f);
+  if (fabsf(ci - colx) < 0.002f) colx = (float)ci;
+  if (S.sec != last_sec || S.depth != last_depth) { last_sec = S.sec; last_depth = S.depth; fade = 0; }
+  fade += S.dt * 5.0f;
+  if (fade > 1) fade = 1;
+  for (int j = 0; j < nv; j++) {
+    float x = CX + (j - colx) * XGAP;
+    if (x < -150 || x > W + 150) continue;
+    int s = vis[j], glyph = (unsigned char)ICON[s][0] >= 0x80, on = s == S.sec;
+    float d = fabsf(j - colx), k = d < 1 ? 1 - d : 0;
+    TTF_Font *f = glyph ? (k > 0.5f ? S.f84 : S.f48) : (k > 0.5f ? S.f48 : S.f30);
+    if (on) xmb_glow((int)x, ROW, 120, 90, ac, (int)(150 * k));
+    draw_text_a(f, ICON[s], (int)x, ROW - TTF_FontHeight(f) / 2, 0xffffff, 1, 0, on ? 255 : 150);
+  }
+  draw_text_a(S.f30, SEC_NAMES[S.sec], CX + (int)((ci - colx) * XGAP), ROW + 58, 0xffffff, 1, 420, (int)(255 * fade));
+
+  /* contenus de la categorie, a la verticale */
+  int sel = *cur_sel();
+  S.scroll += ((float)sel - S.scroll) * ease(0.2f);
+  if (fabsf(sel - S.scroll) < 0.002f) S.scroll = (float)sel;
+  int sw = BOXES ? 96 : 124, bw = BOXES ? 172 : 214;   /* petite et grande largeur */
+  int sh = TH(sw), bh = TH(bw), P = sh + 22, y0 = ROW + 125, tx = CX + bw / 2 + 40;
+  float yup = ROW - 95 - sh;                     /* l'element precedent passe au-dessus des categories */
+  int slide = (int)((1 - fade) * 60);
+  for (int i = (int)S.scroll - 2; i <= (int)S.scroll + 8; i++) {
+    if (i < 0 || i >= S.nentries) continue;
+    Entry *en = &S.entries[i];
+    float rel = i - S.scroll, k = 1 - fabsf(rel);
+    if (k < 0) k = 0;
+    if (rel < -1.6f) continue;
+    int w = (int)(sw + (bw - sw) * k), h = TH(w);
+    float y = rel >= 0 ? y0 + rel * P + (rel > 1 ? 1 : rel) * (bh - sh)
+            : rel >= -1 ? yup + (y0 - yup) * (rel + 1) : yup + (rel + 1) * P;
+    if (y > H - 170) continue;                   /* l'aide du bas reste lisible */
+    int alpha = (int)((rel >= 0 ? 200 + 55 * k : 110 + 145 * (rel + 1 > 0 ? rel + 1 : 0)) * fade);
+    SDL_Rect d = { CX - w / 2, (int)y + slide, w, h };
+    if (i == sel && k > 0.9f) xmb_glow(d.x + w / 2, d.y + h / 2, w, h * 2 / 3, ac, 90);
+    SDL_Texture *t = en->is_folder ? folder_tex(en->node) : tile_tex(en->app, FLOW, TH(FLOW));
+    if (t) {
+      SDL_SetTextureAlphaMod(t, alpha);
+      SDL_RenderCopy(S.r, t, NULL, &d);
+      SDL_SetTextureAlphaMod(t, 255);
+    }
+    const char *nm = en->is_folder ? en->node->name : menu_display_name(&S.menu, en->app);
+    if (i == sel) {
+      if (S.mode == MODE_MOVE) outline_round(d.x - 5, d.y - 5, w + 10, h + 10, 10, 4, ac, 255);
+      if (!en->is_folder && menu_is_fav(&S.menu, en->app->id)) fav_badge(d.x, d.y, w);
+      int cy = d.y + h / 2;
+      draw_text_a(S.f48, nm, tx, cy - 50, 0xffffff, 0, W - tx - 120, alpha);
+      if (!en->is_folder) draw_text_a(S.f26, KIND_LABEL[en->app->kind], tx + 2, cy + 14, mix_color(ac2, 0xffffff, 0.3f), 0, 0, alpha);
+    } else {
+      draw_text_a(S.f30, nm, tx, d.y + h / 2 - 20, 0xd8d8d8, 0, W - tx - 120, alpha);
+    }
+  }
+  if (!S.nentries)
+    draw_text_a(S.f36, S.sec == SEC_HOME && S.depth ? "Ce dossier est vide" : "Rien à afficher ici", CX - 60, y0 + 40, 0xc8c8c8, 0, 1200, (int)(255 * fade));
+
+  /* date et heure en haut a droite */
+  if (S.th->clock != CLOCK_HIDDEN) {
+    time_t now = time(NULL);
+    struct tm *tm = localtime(&now);
+    int hh = tm->tm_hour;
+    if (S.th->clock == CLOCK_12) { hh %= 12; if (!hh) hh = 12; }
+    char buf[32];
+    snprintf(buf, sizeof buf, "%02d/%02d   %d:%02d", tm->tm_mday, tm->tm_mon + 1, hh, tm->tm_min);
+    int tw = draw_text(S.f30, buf, W - 96, 54, 0xffffff, 2, 0);
+    fill_round(W - 96 - tw - 30, 100, tw + 30, 2, 1, 0xffffff, 110);
+  }
+
+  /* aide en bas */
+  char hint[240];
+  if (S.mode == MODE_MOVE) snprintf(hint, sizeof hint, "%s", tr("▲▼  Déplacer      ✕  Poser"));
+  else snprintf(hint, sizeof hint, "%s      %s", tr("▲▼  Choisir      ◀ ▶  Sections"),
+                tr(S.sec == SEC_HOME ? (S.depth ? "✕  Ouvrir      ○  Retour      △  Options      □  Déplacer"
+                                                : "✕  Ouvrir / Jouer      △  Options      □  Déplacer")
+                                     : "✕  Jouer      △  Options"));
+  draw_text_a(S.f22, hint, 96, H - 62, 0xffffff, 0, 0, 150);
+  if (S.nentries) {
+    char pos[32];
+    snprintf(pos, sizeof pos, "%d / %d", sel + 1, S.nentries);
+    draw_text_a(S.f22, pos, W - 96, H - 62, 0xffffff, 2, 0, 150);
+  }
+}
+
 static void draw(void) {
   frame_theme(selected());
   refresh_settings();
@@ -2749,6 +2960,10 @@ static void draw(void) {
   }
   if (GXMODE) {
     draw_gx(e);
+    goto overlays;
+  }
+  if (XMBMODE) {
+    draw_xmb(e);
     goto overlays;
   }
   draw_background(e);
@@ -3556,10 +3771,20 @@ static void theme_editor_input(int in) {
       toast("Thème supprimé (les réglages restent affichés)");
       return;
     }
-    if (S.ed_dirty && S.preset >= 0 && !strstr(S.edit.name, tr(" perso"))) {
+    if (S.ed_dirty && S.preset >= 0 && S.preset < S.nbuiltin && !strstr(S.edit.name, tr(" perso"))) {
       char n[64];
       snprintf(n, sizeof n, "%.38s%s", tr(S.edit.name), tr(" perso"));
       snprintf(S.edit.name, sizeof S.edit.name, "%s", n);
+    }
+    if (S.ed_dirty) {                            /* modifications gardees dans la liste des themes */
+      char file[THEME_FILE_LEN], dir[PATH_LEN], path[PATH_LEN + THEME_FILE_LEN];
+      if (S.preset >= S.nbuiltin) snprintf(file, sizeof file, "%s", S.preset_files[S.preset]);
+      else theme_file_name(S.edit.name, file, sizeof file);
+      data_path(dir, sizeof dir, "themes");
+      mkdir(dir, 0755);
+      snprintf(path, sizeof path, "%s/%s", dir, file);
+      if (!theme_save(path, &S.edit)) { load_presets(); S.preset = find_preset(S.edit.name); S.ed_dirty = 0; }
+      else plat_log("impossible d'enregistrer %s", path);
     }
     apply_theme(&S.edit);
     S.mode = MODE_BROWSE;
@@ -3597,7 +3822,7 @@ static int row_chips(int r, const char *const **opts, int *cur) {
   static const char *const FALL[] = { "Montent", "Tombent" };
   static const char *const COR[] = { "Droits", "Arrondis", "Ronds" };
   static const char *const CLK[] = { "24 h", "12 h", "Masquée" };
-  static const char *const LAY[] = { "Launcher5", "Loader GX" };
+  static const char *const LAY[] = { "Launcher5", "Loader GX", "Rebug XMB" };
   static const char *const AUTO[] = { "Du thème", "Du jeu" };
   static const char *const FXN[] = { "Aucun", "Grille", "Hyperespace", "Pluie" };
   const Theme *t = &S.edit;
@@ -4206,7 +4431,8 @@ static void move_cursor(int dx, int dy) {
     return;
   }
   int *sel = cur_sel();
-  if (dy && S.menu.view == VIEW_GRID && !GXMODE) {
+  if (XMBMODE) { int t = dx; dx = dy; dy = t; }   /* XMB : haut / bas dans la liste, gauche / droite les categories */
+  if (dy && S.menu.view == VIEW_GRID && !GXMODE && !XMBMODE) {
     if (S.mode != MODE_BROWSE) return;            /* en deplacement : gauche / droite seulement */
     int ns = *sel + dy * GRID_COLS;
     if (ns >= S.nentries && *sel / GRID_COLS < (S.nentries - 1) / GRID_COLS) ns = S.nentries - 1;
