@@ -1,5 +1,5 @@
 =====================================================================
-  LAUNCHER5  v2.0.1  
+  LAUNCHER5  v2.1.0  
   par cedsaill
 =====================================================================
 
@@ -31,6 +31,15 @@ PERSONNALISER
     themes/   tes thèmes (.json)
     jaquettes/ tes jaquettes perso : <ID du jeu>.jpg (ex. PPSA01234.jpg)
 
+MISES À JOUR
+  Le launcher vérifie chaque jour s'il existe une nouvelle version.
+  Paramètres > Mettre à jour : ✕ télécharge, vérifie et installe.
+  La nouvelle version est enregistrée sur la console :
+      /data/launcher5/launcher5.elf
+  AUTOLOAD : si ta console lance un ELF automatiquement au démarrage,
+  fais-le pointer sur /data/launcher5/launcher5.elf pour démarrer
+  toujours la dernière version.
+
 JAQUETTES
   Les jaquettes officielles des jeux PS5 se téléchargent toutes seules
   depuis la base Launcher5 sur GitHub (marche même si les serveurs Sony
@@ -52,6 +61,11 @@ CONTROLS
 LANGUAGE
   Follows the console language: French, English, Spanish, German,
   Italian, Portuguese (English otherwise). Game names too.
+
+UPDATES
+  Settings > Update downloads, verifies and installs the new version.
+  It is saved as /data/launcher5/launcher5.elf: point your autoload
+  to that file to always start the latest version.
 
 CUSTOMISE
   /data/launcher5/fonds (wallpapers), musique (music), themes (.json),

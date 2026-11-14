@@ -132,3 +132,9 @@ long plat_https_get(const char *url, unsigned char **data, size_t *len, size_t m
   remove(tmp);
   return code;
 }
+
+/* PC : pas de chargeur ELF */
+int plat_send_elf(const char *path) {
+  plat_log("mise a jour (PC) : %s serait envoye au chargeur ELF", path);
+  return -1;
+}

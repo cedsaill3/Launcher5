@@ -223,7 +223,7 @@ void menu_reset(Menu *m) {
   free(m->stats); m->stats = NULL; m->nstats = 0;
   free(m->favs); m->favs = NULL; m->nfavs = 0;
   m->saver = 5;
-  m->sfx_pack = 0; m->boot_snd = 0; m->hide_ip = 0; m->boxes = 1; m->covers_online = 1;
+  m->sfx_pack = 0; m->boot_snd = 0; m->hide_ip = 0; m->boxes = 1; m->covers_online = 1; m->auto_update = 1;
   m->show_folders = 0;
   m->view = VIEW_FLOW;
   m->theme[0] = 0;
@@ -306,6 +306,8 @@ int menu_load(Menu *m, const char *path) {
   m->boxes = bx ? json_is_true(bx) : 1;
   json_t *co = json_object_get(j, "covers_online");
   m->covers_online = co ? json_is_true(co) : 1;
+  json_t *au = json_object_get(j, "auto_update");
+  m->auto_update = au ? json_is_true(au) : 1;
   m->show_folders = json_is_true(json_object_get(j, "folders"));
   const char *vw = json_string_value(json_object_get(j, "view"));
   m->view = !vw ? VIEW_FLOW : !strcmp(vw, "grid") ? VIEW_GRID : !strcmp(vw, "classic") ? VIEW_CLASSIC : VIEW_FLOW;
@@ -364,6 +366,7 @@ int menu_save(Menu *m, const char *path) {
   json_object_set_new(j, "hide_ip", json_boolean(m->hide_ip));
   json_object_set_new(j, "boxes", json_boolean(m->boxes));
   json_object_set_new(j, "covers_online", json_boolean(m->covers_online));
+  json_object_set_new(j, "auto_update", json_boolean(m->auto_update));
 
   /* ecriture sure : fichier temporaire puis renommage */
   char tmp[PATH_LEN + 8];

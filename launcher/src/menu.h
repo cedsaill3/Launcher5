@@ -88,7 +88,8 @@ typedef struct Menu {
   int boot_snd;                       /* son de demarrage (0..BOOT_SOUNDS-1, le dernier = aucun) */
   int hide_ip;                        /* ne pas afficher l'adresse IP a l'ecran */
   int boxes;                          /* jaquettes boites verticales (sinon icones carrees) */
-  int covers_online;                  /* jaquettes officielles telechargees (catalogue PlayStation) */
+  int covers_online;                  /* jaquettes officielles telechargees (base Launcher5) */
+  int auto_update;                    /* verifier les mises a jour une fois par jour */
 } Menu;
 
 /* Applications */

@@ -4,9 +4,9 @@
 CC ?= gcc
 CFLAGS := -O2 -g -Wall -Wextra -Wno-unused-parameter -Wno-format-truncation -DHAVE_MIXER $(shell pkg-config --cflags sdl2 SDL2_ttf SDL2_image SDL2_mixer jansson)
 LIBS := $(shell pkg-config --libs sdl2 SDL2_ttf SDL2_image SDL2_mixer jansson) -lm
-SRCS := src/main.c src/menu.c src/scan.c src/theme.c src/i18n.c src/platform_pc.c src/font_data.c
+SRCS := src/main.c src/menu.c src/scan.c src/theme.c src/i18n.c src/platform_pc.c src/font_data.c src/sha256.c
 
-launcher5: $(SRCS) src/menu.h src/platform.h src/theme.h src/i18n.h src/version.h
+launcher5: $(SRCS) src/menu.h src/platform.h src/theme.h src/i18n.h src/version.h src/sha256.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LIBS)
 
 clean:

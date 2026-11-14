@@ -2,7 +2,7 @@
 
 # Launcher5 — game loader pour PS5
 
-**par cedsaill** · v2.0.1 · [English below](#english)
+**par cedsaill** · v2.1.0 · [English below](#english)
 
 Launcher5 remplace la navigation dans tes jeux et homebrews par un vrai game loader :
 jaquettes officielles, cover flow en 3D, thèmes animés, sons, dossiers, musique d'ambiance.
@@ -18,6 +18,8 @@ jaquettes officielles, cover flow en 3D, thèmes animés, sons, dossiers, musiqu
 | ![Paramètres](docs/parametres.jpg) | ![Studio Thème](docs/studio-theme.png) |
 
 ## Nouveautés de la v2
+- **Mise à jour automatique** : le launcher trouve tout seul la nouvelle version et l'installe
+  (voir [Mises à jour](#mises-à-jour))
 - **Jaquettes officielles** des jeux PS5, téléchargées toutes seules depuis la
   [base Launcher5](https://github.com/cedsaill3/Launcher5-covers) sur GitHub :
   ça marche même quand les serveurs Sony sont bloqués par DNS
@@ -49,6 +51,22 @@ jaquettes officielles, cover flow en 3D, thèmes animés, sons, dossiers, musiqu
    Après un redémarrage de la console, renvoie l'ELF.
 
 Testé sur CFI-1216A, firmware 13.60.
+
+## Mises à jour
+Le launcher vérifie une fois par jour s'il existe une nouvelle version sur GitHub
+(Paramètres › Mises à jour automatiques). Dans **Paramètres › Mettre à jour**, ✕ la télécharge,
+vérifie son empreinte SHA-256 et l'installe : le launcher redémarre tout seul.
+
+La nouvelle version est enregistrée sur la console :
+
+```
+/data/launcher5/launcher5.elf
+```
+
+> **Autoload** : si ta console lance automatiquement un ELF au démarrage (autoload de ton
+> jailbreak, etaHEN…), fais-le pointer sur `/data/launcher5/launcher5.elf`. La PS5 démarrera
+> ainsi toujours la dernière version, sans PC ni clé USB. Le fichier `launcher5.elf` que tu
+> gardes sur ton PC ou ta clé USB, lui, n'est pas modifié.
 
 ## Manette
 | Touche | Action |
@@ -100,6 +118,10 @@ live layout preview · 5 interface sound styles and 6 startup sounds · hide IP 
 
 **Install:** download `launcher5.elf` from [Releases](../../releases) and send
 `launcher5.elf` to your ELF loader (port 9021). A *Launcher5* tile is added to the PS5 home screen.
+
+**Updates:** the launcher checks GitHub once a day; *Settings › Update* downloads the new version,
+verifies its SHA-256 and installs it. It is saved on the console as `/data/launcher5/launcher5.elf`:
+**point your autoload to that file** so the console always starts the latest version.
 
 **Controls:** touchpad = Cover Flow / Grid / Carousel · L1/R1 = sections · ✕ play · △ options ·
 □ move · ○ back.
