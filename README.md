@@ -17,51 +17,20 @@ jaquettes officielles, cover flow en 3D, thèmes animés, sons, dossiers, musiqu
 |---|---|
 | ![Paramètres](docs/parametres.jpg) | ![Studio Thème](docs/studio-theme.png) |
 
-## Nouveautés de la v2.4
-- **Menu rapide** sur la touche **OPTIONS** : relancer le launcher, vider le cache des jaquettes
-  (elles se refont toutes seules), avec l'espace libre, la température et la durée depuis l'allumage
-
-## Nouveautés de la v2.3
-- **Boîtiers en 3D** dans le Cover Flow : les boîtiers sur les côtés montrent leur tranche
-- **6 styles de boîtier** (Studio Thème › Boîtiers des jeux) : Bleu, Noir, Cristal, Steel, couleur du
-  thème ou jaquette seule
-- Musique d'ambiance en boucle **sans coupure** (le silence de fin du morceau est retiré) ; ta musique
-  te suit quand tu changes de thème
-- Le launcher s'ouvre sur tes jeux ; « Mes dossiers » passe après les émulateurs
-
-## Nouveautés de la v2.2
-- **Vrais boîtiers** : chaque jeu est rangé dans un boîtier en plastique bleu avec son bandeau
-  PS5 (blanc) ou PS4 (bleu), et les **homebrews en boîtier rouge** pour les repérer d'un coup d'œil
-- **Animation de lancement** : la jaquette arrive au centre, l'écran prend les couleurs du jeu,
-  un reflet de lumière traverse la boîte
-
-![Lancement](docs/lancement.jpg)
-
-## Nouveautés de la v2
-- **Mise à jour automatique** : le launcher trouve tout seul la nouvelle version et l'installe
-  (voir [Mises à jour](#mises-à-jour))
-- **Jaquettes officielles** des jeux PS5, téléchargées toutes seules depuis la
-  [base Launcher5](https://github.com/cedsaill3/Launcher5-covers) sur GitHub :
-  ça marche même quand les serveurs Sony sont bloqués par DNS
-- **Jaquettes boîtes** pour tous les autres jeux, fabriquées à partir de leur illustration
-  et de leur titre, ou ta propre jaquette dans `jaquettes/`
-- **Menu Paramètres** complet, avec **aperçu en direct** de l'affichage choisi
-- **Sons** : 5 styles d'interface (Néon, Rétro 8-bit, Doux, Sci-fi, Cristal) et 6 sons de démarrage
-- **Masquer l'IP** à l'écran, pour les captures et les lives
-- 22 thèmes et 7 fonds d'écran inclus, effets animés (grille, hyperespace, pluie),
-  couleurs automatiques selon le jeu
-- Économiseur d'écran : diaporama de tes fonds d'écran avec l'horloge ; temps de jeu, favoris
-
 ## Fonctions
-- **3 affichages** : Cover Flow (perspective 3D avec reflets), Grille, Carrousel — au **pavé tactile**
+- **3 affichages** au pavé tactile : Cover Flow en 3D (boîtiers avec tranche et reflets), Grille, Carrousel
+- **Jaquettes officielles** des jeux PS5, téléchargées toutes seules depuis la
+  [base Launcher5](https://github.com/cedsaill3/Launcher5-covers) (marche même quand Sony est bloqué par DNS) ;
+  boîtiers PS5 / PS4 pour les autres jeux, homebrews en rouge, ou ta jaquette dans `jaquettes/`
 - Sections : Jeux PS5, Jeux PS4, Médias, Homebrews, Émulateurs, Payloads, Récents, Mes dossiers
-- **Studio Thème** à la manette : couleurs, fond (illustration du jeu, dégradé ou image perso),
-  halos, particules, effets, horloge, musique
-- Dossiers colorés, noms personnalisés, jeux masqués, retour automatique après un jeu
-- **Multilingue automatique** selon la langue de la console : français, anglais, espagnol,
-  allemand, italien, portugais — noms des jeux compris
-- Tuile **Launcher5** ajoutée toute seule sur l'accueil de la PS5
-- 60 images/s sur PS5
+- **Studio Thème** à la manette : 22 thèmes, 7 fonds d'écran, couleurs, effets animés, particules,
+  style de boîtier, musique d'ambiance
+- Sons d'interface (5 styles) et sons de démarrage
+- **Menu rapide** (OPTIONS) : relancer le launcher, vider le cache des jaquettes
+- **Mise à jour automatique** depuis GitHub
+- Dossiers, favoris, noms perso, jeux masqués, temps de jeu, économiseur d'écran, masquer l'IP
+- Français, anglais, espagnol, allemand, italien, portugais selon la langue de la console
+- Tuile **Launcher5** sur l'accueil de la PS5, 60 images/s
 
 ## Installation
 1. PS5 jailbreakée avec un chargeur ELF actif (port 9021).
@@ -130,18 +99,6 @@ Polices DejaVu : licence libre. Les jaquettes appartiennent à leurs éditeurs.
 Cover Flow with 3D perspective and reflections, cover grid, carousel, animated themes,
 interface sounds, folders, background music. The interface follows the console language
 (French, English, Spanish, German, Italian, Portuguese).
-
-**New in v2.4:** quick menu on the **OPTIONS** button (restart the launcher, clear the cover cache, console info).
-
-**New in v2.3:** 3D game cases in Cover Flow, 6 case styles (blue, black, crystal, steel, theme colour, none), gapless background music loop.
-
-**New in v2.2:** real game cases (blue plastic case with the PS5 / PS4 banner, **red cases for homebrews**) and an animated launch screen in the game's colors.
-
-**New in v2:** official PS5 covers downloaded automatically from the
-[Launcher5 cover database](https://github.com/cedsaill3/Launcher5-covers) on GitHub (works even
-when Sony servers are blocked by DNS) · box covers for every other game · full Settings menu with
-live layout preview · 5 interface sound styles and 6 startup sounds · hide IP option ·
-22 themes, 7 bundled wallpapers and animated effects.
 
 **Install:** download `launcher5.elf` from [Releases](../../releases) and send
 `launcher5.elf` to your ELF loader (port 9021). A *Launcher5* tile is added to the PS5 home screen.
