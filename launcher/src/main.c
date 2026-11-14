@@ -404,7 +404,10 @@ static SDL_Texture *make_shade(int horizontal) {
 static int ga(int a) { return a * S.th->glow / 100; }
 
 /* arrondi des tuiles (a la taille d'une tuile selectionnee) */
-static int tile_rad(void) { static const int R[] = { 0, 18, 44 }; return R[S.th->corners]; }
+static int tile_rad(void) {                      /* boitiers : coins a peine arrondis, comme le plastique */
+  static const int R[] = { 0, 18, 44 };
+  return BOXES ? (S.th->corners ? 10 : 0) : R[S.th->corners];
+}
 
 static void glow(int cx, int cy, int radius, uint32_t color, int alpha) {
   SDL_SetTextureColorMod(S.glow, (color >> 16) & 255, (color >> 8) & 255, color & 255);
@@ -665,39 +668,29 @@ static void darken(SDL_Surface *s, int x0, int y0, int w, int h, int rad, float 
   }
 }
 
+/* Jaquette fabriquee facon boitier : l'illustration en pleine page, ou a defaut
+   l'icone sur toute la largeur devant un fond flou de ses couleurs. Le bas est
+   assombri pour le titre, le bandeau PS5 / PS4 est ajoute a l'affichage. */
 static SDL_Surface *box_compose(const char *bg, const char *icon) {
-  SDL_Surface *ic = icon[0] ? argb(IMG_Load(icon)) : NULL;
   SDL_Surface *art = bg[0] ? argb(IMG_Load(bg)) : NULL;
-  SDL_Surface *src = art ? art : ic;
-  if (!src) return NULL;
+  SDL_Surface *ic = !art && icon[0] ? argb(IMG_Load(icon)) : NULL;
+  if (!art && !ic) return NULL;
   SDL_Surface *d = SDL_CreateRGBSurfaceWithFormat(0, BOXW, BOXH, 32, SDL_PIXELFORMAT_ARGB8888);
-  if (d) {
-    stretch_smooth(src, crop_to(src, BOXW, BOXH), d, NULL);
-    if (!art) darken(d, 0, 0, BOXW, BOXH, 0, 0.45f);   /* pas d'illustration : l'icone agrandie en fond */
-    /* bas assombri pour faire ressortir l'icone */
-    for (int y = BOXH * 45 / 100; y < BOXH; y++) {
-      float k = 1 - 0.7f * (y - BOXH * 45 / 100) / (float)(BOXH * 55 / 100);
-      darken(d, 0, y, BOXW, 1, 0, k);
+  if (d && art) stretch_smooth(art, crop_to(art, BOXW, BOXH), d, NULL);
+  else if (d) {
+    SDL_Surface *sm = SDL_CreateRGBSurfaceWithFormat(0, 12, 18, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (sm) {                                    /* fond : l'icone tres floutee */
+      stretch_smooth(ic, crop_to(ic, 12, 18), sm, NULL);
+      SDL_SoftStretchLinear(sm, NULL, d, NULL);
+      SDL_FreeSurface(sm);
     }
-    if (ic) {
-      int is = BOXW * 60 / 100, x = (BOXW - is) / 2, y = BOXH - is - BOXW * 9 / 100, rad = is / 10;
-      darken(d, x + 4, y + 8, is, is, rad, 0.45f);  /* ombre */
-      SDL_Surface *t = SDL_CreateRGBSurfaceWithFormat(0, is, is, 32, SDL_PIXELFORMAT_ARGB8888);
-      if (t) {
-        stretch_smooth(ic, (SDL_Rect){ 0, 0, ic->w, ic->h }, t, NULL);
-        Uint32 *px = t->pixels;                  /* coins arrondis */
-        for (int yy = 0; yy < is; yy++)
-          for (int xx = 0; xx < is; xx++) {
-            int dx = xx < rad ? rad - xx : xx >= is - rad ? xx - (is - rad - 1) : 0;
-            int dy = yy < rad ? rad - yy : yy >= is - rad ? yy - (is - rad - 1) : 0;
-            if (dx * dx + dy * dy > rad * rad) px[yy * (t->pitch / 4) + xx] = 0;
-          }
-        SDL_SetSurfaceBlendMode(t, SDL_BLENDMODE_BLEND);
-        SDL_Rect dr = { x, y, is, is };
-        SDL_BlitSurface(t, NULL, d, &dr);
-        SDL_FreeSurface(t);
-      }
-    }
+    darken(d, 0, 0, BOXW, BOXH, 0, 0.55f);
+    SDL_Rect r = { 0, (BOXH - BOXW) / 2 - 18, BOXW, BOXW };
+    stretch_smooth(ic, (SDL_Rect){ 0, 0, ic->w, ic->h }, d, &r);
+  }
+  if (d) for (int y = BOXH * 58 / 100; y < BOXH; y++) {   /* bas assombri pour le titre */
+    float k = 1 - 0.75f * (y - BOXH * 58 / 100) / (float)(BOXH * 42 / 100);
+    darken(d, 0, y, BOXW, 1, 0, k);
   }
   if (art) SDL_FreeSurface(art);
   if (ic) SDL_FreeSurface(ic);
@@ -815,7 +808,7 @@ static int box_worker(void *u) {
         else if (r == 0) { FILE *f = fopen(none, "w"); if (f) fclose(f); }   /* pas de jaquette : on ne redemande pas */
         else { BX.offline = 1; plat_log("jaquettes officielles : pas d'acces a la base (GitHub)"); }
       }
-      if (s) custom = 1;                         /* telle quelle, sans bandeau */
+      if (s) custom = 2;                         /* officielle : sous le bandeau, sans titre */
     }
     if (!s && access(cache, R_OK) == 0) {        /* deja fabriquee */
       s = argb(IMG_Load(cache));
@@ -867,7 +860,7 @@ static int box_submit(App *a, int prefetch) {
     snprintf(BX.icon, sizeof BX.icon, "%s", a->icon);
     snprintf(BX.mine[0], sizeof BX.mine[0], "%s/jaquettes/%s.jpg", plat_data_dir(), sid);
     snprintf(BX.mine[1], sizeof BX.mine[1], "%s/jaquettes/%s.png", plat_data_dir(), sid);
-    snprintf(BX.cache, sizeof BX.cache, "%s/cache/%s.jpg", plat_data_dir(), sid);
+    snprintf(BX.cache, sizeof BX.cache, "%s/cache/%s.box.jpg", plat_data_dir(), sid);   /* modele boitier */
     snprintf(BX.off, sizeof BX.off, "%s/cache/%s.off.jpg", plat_data_dir(), sid);
     snprintf(BX.none, sizeof BX.none, "%s/cache/%s.none", plat_data_dir(), sid);
     BX.online = S.menu.covers_online;
@@ -931,25 +924,91 @@ static void box_check_custom(void) {
   }
 }
 
-/* contenu d'une jaquette boite (w x h) dans la cible de rendu courante */
-static void draw_box_contents(App *a, int w, int h) {
-  SDL_Texture *art = box_art(a);
-  if (art) SDL_RenderCopy(S.r, art, NULL, NULL);
-  else {                                         /* provisoire : icone sur fond sombre */
-    uint32_t c = a->has_vibe ? a->vibe : hash_color(a->id);
-    fill_round(0, 0, w, h, 0, shade(c, 0.22f), 255);
-    SDL_Texture *ic = cover(a);
-    int is = w * 80 / 100;
-    if (ic) { SDL_Rect d = { (w - is) / 2, (h - is) / 2, is, is }; SDL_RenderCopy(S.r, ic, NULL, &d); }
+/* titre du jeu en bas de la boite, sur deux lignes au plus */
+static void box_title(App *a, int w, int h) {
+  const char *n = tr(menu_display_name(&S.menu, a));
+  char line[2][200] = { "", "" };
+  int ln = 0, maxw = w - 36, tw, th;
+  const char *p = n;
+  while (*p && ln < 2) {
+    const char *sp = strchr(p, ' ');
+    size_t wl = sp ? (size_t)(sp - p) : strlen(p);
+    char tryb[200];
+    snprintf(tryb, sizeof tryb, "%s%s%.*s", line[ln], line[ln][0] ? " " : "", (int)wl, p);
+    TTF_SizeUTF8(S.f30, tryb, &tw, &th);
+    if (tw > maxw && line[ln][0] && ln == 0) { ln++; continue; }   /* mot suivant : ligne 2 */
+    snprintf(line[ln], sizeof line[ln], "%s", tryb);
+    p += wl;
+    while (*p == ' ') p++;
   }
-  if (a->box_state == 2 && a->box_custom) return; /* jaquette perso : telle quelle */
-  /* bandeau du haut, facon boitier */
-  int bh = h * 9 / 100;
-  uint32_t bc = a->kind == KIND_PS5 ? 0xf4f4f4 : a->kind == KIND_PS4 ? 0x0a3d91 : S.th->accent;
-  uint32_t tc = a->kind == KIND_PS5 ? 0x0a0a12 : 0xffffff;
-  fill_round(0, 0, w, bh, 0, bc, 255);
-  const char *lab = a->kind == KIND_PS5 ? "PS5" : a->kind == KIND_PS4 ? "PS4" : KIND_LABEL[a->kind];
-  if (w >= 300) draw_text(S.f26, lab, w / 2, (bh - 30) / 2, tc, 1, w - 60);
+  if (*p && ln >= 1) {                           /* reste du titre : coupe avec « … » */
+    char all[200];
+    snprintf(all, sizeof all, "%s %s", line[1], p);
+    snprintf(line[1], sizeof line[1], "%s", all);
+  }
+  int nl = line[1][0] ? 2 : 1, lh = 36, y = h - 30 - nl * lh;
+  for (int i = 0; i < nl; i++) {
+    draw_text_a(S.f30, line[i], w / 2 + 2, y + i * lh + 2, 0x000000, 1, maxw, 160);   /* ombre */
+    draw_text(S.f30, line[i], w / 2, y + i * lh, 0xffffff, 1, maxw);
+  }
+}
+
+static uint32_t mix_color(uint32_t c, uint32_t t, float k);
+/* contenu d'une jaquette boite (w x h) dans la cible de rendu courante :
+   un boitier en plastique bleu, la jaquette dedans, bandeau PS5 / PS4 en haut */
+static void draw_box_contents(App *a, int w, int h) {
+  /* le boitier : plastique bleu, rouge pour les homebrews (reconnus d'un coup d'oeil) */
+  int hb = a->kind == KIND_HOMEBREW;
+  uint32_t cb = hb ? 0xc81e24 : 0x1a56d6, cl = hb ? 0xff8a8a : 0x6fa4ff;
+  uint32_t cd = hb ? 0x6e0b0e : 0x0d2f80, cr = hb ? 0xffb0b0 : 0x8fbaff;
+  int m = w * 4 / 100 + 1, mt = h * 3 / 100 + 1;
+  fill_round(0, 0, w, h, 0, cb, 255);
+  fill_round(0, 0, w, 3, 0, cl, 140);
+  fill_round(0, h - 3, w, 3, 0, cd, 160);
+  for (int i = 1; i < 6; i++) {                  /* petits ergots le long des bords */
+    fill_round(w * i / 6 - 6, 2, 12, 2, 0, cr, 110);
+    fill_round(w * i / 6 - 6, h - 4, 12, 2, 0, cr, 90);
+  }
+  fill_round(w - m / 2 - 1, h * 45 / 100, 2, h / 10, 0, cr, 120);   /* clip de fermeture */
+  SDL_Rect in = { m, mt, w - 2 * m, h - 2 * mt };
+  SDL_RenderSetViewport(S.r, &in);
+  int iw = in.w, ih = in.h;
+  SDL_Texture *art = box_art(a);
+  int kind = a->box_state == 2 ? a->box_custom : 0;   /* 0 fabriquee, 1 perso, 2 officielle */
+  int bh = kind == 1 ? 0 : ih * 10 / 100;
+  if (art && kind == 2) {                        /* officielle : l'image sous le bandeau */
+    int tw, th;
+    SDL_QueryTexture(art, NULL, NULL, &tw, &th);
+    int ah = ih - bh, sh = tw * ah / iw;         /* recadrage au format de la place restante */
+    if (sh > th) sh = th;
+    SDL_Rect sr = { 0, (th - sh) / 2, tw, sh }, dr = { 0, bh, iw, ah };
+    SDL_RenderCopy(S.r, art, &sr, &dr);
+  } else if (art) SDL_RenderCopy(S.r, art, NULL, NULL);
+  else {                                         /* provisoire : meme mise en page avec l'icone */
+    uint32_t c = a->has_vibe ? a->vibe : hash_color(a->id);
+    fill_round(0, 0, iw, ih, 0, shade(c, 0.28f), 255);
+    SDL_Texture *ic = cover(a);
+    if (ic) { SDL_Rect d = { 0, (ih - iw) / 2 - ih * 4 / 100, iw, iw }; SDL_RenderCopy(S.r, ic, NULL, &d); }
+    SDL_Rect bot = { 0, ih * 62 / 100, iw, ih - ih * 62 / 100 };
+    if (S.shade_bottom) SDL_RenderCopy(S.r, S.shade_bottom, NULL, &bot);
+  }
+  if (kind != 1) {                               /* jaquette perso : telle quelle */
+    if (a->kind == KIND_PS4) {                   /* PS4 : bleu en degrade, texte blanc */
+      for (int x = 0; x < iw; x += 3) {
+        float t = (float)x / iw;
+        uint32_t col = mix_color(0x0a3a9c, 0x168fd9, t);
+        fill_round(x, 0, 3, bh, 0, col, 255);
+      }
+    } else fill_round(0, 0, iw, bh, 0, a->kind == KIND_PS5 ? 0xf6f6f8 : hb ? 0xa3151a : shade(S.th->accent, 0.8f), 255);
+    fill_round(0, bh, iw, 2, 0, a->kind == KIND_PS5 ? 0x1a1a22 : 0xffffff, a->kind == KIND_PS5 ? 60 : 200);
+    uint32_t tc = a->kind == KIND_PS5 ? 0x0a0a12 : 0xffffff;
+    const char *lab = a->kind == KIND_PS5 ? "PS5" : a->kind == KIND_PS4 ? "PS4" : KIND_LABEL[a->kind];
+    if (iw >= 260) {
+      draw_text(S.f30, lab, 16, (bh - 36) / 2, tc, 0, iw - 32);
+      if (!kind) box_title(a, iw, ih);           /* l'officielle a deja son titre */
+    }
+  }
+  SDL_RenderSetViewport(S.r, NULL);
 }
 
 /* Tuile complete au format boite (w x h), calculee une seule fois :
@@ -2243,6 +2302,12 @@ static void draw(void) {
     draw_saver();
     if (S.saver_on) { SDL_RenderPresent(S.r); return; }
   }
+  if (S.launching && SDL_GetTicks() - S.launch_t > 400) {
+    draw_launching();
+    draw_toast();
+    SDL_RenderPresent(S.r);
+    return;
+  }
   draw_background(e);
   draw_fx();
   draw_topbar();
@@ -2441,27 +2506,125 @@ static void launch(App *a) {
   if (msg[0]) toast(msg);
 }
 
+/* fond et jaquette du lancement, prepares une seule fois : chaque image ne fait
+   ensuite que des copies (le dessin logiciel de la PS5 reste fluide) */
+static struct { App *app; SDL_Texture *bg, *box; int bw, bh; } LB;
+
+static void launch_prepare(App *a, uint32_t c) {
+  if (LB.bg) SDL_DestroyTexture(LB.bg);
+  if (LB.box) SDL_DestroyTexture(LB.box);
+  LB.bg = LB.box = NULL;
+  LB.app = a;
+  LB.bw = BOXES ? 405 : 420;
+  LB.bh = BOXES ? LB.bw * 3 / 2 : LB.bw;
+  SDL_Texture *prev = SDL_GetRenderTarget(S.r);
+  int cx = W / 2, cy = H / 2 - 60;
+  LB.bg = SDL_CreateTexture(S.r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, W, H);
+  if (LB.bg && !SDL_SetRenderTarget(S.r, LB.bg)) {
+    SDL_SetRenderDrawColor(S.r, 0, 0, 0, 255);
+    SDL_RenderClear(S.r);
+    SDL_Texture *bl = a->bg[0] ? blurred(a) : NULL;
+    if (bl) { SDL_SetTextureAlphaMod(bl, 150); SDL_RenderCopy(S.r, bl, NULL, NULL); SDL_SetTextureAlphaMod(bl, 255); }
+    glow(cx, cy, (int)(220 + W * 0.75f), c, 180);   /* couleur du jeu */
+    glow(cx, cy, (int)(LB.bh * 0.9f), c, 150);       /* halo derriere la boite */
+  }
+  SDL_Texture *t = tile_tex(a, FLOW, TH(FLOW));
+  if (!t) t = cover(a);
+  if (t && (LB.box = SDL_CreateTexture(S.r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, LB.bw, LB.bh)) &&
+      !SDL_SetRenderTarget(S.r, LB.box)) {
+    SDL_SetRenderDrawColor(S.r, 0, 0, 0, 0);
+    SDL_RenderClear(S.r);
+    SDL_BlendMode bm;
+    SDL_GetTextureBlendMode(t, &bm);
+    SDL_SetTextureBlendMode(t, SDL_BLENDMODE_NONE);   /* garde la transparence des coins */
+    SDL_RenderCopy(S.r, t, NULL, NULL);
+    SDL_SetTextureBlendMode(t, bm);
+    SDL_SetTextureBlendMode(LB.box, SDL_BLENDMODE_BLEND);
+  }
+  SDL_SetRenderTarget(S.r, prev);
+}
+
+/* Animation de lancement : la jaquette arrive au centre avec un leger rebond,
+   l'illustration et la couleur du jeu envahissent l'ecran, un reflet de lumiere
+   balaie la boite, puis le nom monte avec une barre d'attente. */
+static float clampf(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+static float out_cubic(float k) { k = 1 - clampf(k); return 1 - k * k * k; }
+static float out_back(float k) {                 /* depasse un peu puis revient */
+  k = clampf(k) - 1;
+  return 1 + k * k * (2.7f * k + 1.7f);
+}
+
 static void draw_launching(void) {
   if (!S.launching) return;
   Uint32 el = SDL_GetTicks() - S.launch_t;
+  const char *ft = getenv("L5_LAUNCH_T");        /* test : image figee a cet instant */
+  if (ft) el = (Uint32)atoi(ft);
   if (el > 12000) { S.launching = NULL; toast("Le lancement prend du temps…"); return; }
-  set_color(0x000000, el > 300 ? 225 : (int)(225 * el / 300));
-  SDL_Rect full = { 0, 0, W, H };
-  SDL_RenderFillRect(S.r, &full);
+  int e = (int)el;
   App *a = S.launching;
-  int size = 420, x = (W - size) / 2, y = H / 2 - size / 2 - 70;
-  float pulse = 0.5f + 0.5f * sinf(S.frame * 0.1f);
-  glow(W / 2, y + size / 2, size, S.th->accent, (int)(90 + 60 * pulse));
-  SDL_Texture *t = cover(a);
-  if (t) { SDL_Rect d = { x, y, size, size }; SDL_RenderCopy(S.r, t, NULL, &d); }
-  else fill_round(x, y, size, size, 24, shade(hash_color(a->id), 0.6f), 255);
-  outline_round(x, y, size, size, 16, 3, 0xffffff, 200);
-  draw_text(S.f48, menu_display_name(&S.menu, a), W / 2, y + size + 34, 0xffffff, 1, 1400);
-  char dots[8] = "";
-  for (int i = 0; i < (int)(el / 400) % 4; i++) strcat(dots, ".");
-  char line[40];
-  snprintf(line, sizeof line, tr("Lancement%s"), dots);
-  draw_text(S.f30, line, W / 2, y + size + 116, S.th->accent, 1, 0);
+  cover(a);                                      /* calcule aussi la couleur du jeu */
+  uint32_t c = a->has_vibe ? a->vibe : S.th->accent;
+  if (LB.app != a || !LB.bg) launch_prepare(a, c);
+  int cx = W / 2, cy = H / 2 - 60;
+
+  /* 1. le menu s'efface sous le fond du jeu */
+  if (LB.bg) {
+    int fa = (int)(255 * out_cubic(e / 350.0f));
+    SDL_SetTextureBlendMode(LB.bg, fa < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
+    SDL_SetTextureAlphaMod(LB.bg, fa);
+    SDL_RenderCopy(S.r, LB.bg, NULL, NULL);
+  } else {
+    set_color(0x000000, 255);
+    SDL_Rect full = { 0, 0, W, H };
+    SDL_RenderFillRect(S.r, &full);
+  }
+  if (e > 180 && e < 700) {                      /* eclair quand la boite se pose */
+    float f = (e - 180) / 520.0f;
+    glow(cx, cy, (int)(260 + 340 * f), 0xffffff, (int)(120 * (1 - f) * (1 - f)));
+  }
+
+  /* 2. la jaquette arrive en grossissant, avec un petit rebond */
+  float sc = 0.55f + 0.45f * out_back(e / 520.0f);
+  int bw = (int)(LB.bw * sc + 0.5f), bh = (int)(LB.bh * sc + 0.5f);
+  if (e >= 520) { bw = LB.bw; bh = LB.bh; }      /* posee : copie a taille reelle */
+  SDL_Rect d = { cx - bw / 2, cy - bh / 2, bw, bh };
+  int alpha = (int)(255 * clampf(e / 180.0f));
+  if (LB.box) {
+    SDL_SetTextureAlphaMod(LB.box, alpha);
+    SDL_RenderCopy(S.r, LB.box, NULL, &d);
+  } else fill_round(d.x, d.y, bw, bh, 24, shade(hash_color(a->id), 0.6f), alpha);
+  /* 3. reflet de lumiere qui traverse la boite */
+  if (e > 480 && e < 1180) {
+    float f = (e - 480) / 700.0f;
+    int sw = bw / 3, sx = d.x - sw + (int)((bw + sw * 2) * f);
+    SDL_RenderSetClipRect(S.r, &d);
+    SDL_SetTextureColorMod(S.glow, 255, 255, 255);
+    SDL_SetTextureAlphaMod(S.glow, (int)(150 * sinf(f * 3.14159f)));
+    SDL_Rect g = { sx - sw / 2, d.y - bh / 4, sw, bh + bh / 2 };
+    SDL_RenderCopy(S.r, S.glow, NULL, &g);
+    SDL_RenderSetClipRect(S.r, NULL);
+  }
+  int rad = tile_rad() * bw / TILE_SEL;
+  outline_round(d.x - 2, d.y - 2, bw + 4, bh + 4, rad + 2, 2, 0xffffff, alpha * 120 / 255);
+
+  /* 4. le nom monte, puis la barre d'attente */
+  if (e > 320) {
+    float tx = out_cubic((e - 320) / 450.0f);
+    int ty = cy + LB.bh / 2 + 40 + (int)(30 * (1 - tx));
+    draw_text_a(S.f48, menu_display_name(&S.menu, a), W / 2, ty, 0xffffff, 1, 1400, (int)(255 * tx));
+    char dots[8] = "", line[40];
+    for (int i = 0; i < e / 400 % 4; i++) strcat(dots, ".");
+    snprintf(line, sizeof line, tr("Lancement%s"), dots);
+    draw_text_a(S.f30, line, W / 2, ty + 78, c, 1, 0, (int)(230 * tx));
+    if (e > 600) {                               /* barre d'attente : un trait qui glisse */
+      int lw = 360, lx = W / 2 - lw / 2, ly = ty + 132, ba = (int)(200 * clampf((e - 600) / 300.0f));
+      fill_round(lx, ly, lw, 4, 2, 0xffffff, ba / 5);
+      float m = fmodf(e / 1100.0f, 1.0f);
+      int seg = lw / 4, sx = lx - seg + (int)((lw + seg) * m);
+      int x0 = sx < lx ? lx : sx, x1 = sx + seg > lx + lw ? lx + lw : sx + seg;
+      if (x1 > x0) fill_round(x0, ly, x1 - x0, 4, 2, c, ba);
+    }
+  }
 }
 
 static void do_action(int act) {
