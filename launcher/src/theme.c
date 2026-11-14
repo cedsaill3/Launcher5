@@ -58,6 +58,7 @@ static const char *PSTYLE_KEYS[] = { "points", "etincelles", "flocons" };
 static const char *CORNER_KEYS[] = { "droits", "arrondis", "tres_arrondis" };
 static const char *CLOCK_KEYS[] = { "24h", "12h", "masquee" };
 static const char *FX_KEYS[] = { "aucun", "grille", "hyperespace", "pluie" };
+static const char *CASE_KEYS[] = { "bleu", "noir", "cristal", "steelbook", "couleur", "aucun" };
 
 static int key_index(json_t *v, const char **keys, int n, int def) {
   const char *s = json_string_value(v);
@@ -117,6 +118,7 @@ int theme_load(const char *path, Theme *t) {
   d.fx = key_index(json_object_get(j, "effet"), FX_KEYS, FX_COUNT, FX_NONE);
   d.auto_color = json_is_true(json_object_get(j, "couleur_auto"));
   d.sfx = num_of(json_object_get(j, "sons"), 60, 0, 100);
+  d.case_style = key_index(json_object_get(j, "boitier"), CASE_KEYS, CASE_COUNT, CASE_BLUE);
   json_decref(j);
   *t = d;
   return 0;
@@ -148,6 +150,7 @@ int theme_save(const char *path, const Theme *t) {
   json_object_set_new(j, "effet", json_string(FX_KEYS[t->fx >= 0 && t->fx < FX_COUNT ? t->fx : 0]));
   json_object_set_new(j, "couleur_auto", json_boolean(t->auto_color));
   json_object_set_new(j, "sons", json_integer(t->sfx));
+  json_object_set_new(j, "boitier", json_string(CASE_KEYS[t->case_style >= 0 && t->case_style < CASE_COUNT ? t->case_style : 0]));
   char tmp[600];
   snprintf(tmp, sizeof tmp, "%s.tmp", path);
   int rc = json_dump_file(j, tmp, JSON_INDENT(2) | JSON_PRESERVE_ORDER);
