@@ -216,6 +216,7 @@ static const char *const T[][L_COUNT] = {
     "Menu aggiornato dal PC", "Menu atualizado a partir do PC" },
   { "Thème « %s » reçu depuis le PC", "Theme “%s” received from the PC", "Tema «%s» recibido desde el PC", "Theme „%s“ vom PC empfangen",
     "Tema «%s» ricevuto dal PC", "Tema «%s» recebido do PC" },
+  { "Mise à jour %s : téléchargement…", "Update %s: downloading…", "Actualización %s: descargando…", "Update %s: Download…", "Aggiornamento %s: download…", "Atualização %s: a transferir…" },
   /* menu rapide */
   { "Menu rapide", "Quick menu", "Menú rápido", "Schnellmenü", "Menu rapido", "Menu rápido" },
   { "Relancer le launcher", "Restart the launcher", "Reiniciar el launcher", "Launcher neu starten", "Riavvia il launcher", "Reiniciar o launcher" },

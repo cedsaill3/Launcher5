@@ -2,7 +2,7 @@
 
 # Launcher5 — game loader pour PS5
 
-**par cedsaill** · v2.5.0 · [English below](#english)
+**par cedsaill** · v2.5.1 · [English below](#english)
 
 Launcher5 remplace la navigation dans tes jeux et homebrews par un vrai game loader :
 jaquettes officielles, cover flow, thèmes animés, sons, dossiers, musique d'ambiance.

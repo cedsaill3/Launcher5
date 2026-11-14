@@ -4354,10 +4354,31 @@ static void up_install(void) {
   toast(tr("Installation de la mise à jour : le launcher redémarre…"));
   draw(); SDL_RenderPresent(S.r);
   save();
+  char mark[PATH_LEN];                           /* une seule tentative automatique par version */
+  up_path(mark, sizeof mark, "cache/update_tried");
+  FILE *f = fopen(mark, "w");
+  if (f) { fprintf(f, "%s\n", UP.ver); fclose(f); }
   if (plat_send_elf(path)) {
     toast(tr("Chargeur ELF introuvable : envoie /data/launcher5/launcher5.elf"));
     UP.install = 0;
+    return;
   }
+  plat_log("mise a jour : la version %s prend la main", UP.ver);
+  plat_quit();
+  fflush(NULL);
+  _exit(0);                                      /* la nouvelle version relance l'interface */
+}
+
+/* deja essayee sans succes (la version installee ne demarre pas) : pas de nouvel essai automatique */
+static int up_already_tried(const char *ver) {
+  char mark[PATH_LEN], v[24] = "";
+  up_path(mark, sizeof mark, "cache/update_tried");
+  FILE *f = fopen(mark, "r");
+  if (!f) return 0;
+  if (!fgets(v, sizeof v, f)) v[0] = 0;
+  fclose(f);
+  v[strcspn(v, "\r\n")] = 0;
+  return !strcmp(v, ver) && recent_file(mark, 1);
 }
 
 /* au demarrage : version deja telechargee, puis verification du jour */
@@ -4370,7 +4391,9 @@ static void up_boot(void) {
   if (f) { if (!fgets(v, sizeof v, f)) v[0] = 0; fclose(f); v[strcspn(v, "\r\n")] = 0; }
   if (v[0] && ver_cmp(v, run_version()) > 0 && !access(el, R_OK)) {
     snprintf(UP.ver, sizeof UP.ver, "%s", v);
-    up_set(UP_READY, NULL);                      /* plus recente que celle qui tourne */
+    /* plus recente que celle qui tourne (autoload vers un ancien fichier) : on l'installe */
+    if (S.menu.auto_update && !up_already_tried(v)) UP.install = 1;
+    up_set(UP_READY, NULL);
     return;
   }
   char chk[PATH_LEN];
@@ -4385,7 +4408,13 @@ static void up_poll(void) {
   char msg[160];
   switch (UP.state) {
   case UP_AVAILABLE:
-    if (UP.install) { up_start(1); break; }
+    if (UP.install || (S.menu.auto_update && !up_already_tried(UP.ver))) {   /* automatique : telechargee puis installee */
+      UP.install = 1;
+      snprintf(msg, sizeof msg, tr("Mise à jour %s : téléchargement…"), UP.ver);
+      toast(msg);
+      up_start(1);
+      break;
+    }
     snprintf(msg, sizeof msg, tr("Mise à jour %s disponible : Paramètres › Mettre à jour"), UP.ver);
     toast(msg);
     break;

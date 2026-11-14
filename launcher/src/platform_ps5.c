@@ -65,6 +65,8 @@ void plat_after_window(void) { sceSystemServiceHideSplashScreen(); }
 
 void plat_quit(void) { plat_log("fin de l'interface"); }
 
+static int send_to_loader(const char *path);
+
 static int write_request(const char *type, const char *value, const char *cwd) {
   char tmp[] = DATA_DIR "/request.tmp";
   FILE *f = fopen(tmp, "w");
@@ -481,7 +483,20 @@ long plat_https_get(const char *url, unsigned char **data, size_t *len, size_t m
 /* Envoi d'un ELF au chargeur de la console (mise a jour du launcher) */
 int plat_restart_ui(void) { return write_request("restart", "launcher", NULL); }
 
+/* Nouvelle version : le bootstrap la lance lui-meme (chargeur integre), sinon par le port 9021.
+   On attend qu'il ait pris la demande avant de rendre la main. */
 int plat_send_elf(const char *path) {
+  if (!write_request("elf", path, NULL)) {
+    for (int i = 0; i < 40; i++) {
+      if (access(REQUEST_PATH, F_OK)) { plat_log("mise a jour : %s confiee au bootstrap", path); return 0; }
+      usleep(100 * 1000);
+    }
+    remove(REQUEST_PATH);
+  }
+  return send_to_loader(path);
+}
+
+static int send_to_loader(const char *path) {
   FILE *f = fopen(path, "rb");
   if (!f) return -1;
   int fd = socket(AF_INET, SOCK_STREAM, 0);

@@ -23,6 +23,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -343,6 +345,36 @@ static int launch_title(const char *title_id) {
   return err < 0 ? err : 0;
 }
 
+/* envoie un ELF au chargeur de la console (port 9021) */
+static int send_to_loader(const char *path) {
+  FILE *f = fopen(path, "rb");
+  if (!f) return -1;
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  struct sockaddr_in a;
+  memset(&a, 0, sizeof a);
+  a.sin_family = AF_INET;
+  a.sin_port = htons(9021);
+  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (fd < 0 || connect(fd, (struct sockaddr *)&a, sizeof a)) {
+    if (fd >= 0) close(fd);
+    fclose(f);
+    logf("chargeur ELF (port 9021) injoignable");
+    return -1;
+  }
+  char buf[65536];
+  size_t n;
+  int ok = 1;
+  while (ok && (n = fread(buf, 1, sizeof buf, f)) > 0)
+    for (size_t o = 0; o < n;) {
+      ssize_t w = send(fd, buf + o, n - o, 0);
+      if (w <= 0) { ok = 0; break; }
+      o += (size_t)w;
+    }
+  fclose(f);
+  close(fd);
+  return ok ? 0 : -1;
+}
+
 static int read_request(char *type, char *value, char *cwd, size_t n) {
   FILE *f = fopen(REQUEST_PATH, "r");
   if (!f) return -1;
@@ -418,6 +450,23 @@ int main(void) {
           int app = sceSystemServiceGetAppIdOfRunningBigApp();
           logf("fermeture du launcher par le systeme : %d", app > 0 ? sceSystemServiceKillApp(app, -1, 0, 0) : -1);
           break;
+        }
+        if (!strcmp(type, "elf")) {
+          /* mise a jour : la nouvelle version est lancee ici ; au demarrage elle arrete
+             ce bootstrap. Si elle ne prend pas la main, le chargeur ELF (port 9021) essaie. */
+          for (int i = 0; i < 30 && alive(ui); i++) usleep(100 * 1000);
+          if (alive(ui)) kill(ui, SIGKILL);
+          char *ea[] = { value, NULL };
+          char *ee[] = { NULL };
+          pid_t p = hbldr_launch(DATA_DIR, value, -1, ea, ee);
+          logf("mise a jour : %s lancee directement (pid %d)", value, p);
+          sleep(8);                              /* la nouvelle version nous arrete avant la fin */
+          logf("mise a jour : pas de relais, essai par le chargeur ELF");
+          if (!send_to_loader(value)) sleep(8);
+          logf("mise a jour impossible : on garde cette version");
+          notify("Launcher5 : la mise à jour n'a pas pu démarrer");
+          ui = start_ui();
+          continue;
         }
         if (!strcmp(type, "restart")) {
           /* menu rapide : l'interface se ferme, on la relance aussitot */
