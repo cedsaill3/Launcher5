@@ -2,7 +2,7 @@
 
 # Launcher5 — game loader pour PS5
 
-**par cedsaill** · v2.1.2 · [English below](#english)
+**par cedsaill** · v2.2.0 · [English below](#english)
 
 Launcher5 remplace la navigation dans tes jeux et homebrews par un vrai game loader :
 jaquettes officielles, cover flow en 3D, thèmes animés, sons, dossiers, musique d'ambiance.
@@ -17,6 +17,14 @@ jaquettes officielles, cover flow en 3D, thèmes animés, sons, dossiers, musiqu
 |---|---|
 | ![Paramètres](docs/parametres.jpg) | ![Studio Thème](docs/studio-theme.png) |
 
+## Nouveautés de la v2.2
+- **Vrais boîtiers** : chaque jeu est rangé dans un boîtier en plastique bleu avec son bandeau
+  PS5 (blanc) ou PS4 (bleu), et les **homebrews en boîtier rouge** pour les repérer d'un coup d'œil
+- **Animation de lancement** : la jaquette arrive au centre, l'écran prend les couleurs du jeu,
+  un reflet de lumière traverse la boîte
+
+![Lancement](docs/lancement.jpg)
+
 ## Nouveautés de la v2
 - **Mise à jour automatique** : le launcher trouve tout seul la nouvelle version et l'installe
   (voir [Mises à jour](#mises-à-jour))
@@ -24,7 +32,7 @@ jaquettes officielles, cover flow en 3D, thèmes animés, sons, dossiers, musiqu
   [base Launcher5](https://github.com/cedsaill3/Launcher5-covers) sur GitHub :
   ça marche même quand les serveurs Sony sont bloqués par DNS
 - **Jaquettes boîtes** pour tous les autres jeux, fabriquées à partir de leur illustration
-  (bandeau PS5 / PS4), ou ta propre jaquette dans `jaquettes/`
+  et de leur titre, ou ta propre jaquette dans `jaquettes/`
 - **Menu Paramètres** complet, avec **aperçu en direct** de l'affichage choisi
 - **Sons** : 5 styles d'interface (Néon, Rétro 8-bit, Doux, Sci-fi, Cristal) et 6 sons de démarrage
 - **Masquer l'IP** à l'écran, pour les captures et les lives
@@ -109,6 +117,8 @@ Polices DejaVu : licence libre. Les jaquettes appartiennent à leurs éditeurs.
 Cover Flow with 3D perspective and reflections, cover grid, carousel, animated themes,
 interface sounds, folders, background music. The interface follows the console language
 (French, English, Spanish, German, Italian, Portuguese).
+
+**New in v2.2:** real game cases (blue plastic case with the PS5 / PS4 banner, **red cases for homebrews**) and an animated launch screen in the game's colors.
 
 **New in v2:** official PS5 covers downloaded automatically from the
 [Launcher5 cover database](https://github.com/cedsaill3/Launcher5-covers) on GitHub (works even
