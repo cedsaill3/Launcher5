@@ -1,5 +1,5 @@
 =====================================================================
-  LAUNCHER5  v1.0.0  
+  LAUNCHER5  v2.0.0  
   par cedsaill
 =====================================================================
 
@@ -17,6 +17,7 @@ UTILISATION (manette)
   Carré ............... déplacer un jeu
   Rond ................ retour
   Triangle > Personnaliser le thème : Studio Thème (L1 / R1 = thèmes)
+  Section Paramètres : affichage, jaquettes, sons, économiseur, IP...
 
 LANGUE
   L'interface suit la langue de la console : français, anglais,
@@ -28,6 +29,13 @@ PERSONNALISER
     fonds/    tes images de fond (png, jpg)
     musique/  tes musiques d'ambiance (ogg, mp3, flac, wav, mod...)
     themes/   tes thèmes (.json)
+    jaquettes/ tes jaquettes perso : <ID du jeu>.jpg (ex. PPSA01234.jpg)
+
+JAQUETTES
+  Les jaquettes officielles des jeux PS5 se téléchargent toutes seules
+  depuis la base Launcher5 sur GitHub (marche même si les serveurs Sony
+  sont bloqués). Les autres jeux ont une jaquette fabriquée à partir de
+  leur illustration. Paramètres > Jaquettes officielles pour couper.
 
 ---------------------------------------------------------------------
 
@@ -46,7 +54,10 @@ LANGUAGE
   Italian, Portuguese (English otherwise). Game names too.
 
 CUSTOMISE
-  /data/launcher5/fonds (wallpapers), musique (music), themes (.json).
+  /data/launcher5/fonds (wallpapers), musique (music), themes (.json),
+  jaquettes (custom covers: <game ID>.jpg).
+  Official PS5 covers download automatically from the Launcher5 cover
+  database on GitHub (works even when Sony servers are blocked).
 
 ---------------------------------------------------------------------
 

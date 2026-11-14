@@ -13,28 +13,38 @@
 
 #include "theme.h"
 
-#define T(n, a, a2, t, b, bg, ar, gl, p, ps, fa, co) \
+#define T(n, a, a2, t, b, bg, ar, gl, p, ps, fa, co, fxv, auv) \
   { .name = n, .accent = a, .accent2 = a2, .top = t, .bottom = b, .bg_mode = bg, .art = ar, \
-    .glow = gl, .particles = p, .pstyle = ps, .fall = fa, .corners = co, .clock = CLOCK_24, .volume = 60 }
+    .glow = gl, .particles = p, .pstyle = ps, .fall = fa, .corners = co, .clock = CLOCK_24, .volume = 60, \
+    .fx = fxv, .auto_color = auv, .sfx = 60 }
+/* theme avec un fond d'ecran fourni (assets/fonds, installe avec le launcher) */
+#define TW(n, a, a2, t, b, ar, gl, p, ps, fa, co, fxv, auv, img)   { .name = n, .accent = a, .accent2 = a2, .top = t, .bottom = b, .bg_mode = BG_IMAGE, .wallpaper = img, .art = ar,     .glow = gl, .particles = p, .pstyle = ps, .fall = fa, .corners = co, .clock = CLOCK_24, .volume = 60,     .fx = fxv, .auto_color = auv, .sfx = 60 }
 
 static const Theme BUILTIN[] = {
-  T("Néon",       0x00e5ff, 0xff2bd6, 0x05081a, 0x170a33, BG_ART,      45, 100, PART_FEW,  PSTYLE_DOTS,   0, CORNER_ROUND),
-  T("Glitch",     0xff00c8, 0x00fff0, 0x07000f, 0x14002a, BG_ART,      40, 100, PART_MANY, PSTYLE_SPARKS, 0, CORNER_SQUARE),
-  T("Acid",       0xc6ff00, 0xff2bd6, 0x050805, 0x101a05, BG_ART,      40, 100, PART_FEW,  PSTYLE_SPARKS, 0, CORNER_SQUARE),
-  T("Blood",      0xff1f3d, 0x8a0012, 0x0a0000, 0x220005, BG_ART,      50, 90,  PART_FEW,  PSTYLE_DOTS,   1, CORNER_SQUARE),
-  T("Terminal",   0x33ff66, 0x00a33a, 0x000000, 0x000a03, BG_GRADIENT, 20, 50,  PART_MANY, PSTYLE_DOTS,   1, CORNER_SQUARE),
-  T("Cyberpunk",  0xfcee0a, 0x00f0ff, 0x08080d, 0x1d1608, BG_ART,      45, 100, PART_FEW,  PSTYLE_SPARKS, 0, CORNER_SQUARE),
-  T("Synthwave",  0xff3cac, 0x2b86c5, 0x0d0221, 0x2d0b3f, BG_GRADIENT, 30, 100, PART_MANY, PSTYLE_SPARKS, 0, CORNER_ROUND),
-  T("Inferno",    0xff4d1a, 0xffb300, 0x100503, 0x2e0b05, BG_ART,      50, 100, PART_MANY, PSTYLE_SPARKS, 0, CORNER_ROUND),
-  T("Toxic",      0x39ff14, 0x00ffa3, 0x030d06, 0x0a2214, BG_ART,      45, 90,  PART_FEW,  PSTYLE_DOTS,   0, CORNER_ROUND),
-  T("Matrix",     0x00ff41, 0x008f11, 0x000000, 0x001a07, BG_GRADIENT, 20, 60,  PART_MANY, PSTYLE_DOTS,   1, CORNER_SQUARE),
-  T("Royal",      0xb26bff, 0xffd166, 0x0b0517, 0x221038, BG_ART,      45, 100, PART_FEW,  PSTYLE_DOTS,   0, CORNER_SOFT),
-  T("Glace",      0x7fdbff, 0xe8f7ff, 0x05101a, 0x10293d, BG_ART,      45, 80,  PART_MANY, PSTYLE_SNOW,   1, CORNER_SOFT),
-  T("Sakura",     0xff8fb8, 0xffd1e0, 0x1a0710, 0x3a1424, BG_ART,      40, 80,  PART_MANY, PSTYLE_SNOW,   1, CORNER_SOFT),
-  T("Océan",      0x00b4d8, 0x48cae4, 0x020c1b, 0x03254a, BG_ART,      50, 80,  PART_FEW,  PSTYLE_SNOW,   0, CORNER_ROUND),
-  T("Noir et or", 0xd4af37, 0xfff1c1, 0x050505, 0x15120a, BG_ART,      35, 60,  PART_FEW,  PSTYLE_SPARKS, 0, CORNER_SQUARE),
-  T("Minuit",     0xc9d1dc, 0x5b6b82, 0x06080c, 0x10141c, BG_ART,      55, 30,  PART_NONE, PSTYLE_DOTS,   0, CORNER_ROUND),
-  T("Cinéma",     0xe50914, 0xffffff, 0x000000, 0x0b0b0b, BG_ART,      75, 40,  PART_NONE, PSTYLE_DOTS,   0, CORNER_ROUND),
+  { .name = "Launcher5", .accent = 0xff4d1a, .accent2 = 0x00a33a, .top = 0x100503, .bottom = 0x2e0b05, .bg_mode = BG_IMAGE,
+    .wallpaper = "launcher5-03.jpg", .art = 60, .glow = 100, .particles = PART_NONE, .pstyle = PSTYLE_SPARKS, .fall = 0,
+    .corners = CORNER_SOFT, .clock = CLOCK_24, .volume = 60, .fx = FX_WARP, .auto_color = 1, .sfx = 50 },
+  TW("Launcher5 Néon", 0x00e5ff, 0xff2bd6, 0x05081a, 0x170a33, 45, 80,  PART_FEW,  PSTYLE_DOTS,   0, CORNER_ROUND, FX_NONE, 0, "launcher5-02.jpg"),
+  T("Néon",       0x00e5ff, 0xff2bd6, 0x05081a, 0x170a33, BG_ART,      45, 100, PART_FEW,  PSTYLE_DOTS,   0, CORNER_ROUND, FX_NONE, 0),
+  T("Glitch",     0xff00c8, 0x00fff0, 0x07000f, 0x14002a, BG_ART,      40, 100, PART_MANY, PSTYLE_SPARKS, 0, CORNER_SQUARE, FX_WARP, 0),
+  T("Acid",       0xc6ff00, 0xff2bd6, 0x050805, 0x101a05, BG_ART,      40, 100, PART_FEW,  PSTYLE_SPARKS, 0, CORNER_SQUARE, FX_NONE, 0),
+  T("Blood",      0xff1f3d, 0x8a0012, 0x0a0000, 0x220005, BG_ART,      50, 90,  PART_FEW,  PSTYLE_DOTS,   1, CORNER_SQUARE, FX_NONE, 0),
+  T("Terminal",   0x33ff66, 0x00a33a, 0x000000, 0x000a03, BG_GRADIENT, 20, 50,  PART_MANY, PSTYLE_DOTS,   1, CORNER_SQUARE, FX_RAIN, 0),
+  T("Outrun",     0xff2bd6, 0x00e5ff, 0x0d0221, 0x2a0845, BG_GRADIENT, 30, 100, PART_FEW,  PSTYLE_SPARKS, 0, CORNER_ROUND, FX_GRID, 0),
+  T("Hyperdrive", 0x7fdbff, 0xb26bff, 0x000000, 0x05081a, BG_ART,      35, 90,  PART_NONE, PSTYLE_DOTS,   0, CORNER_ROUND, FX_WARP, 0),
+  T("Caméléon",   0x00e5ff, 0xff2bd6, 0x05060a, 0x10121a, BG_ART,      60, 100, PART_FEW,  PSTYLE_DOTS,   0, CORNER_SOFT,  FX_NONE, 1),
+  T("Cyberpunk",  0xfcee0a, 0x00f0ff, 0x08080d, 0x1d1608, BG_ART,      45, 100, PART_FEW,  PSTYLE_SPARKS, 0, CORNER_SQUARE, FX_GRID, 0),
+  T("Synthwave",  0xff3cac, 0x2b86c5, 0x0d0221, 0x2d0b3f, BG_GRADIENT, 30, 100, PART_MANY, PSTYLE_SPARKS, 0, CORNER_ROUND, FX_GRID, 0),
+  T("Inferno",    0xff4d1a, 0xffb300, 0x100503, 0x2e0b05, BG_ART,      50, 100, PART_MANY, PSTYLE_SPARKS, 0, CORNER_ROUND, FX_NONE, 0),
+  T("Toxic",      0x39ff14, 0x00ffa3, 0x030d06, 0x0a2214, BG_ART,      45, 90,  PART_FEW,  PSTYLE_DOTS,   0, CORNER_ROUND, FX_NONE, 0),
+  T("Matrix",     0x00ff41, 0x008f11, 0x000000, 0x001a07, BG_GRADIENT, 20, 60,  PART_MANY, PSTYLE_DOTS,   1, CORNER_SQUARE, FX_RAIN, 0),
+  T("Royal",      0xb26bff, 0xffd166, 0x0b0517, 0x221038, BG_ART,      45, 100, PART_FEW,  PSTYLE_DOTS,   0, CORNER_SOFT, FX_NONE, 0),
+  T("Glace",      0x7fdbff, 0xe8f7ff, 0x05101a, 0x10293d, BG_ART,      45, 80,  PART_MANY, PSTYLE_SNOW,   1, CORNER_SOFT, FX_NONE, 0),
+  T("Sakura",     0xff8fb8, 0xffd1e0, 0x1a0710, 0x3a1424, BG_ART,      40, 80,  PART_MANY, PSTYLE_SNOW,   1, CORNER_SOFT, FX_NONE, 0),
+  T("Océan",      0x00b4d8, 0x48cae4, 0x020c1b, 0x03254a, BG_ART,      50, 80,  PART_FEW,  PSTYLE_SNOW,   0, CORNER_ROUND, FX_NONE, 0),
+  T("Noir et or", 0xd4af37, 0xfff1c1, 0x050505, 0x15120a, BG_ART,      35, 60,  PART_FEW,  PSTYLE_SPARKS, 0, CORNER_SQUARE, FX_NONE, 0),
+  T("Minuit",     0xc9d1dc, 0x5b6b82, 0x06080c, 0x10141c, BG_ART,      55, 30,  PART_NONE, PSTYLE_DOTS,   0, CORNER_ROUND, FX_NONE, 0),
+  T("Cinéma",     0xe50914, 0xffffff, 0x000000, 0x0b0b0b, BG_ART,      75, 40,  PART_NONE, PSTYLE_DOTS,   0, CORNER_ROUND, FX_NONE, 0),
 };
 #define NBUILTIN (int)(sizeof BUILTIN / sizeof BUILTIN[0])
 
@@ -47,6 +57,7 @@ static const char *PART_KEYS[] = { "aucune", "peu", "beaucoup" };
 static const char *PSTYLE_KEYS[] = { "points", "etincelles", "flocons" };
 static const char *CORNER_KEYS[] = { "droits", "arrondis", "tres_arrondis" };
 static const char *CLOCK_KEYS[] = { "24h", "12h", "masquee" };
+static const char *FX_KEYS[] = { "aucun", "grille", "hyperespace", "pluie" };
 
 static int key_index(json_t *v, const char **keys, int n, int def) {
   const char *s = json_string_value(v);
@@ -102,6 +113,10 @@ int theme_load(const char *path, Theme *t) {
   d.music[0] = 0;
   str_of(json_object_get(j, "musique"), d.music, sizeof d.music);
   d.volume = num_of(json_object_get(j, "volume"), d.volume, 0, 100);
+  /* V2 : absents des anciens fichiers -> valeurs neutres */
+  d.fx = key_index(json_object_get(j, "effet"), FX_KEYS, FX_COUNT, FX_NONE);
+  d.auto_color = json_is_true(json_object_get(j, "couleur_auto"));
+  d.sfx = num_of(json_object_get(j, "sons"), 60, 0, 100);
   json_decref(j);
   *t = d;
   return 0;
@@ -130,6 +145,9 @@ int theme_save(const char *path, const Theme *t) {
   json_object_set_new(j, "horloge", json_string(CLOCK_KEYS[t->clock]));
   json_object_set_new(j, "musique", json_string(t->music));
   json_object_set_new(j, "volume", json_integer(t->volume));
+  json_object_set_new(j, "effet", json_string(FX_KEYS[t->fx >= 0 && t->fx < FX_COUNT ? t->fx : 0]));
+  json_object_set_new(j, "couleur_auto", json_boolean(t->auto_color));
+  json_object_set_new(j, "sons", json_integer(t->sfx));
   char tmp[600];
   snprintf(tmp, sizeof tmp, "%s.tmp", path);
   int rc = json_dump_file(j, tmp, JSON_INDENT(2) | JSON_PRESERVE_ORDER);

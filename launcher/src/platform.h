@@ -17,7 +17,13 @@ int  plat_init(void);
 void plat_after_window(void);           /* apres creation de la fenetre (ecran de demarrage) */
 void plat_log(const char *fmt, ...);    /* journal de diagnostic */
 void plat_quit(void);
-int  plat_sys_lang(void);               /* code de langue du systeme PS5 (2 = francais, 1 = anglais…) */
+int  plat_sys_lang(void);
+/* Infos de la console : adresse IP locale (vide si inconnue), espace libre en Mo
+   (-1 si inconnu), temperature du processeur en degres (-1 si inconnue) */
+/* telechargement HTTPS (base de jaquettes) : renvoie le code HTTP (200 = ok, data a liberer),
+   0 si pas de reseau. max : taille maximale acceptee. Appelable depuis un autre fil. */
+long plat_https_get(const char *url, unsigned char **data, size_t *len, size_t max);
+void plat_sysinfo(char *ip, size_t iplen, long long *free_mb, int *temp_c);               /* code de langue du systeme PS5 (2 = francais, 1 = anglais…) */
 void plat_poll_system(int *overlaid);   /* evenements du systeme (menu PS, arriere-plan) */
 int  plat_auto_return(int set);         /* -1 : lire ; 0/1 : regler le retour automatique */
 

@@ -41,6 +41,7 @@
 #define DB_COPY       DATA_DIR "/appinfo.db"
 #define PID_PATH      DATA_DIR "/bootstrap.pid"
 #define NO_RETURN     DATA_DIR "/no_auto_return"
+#define SESSIONS_PATH DATA_DIR "/sessions.txt"
 #define APPINFO_DB    "/system_data/priv/mms/appinfo.db"
 #define RELAY_ID      "LNCH00005"      /* tuile « Launcher5 » sur l'accueil de la PS5 */
 
@@ -53,6 +54,14 @@
 INCBIN(ui_elf, "build/launcher5-ui.elf")
 INCBIN(fake_param, "assets/relay/param.json")
 INCBIN(fake_icon, "assets/relay/icon0.png")
+/* fonds d'ecran fournis avec Launcher5 */
+INCBIN(wall1, "assets/fonds/launcher5-01.jpg")
+INCBIN(wall2, "assets/fonds/launcher5-02.jpg")
+INCBIN(wall3, "assets/fonds/launcher5-03.jpg")
+INCBIN(wall4, "assets/fonds/launcher5-04.jpg")
+INCBIN(wall5, "assets/fonds/launcher5-05.jpg")
+INCBIN(wall6, "assets/fonds/launcher5-06.jpg")
+INCBIN(wall7, "assets/fonds/launcher5-07.jpg")
 
 typedef struct app_launch_ctx {
   uint32_t structsize;
@@ -92,6 +101,29 @@ static void notify(const char *msg) {
   snprintf(req.message, sizeof req.message, "%s", tr(msg));
   sceKernelSendNotificationRequest(0, &req, sizeof req, 0);
   logf("%s", msg);
+}
+
+static int write_file(const char *path, const uint8_t *data, size_t size, int mode);
+
+/* Fonds d'ecran fournis : poses dans fonds/ s'ils manquent (jamais d'ecrasement) */
+static void install_wallpapers(void) {
+  static const struct { const char *name; const uint8_t *start, *end; } W[] = {
+  { "launcher5-01.jpg", wall1, wall1_end },
+  { "launcher5-02.jpg", wall2, wall2_end },
+  { "launcher5-03.jpg", wall3, wall3_end },
+  { "launcher5-04.jpg", wall4, wall4_end },
+  { "launcher5-05.jpg", wall5, wall5_end },
+  { "launcher5-06.jpg", wall6, wall6_end },
+  { "launcher5-07.jpg", wall7, wall7_end }
+  };
+  char path[256];
+  struct stat st;
+  mkdir(DATA_DIR "/fonds", 0755);
+  for (size_t i = 0; i < sizeof W / sizeof W[0]; i++) {
+    snprintf(path, sizeof path, DATA_DIR "/fonds/%s", W[i].name);
+    if (stat(path, &st) && write_file(path, W[i].start, (size_t)(W[i].end - W[i].start), 0644))
+      logf("fond d'ecran non installe : %s", W[i].name);
+  }
 }
 
 static int write_file(const char *path, const uint8_t *data, size_t size, int mode) {
@@ -354,6 +386,7 @@ int main(void) {
   if (elevate_self()) { notify("Launcher5 : droits insuffisants (jailbreak actif ?)"); return EXIT_FAILURE; }
   single_instance();
   if (install_relay_app()) { notify("Launcher5 : impossible d'installer l'application relais"); return EXIT_FAILURE; }
+  install_wallpapers();
   if (write_file(UI_PATH, ui_elf, ui_elf_end - ui_elf, 0755)) {
     notify("Launcher5 : impossible d'écrire l'interface dans /data");
     return EXIT_FAILURE;
@@ -395,10 +428,19 @@ int main(void) {
     if (launched) {
       time_t t0 = time(NULL);
       while (sceSystemServiceGetAppIdOfRunningBigApp() <= 0 && time(NULL) - t0 < 60) usleep(250 * 1000);
+      time_t started = time(NULL), ended = 0;
       int idle = 0;
       while (idle < 12) {                       /* 3 s sans application ouverte */
-        idle = sceSystemServiceGetAppIdOfRunningBigApp() > 0 ? 0 : idle + 1;
+        int open = sceSystemServiceGetAppIdOfRunningBigApp() > 0;
+        if (!open && !idle) ended = time(NULL);
+        idle = open ? 0 : idle + 1;
         usleep(250 * 1000);
+      }
+      /* temps de jeu : note pour l'interface (jeux et applications lances par leur identifiant) */
+      if (!strcmp(type, "title") && ended > started) {
+        FILE *f = fopen(SESSIONS_PATH, "a");
+        if (f) { fprintf(f, "%s %ld\n", value, (long)(ended - started)); fclose(f); }
+        logf("partie terminee : %s, %ld s", value, (long)(ended - started));
       }
       if (stat(NO_RETURN, &st)) {
         logf("jeu ferme : retour au launcher");
