@@ -19,7 +19,8 @@ enum { PSTYLE_DOTS, PSTYLE_SPARKS, PSTYLE_SNOW, PSTYLE_COUNT };
 enum { CORNER_SQUARE, CORNER_ROUND, CORNER_SOFT, CORNER_COUNT };
 enum { CLOCK_24, CLOCK_12, CLOCK_HIDDEN, CLOCK_COUNT };
 enum { FX_NONE, FX_GRID, FX_WARP, FX_RAIN, FX_COUNT };       /* effet anime du fond */
-enum { CASE_BLUE, CASE_BLACK, CASE_CRYSTAL, CASE_STEEL, CASE_THEME, CASE_NONE, CASE_COUNT };   /* boitier des jeux */
+enum { LAYOUT_L5, LAYOUT_GX, LAYOUT_COUNT };                  /* interface de l'ecran des jeux */
+enum { CASE_BLUE, CASE_BLACK, CASE_WHITE, CASE_CRYSTAL, CASE_STEEL, CASE_THEME, CASE_PHOTO, CASE_NONE, CASE_COUNT };   /* boitier des jeux */
 
 typedef struct Theme {
   char name[48];
@@ -40,6 +41,7 @@ typedef struct Theme {
   int auto_color;                 /* 1 : couleurs prises sur la jaquette du jeu choisi */
   int sfx;                        /* volume des sons d'interface, 0 = muets */
   int case_style;                 /* CASE_* : boitier autour des jaquettes */
+  int layout;                     /* LAYOUT_* : interface Launcher5 ou facon loader GX */
 } Theme;
 
 int theme_builtin_count(void);

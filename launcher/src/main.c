@@ -134,7 +134,7 @@ static int sec_match(int sec, const App *a) {
 /* ------------------------------------------------------------------ */
 enum { MODE_BROWSE, MODE_CONTEXT, MODE_MOVE, MODE_KEYBOARD, MODE_PICKFOLDER, MODE_COLOR, MODE_THEME };
 /* lignes de l'editeur de theme */
-enum { R_PRESET, R_AUTO, R_ACCENT, R_ACCENT2, R_TOP, R_BOTTOM, R_BG, R_WALL, R_ART, R_FX, R_GLOW, R_PART, R_PSTYLE,
+enum { R_PRESET, R_LAYOUT, R_AUTO, R_ACCENT, R_ACCENT2, R_TOP, R_BOTTOM, R_BG, R_WALL, R_ART, R_FX, R_GLOW, R_PART, R_PSTYLE,
        R_FALL, R_CASE, R_CORNERS, R_CLOCK, R_SFX, R_MUSIC, R_VOLUME, R_SAVE, R_DELETE, R_COUNT };
 enum {
   ACT_LAUNCH, ACT_OPEN, ACT_MOVE, ACT_TO_FOLDER, ACT_OUT_OF_FOLDER, ACT_RENAME, ACT_HIDE,
@@ -145,6 +145,7 @@ enum {
 };
 
 typedef struct { int is_folder; int index; App *app; Node *node; } Entry;
+#define GXMODE (S.base && S.base->layout == LAYOUT_GX && S.sec != SEC_SYS)   /* ecran des jeux facon loader GX */
 typedef struct { char label[96]; int action; } Choice;
 typedef struct { Node *folder; char label[128]; } FolderChoice;
 
@@ -963,14 +964,85 @@ static void box_title(App *a, int w, int h) {
 static uint32_t mix_color(uint32_t c, uint32_t t, float k);
 /* contenu d'une jaquette boite (w x h) dans la cible de rendu courante :
    un boitier en plastique bleu, la jaquette dedans, bandeau PS5 / PS4 en haut */
+/* Boitiers en images : /data/launcher5/boitiers/ps5.png, ps4.png, autre.png (PNG dont la zone
+   de la jaquette est transparente). La fenetre est reperee toute seule dans l'image. */
+static struct { SDL_Texture *t; float x, y, w, h; uint32_t edge; int tried; } CASEIMG[3];
+
+static void case_img_forget(void) {
+  for (int i = 0; i < 3; i++) { if (CASEIMG[i].t) SDL_DestroyTexture(CASEIMG[i].t); memset(&CASEIMG[i], 0, sizeof CASEIMG[i]); }
+}
+
+static int case_img(App *a) {                    /* numero de l'image du boitier, -1 si aucune */
+  int k = a->kind == KIND_PS5 ? 0 : a->kind == KIND_PS4 ? 1 : a->kind == KIND_HOMEBREW ? -1 : 2;
+  if (k < 0) return -1;
+  if (!CASEIMG[k].tried) {
+    static const char *const NAMES[3] = { "ps5", "ps4", "autre" };
+    CASEIMG[k].tried = 1;
+    char path[PATH_LEN];
+    SDL_Surface *s = NULL;
+    for (int e = 0; e < 2 && !s; e++) {
+      snprintf(path, sizeof path, "%s/boitiers/%s.%s", plat_data_dir(), NAMES[k], e ? "webp" : "png");
+      s = argb(IMG_Load(path));
+    }
+    if (s) {
+      Uint32 *px = s->pixels;
+      int pitch = s->pitch / 4, cx = s->w / 2, cy = s->h / 2, t = cy, b = cy, l = cx, r = cx;
+      #define AL(x, y) (px[(y) * pitch + (x)] >> 24)
+      if (AL(cx, cy) < 40) {                     /* le centre doit etre transparent */
+        while (t > 0 && AL(cx, t - 1) < 40) t--;
+        while (b < s->h - 1 && AL(cx, b + 1) < 40) b++;
+        while (l > 0 && AL(l - 1, cy) < 40) l--;
+        while (r < s->w - 1 && AL(r + 1, cy) < 40) r++;
+        CASEIMG[k].x = (float)l / s->w; CASEIMG[k].y = (float)t / s->h;
+        CASEIMG[k].w = (float)(r - l + 1) / s->w; CASEIMG[k].h = (float)(b - t + 1) / s->h;
+        CASEIMG[k].edge = px[cy * pitch + (l > 3 ? l / 2 : 1)] & 0xffffff;
+        CASEIMG[k].t = SDL_CreateTextureFromSurface(S.r, s);
+        if (CASEIMG[k].t) SDL_SetTextureBlendMode(CASEIMG[k].t, SDL_BLENDMODE_BLEND);
+        plat_log("boitier en image : %s (fenetre %d,%d %dx%d)", path, l, t, r - l + 1, b - t + 1);
+      } else plat_log("boitier en image : %s sans zone transparente au centre", path);
+      #undef AL
+      SDL_FreeSurface(s);
+    }
+  }
+  return CASEIMG[k].t ? k : -1;
+}
+
+static void box_title(App *a, int w, int h);
+
 static void draw_box_contents(App *a, int w, int h) {
   /* le boitier, au style choisi dans le theme ; rouge pour les homebrews (reconnus d'un coup d'oeil) */
   int hb = a->kind == KIND_HOMEBREW, cs = S.base->case_style;
+  int ci = cs == CASE_PHOTO ? case_img(a) : -1;
+  if (ci >= 0) {                                 /* boitier en image : la jaquette dans la fenetre */
+    SDL_Rect in = { (int)(CASEIMG[ci].x * w), (int)(CASEIMG[ci].y * h), (int)(CASEIMG[ci].w * w + 0.5f), (int)(CASEIMG[ci].h * h + 0.5f) };
+    SDL_RenderSetViewport(S.r, &in);
+    SDL_Texture *art = box_art(a);
+    int kind = a->box_state == 2 ? a->box_custom : 0;
+    if (art) {
+      int tw, th;
+      SDL_QueryTexture(art, NULL, NULL, &tw, &th);
+      SDL_Rect sr = { 0, 0, tw, th };            /* recadree au format de la fenetre */
+      if ((long)tw * in.h > (long)th * in.w) { sr.w = th * in.w / in.h; sr.x = (tw - sr.w) / 2; }
+      else { sr.h = tw * in.h / in.w; sr.y = (th - sr.h) / 2; }
+      SDL_RenderCopy(S.r, art, &sr, NULL);
+      if (!kind && in.w >= 260) box_title(a, in.w, in.h);
+    } else {
+      uint32_t c = a->has_vibe ? a->vibe : hash_color(a->id);
+      fill_round(0, 0, in.w, in.h, 0, shade(c, 0.28f), 255);
+      SDL_Texture *ic = cover(a);
+      if (ic) { SDL_Rect d = { 0, (in.h - in.w) / 2, in.w, in.w }; SDL_RenderCopy(S.r, ic, NULL, &d); }
+      if (in.w >= 260) box_title(a, in.w, in.h);
+    }
+    SDL_RenderSetViewport(S.r, NULL);
+    SDL_RenderCopy(S.r, CASEIMG[ci].t, NULL, NULL);
+    return;
+  }
   uint32_t cb, cl, cd, cr;
   int ca = 255;                                  /* opacite du plastique */
   switch (hb && cs != CASE_NONE ? -1 : cs) {
   case -1:          cb = 0xc81e24; cl = 0xff8a8a; cd = 0x6e0b0e; cr = 0xffb0b0; break;
   case CASE_BLACK:  cb = 0x15171c; cl = 0x4a505c; cd = 0x050608; cr = 0x6a717e; break;
+  case CASE_WHITE:  cb = 0xf1f2f4; cl = 0xffffff; cd = 0xa7aeb8; cr = 0xffffff; break;
   case CASE_CRYSTAL: cb = 0xdfe8f2; cl = 0xffffff; cd = 0x8796a8; cr = 0xffffff; ca = 175; break;
   case CASE_STEEL:  cb = 0x8c959f; cl = 0xe6ebf0; cd = 0x3c434b; cr = 0xc9d0d8; break;
   case CASE_THEME:  cb = shade(S.base->accent, 0.85f); cl = mix_color(S.base->accent, 0xffffff, 0.45f);
@@ -987,7 +1059,8 @@ static void draw_box_contents(App *a, int w, int h) {
       fill_round(0, y, w, 2, 0, mix_color(cd, cl, sh * (1 - 0.5f * k)), 255);
     }
   } else {
-    fill_round(0, 0, w, h, 0, cb, ca);
+    for (int y = 0; y < h; y += 3)               /* plastique : plus clair en haut, plus sombre en bas */
+      fill_round(0, y, w, 3, 0, mix_color(mix_color(cb, cl, 0.35f), mix_color(cb, cd, 0.35f), (float)y / h), ca);
     fill_round(0, 0, w, 3, 0, cl, 140);
     fill_round(0, h - 3, w, 3, 0, cd, 160);
     for (int i = 1; i < 6; i++) {                /* petits ergots le long des bords */
@@ -1036,6 +1109,22 @@ static void draw_box_contents(App *a, int w, int h) {
     }
   } else if (cs == CASE_STEEL && !kind && iw >= 260) box_title(a, iw, ih);
   SDL_RenderSetViewport(S.r, NULL);
+  if (m) {                                       /* relief : la jaquette est enfoncee sous le plastique */
+    outline_round(in.x - 1, in.y - 1, in.w + 2, in.h + 2, 2, 2, 0x000000, 70);
+    outline_round(in.x - 3, in.y - 3, in.w + 6, in.h + 6, 4, 1, 0xffffff, 60);
+  }
+  if (cs != CASE_NONE) {                         /* reflet brillant en diagonale sur la facade */
+    SDL_Vertex v[4];
+    memset(v, 0, sizeof v);
+    float pts[4][2] = { { 0, 0 }, { w * 0.62f, 0 }, { w * 0.18f, h * 0.55f }, { 0, h * 0.55f } };
+    int al[4] = { 46, 0, 0, 22 };
+    for (int i = 0; i < 4; i++) {
+      v[i].position.x = pts[i][0]; v[i].position.y = pts[i][1];
+      v[i].color.r = v[i].color.g = v[i].color.b = 255; v[i].color.a = (Uint8)al[i];
+    }
+    static const int idx[6] = { 0, 1, 2, 0, 2, 3 };
+    SDL_RenderGeometry(S.r, NULL, v, 4, idx, 6);
+  }
 }
 
 /* Tuile complete au format boite (w x h), calculee une seule fois :
@@ -1068,7 +1157,9 @@ static SDL_Texture *tile_tex(App *a, int w, int h) {
 static void warp_forget(SDL_Texture *src);
 
 /* oublie les tuiles calculees (nom ou forme change) */
+static int tiles_gen;                            /* change des qu'une jaquette est refaite */
 static void drop_tiles(App *a) {
+  tiles_gen++;
   void **slots[] = { &a->tex_s, &a->tex_l, &a->tex_xl };
   for (int i = 0; i < 3; i++) if (*slots[i]) { warp_forget(*slots[i]); SDL_DestroyTexture(*slots[i]); *slots[i] = NULL; }
 }
@@ -1755,9 +1846,11 @@ static int case_spine(App *a, uint32_t *body, uint32_t *band) {
   if (a->kind == KIND_HOMEBREW) *body = 0xc81e24;
   else switch (cs) {
   case CASE_BLACK: *body = 0x15171c; break;
+  case CASE_WHITE: *body = 0xe4e7eb; break;
   case CASE_CRYSTAL: *body = 0xbfcad8; break;
   case CASE_STEEL: *body = 0x8c959f; break;
   case CASE_THEME: *body = shade(S.base->accent, 0.85f); break;
+  case CASE_PHOTO: { int k = case_img(a); *body = k >= 0 ? CASEIMG[k].edge : 0x1a56d6; break; }
   default: *body = 0x1a56d6; break;
   }
   if (cs == CASE_STEEL) *band = *body;
@@ -2076,6 +2169,7 @@ static void check_tile_shape(void);
 static void open_theme_editor(void);
 static void music_fade(void);
 static void theme_editor_input(int in);
+static void draw_gx(Entry *e);
 static void draw_quick_info(void);
 static void theme_saved_as(const char *name);
 
@@ -2372,6 +2466,258 @@ static void draw_letter(void) {
   draw_text_a(S.fbig, S.letter, W / 2, H / 2 - 120, 0xffffff, 1, 0, a);
 }
 
+/* ------------------------------------------------------------------ */
+/* Interface facon loader GX : fond clair, barre basse en vague bleue,  */
+/* boutons ronds, horloge a afficheur, carrousel de boitiers en arc.    */
+/* Le decor fixe est dessine une fois dans une texture.                 */
+/* ------------------------------------------------------------------ */
+#define GX_EDGE(x) gx_edge(x)
+static float gx_edge(float x) {                  /* bord haut de la barre du bas */
+  float side = 770, mid = 862, a = 470, b = 760;   /* plat sur les cotes, creux au centre */
+  float d = fabsf(x - W / 2.0f);
+  if (d >= b) return side;
+  if (d <= a) return mid;
+  float k = (d - a) / (b - a);
+  return mid + (side - mid) * (0.5f - 0.5f * cosf(k * 3.14159f));
+}
+
+static void gx_circle(int cx, int cy, int r, uint32_t c, int a) { fill_round(cx - r, cy - r, r * 2, r * 2, r, c, a); }
+static void gx_ring(int cx, int cy, int r, int th, uint32_t c, int a) { outline_round(cx - r, cy - r, r * 2, r * 2, r, th, c, a); }
+
+static void gx_tri(float x0, float y0, float x1, float y1, float x2, float y2, uint32_t c) {
+  SDL_Vertex v[3];
+  memset(v, 0, sizeof v);
+  v[0].position.x = x0; v[0].position.y = y0; v[1].position.x = x1; v[1].position.y = y1;
+  v[2].position.x = x2; v[2].position.y = y2;
+  for (int i = 0; i < 3; i++) { v[i].color.r = (c >> 16) & 255; v[i].color.g = (c >> 8) & 255; v[i].color.b = c & 255; v[i].color.a = 255; }
+  SDL_RenderGeometry(S.r, NULL, v, 3, NULL, 0);
+}
+
+/* un chiffre d'afficheur a 7 segments (allumes en gris fonce, eteints en gris clair) */
+static void gx_digit(int x, int y, int w, int h, int d, uint32_t on, uint32_t off) {
+  static const unsigned char SEG[10] = { 0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f };
+  int t = w / 6, hh = h / 2;
+  SDL_Rect r[7] = {
+    { x + t, y, w - 2 * t, t }, { x + w - t, y + t, t, hh - t }, { x + w - t, y + hh, t, hh - t },
+    { x + t, y + h - t, w - 2 * t, t }, { x, y + hh, t, hh - t }, { x, y + t, t, hh - t }, { x + t, y + hh - t / 2, w - 2 * t, t },
+  };
+  for (int i = 0; i < 7; i++) fill_round(r[i].x, r[i].y, r[i].w, r[i].h, t / 2, (SEG[d % 10] >> i) & 1 ? on : off, 255);
+}
+
+static SDL_Texture *gx_bg_tex, *gx_bar_tex;
+static int gx_bg_ver = -1;
+
+static void gx_build_bg(void) {
+  if (gx_bg_tex && gx_bar_tex && gx_bg_ver == S.th_ver) return;
+  if (!gx_bg_tex) gx_bg_tex = SDL_CreateTexture(S.r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, W, H);
+  if (!gx_bar_tex) gx_bar_tex = SDL_CreateTexture(S.r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, W, H - 740);
+  if (!gx_bg_tex || !gx_bar_tex) return;
+  gx_bg_ver = S.th_ver;
+  uint32_t ac = S.base->accent;
+  SDL_Texture *prev = SDL_GetRenderTarget(S.r);
+  SDL_SetRenderTarget(S.r, gx_bg_tex);
+  for (int y = 0; y < H; y += 4) {               /* fond clair, legerement degrade */
+    set_color(mix_color(0xf6f6f7, 0xd5d7da, (float)y / H), 255);
+    SDL_Rect r = { 0, y, W, 4 };
+    SDL_RenderFillRect(S.r, &r);
+  }
+  /* la barre du bas va dans sa propre texture (transparente au-dessus de la vague) */
+  SDL_SetRenderTarget(S.r, gx_bar_tex);
+  SDL_SetTextureBlendMode(gx_bar_tex, SDL_BLENDMODE_BLEND);
+  SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_NONE);
+  SDL_SetRenderDrawColor(S.r, 0, 0, 0, 0);
+  SDL_RenderClear(S.r);
+  SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_BLEND);
+  SDL_Rect vp = { 0, -740, W, H };                /* memes coordonnees que l'ecran */
+  SDL_RenderSetViewport(S.r, &vp);
+  for (int x = 0; x < W; x += 2) {               /* barre du bas : sous la vague */
+    int e = (int)GX_EDGE(x);
+    for (int y = e; y < H; y += 6) {
+      set_color(mix_color(0xeeeff1, 0xd2d4d8, (float)(y - e) / (H - e)), 255);
+      SDL_Rect r = { x, y, 2, 6 };
+      SDL_RenderFillRect(S.r, &r);
+    }
+  }
+  for (int x = 0; x < W; x++) {                  /* la vague : trait bleu et reflet clair */
+    int e = (int)GX_EDGE(x);
+    set_color(ac, 255);
+    SDL_Rect r = { x, e - 2, 1, 5 };
+    SDL_RenderFillRect(S.r, &r);
+    set_color(mix_color(ac, 0xffffff, 0.6f), 200);
+    SDL_Rect r2 = { x, e + 10, 1, 2 };
+    SDL_RenderFillRect(S.r, &r2);
+  }
+  /* gros boutons ronds : reglages a gauche, Launcher5 a droite */
+  int bx[2] = { 300, W - 300 }, by = 905;
+  for (int i = 0; i < 2; i++) {
+    gx_circle(bx[i], by, 112, 0xe8eaed, 255);
+    gx_circle(bx[i], by, 100, 0xf4f5f6, 255);
+    gx_ring(bx[i], by, 100, 7, ac, 255);
+    gx_circle(bx[i], by - 18, 70, 0xffffff, 120);   /* reflet */
+  }
+  draw_text(S.f84, "⚙", bx[0], by - 56, 0x9ea3aa, 1, 0);
+  draw_text(S.f48, "L5", bx[1], by - 34, 0xa2a7ae, 1, 0);
+  /* petits boutons : plus et marche */
+  int sx[2] = { 105, W - 105 }, sy = 800;
+  for (int i = 0; i < 2; i++) { gx_circle(sx[i], sy, 30, 0xf7f7f8, 255); gx_ring(sx[i], sy, 30, 3, mix_color(ac, 0xffffff, 0.3f), 255); }
+  fill_round(sx[0] - 13, sy - 3, 26, 6, 3, 0xa2a7ae, 255);
+  fill_round(sx[0] - 3, sy - 13, 6, 26, 3, 0xa2a7ae, 255);
+  gx_ring(sx[1], sy + 2, 12, 4, 0xa2a7ae, 255);
+  fill_round(sx[1] - 2, sy - 16, 5, 16, 2, 0xa2a7ae, 255);
+  /* carte memoire a gauche du texte, carte bleue a droite */
+  fill_round(548, 878, 74, 98, 8, 0xffffff, 255);
+  outline_round(548, 878, 74, 98, 8, 2, 0xb9bec5, 255);
+  fill_round(560, 892, 50, 26, 4, 0xdfe2e6, 255);
+  draw_text(S.f22, "SD", 585, 932, 0x9ea3aa, 1, 0);
+  int cx = W - 690, cy = 878;
+  for (int y = 0; y < 98; y += 2) {
+    set_color(mix_color(mix_color(ac, 0xffffff, 0.55f), shade(ac, 0.8f), (float)y / 98), 255);
+    SDL_Rect r = { cx, cy + y, 150, 2 };
+    SDL_RenderFillRect(S.r, &r);
+  }
+  for (int x = 0; x < 150; x++) {                /* vague blanche sur la carte */
+    int y = cy + 46 + (int)(8 * sinf(x * 0.06f));
+    set_color(0xffffff, 200);
+    SDL_Rect r = { cx + x, y, 1, 3 };
+    SDL_RenderFillRect(S.r, &r);
+  }
+  outline_round(cx, cy, 150, 98, 12, 3, 0xffffff, 255);
+  SDL_RenderSetViewport(S.r, NULL);
+  SDL_SetRenderTarget(S.r, prev);
+}
+
+/* barre d'icones du haut : une case par section */
+static void gx_toolbar(void) {
+  static const char *const ICON[SEC_COUNT] = { "▤", "★", "PS5", "PS4", "▶", "HB", "EMU", "ELF", "↑", "◷", "⚙" };
+  int n = 0, cw = 92, ch = 62;
+  for (int k = 0; k < SEC_COUNT; k++) if (S.sec_has[SEC_ORDER[k]]) n++;
+  int tw = n * cw, x = (W - tw) / 2, y = 26;
+  fill_round(x - 8, y - 6, tw + 16, ch + 12, 22, 0xc9ccd1, 255);
+  fill_round(x - 6, y - 4, tw + 12, ch + 8, 20, 0xe4e6e9, 255);
+  int i = 0;
+  for (int k = 0; k < SEC_COUNT; k++) {
+    int s = SEC_ORDER[k];
+    if (!S.sec_has[s]) continue;
+    int cxl = x + i * cw;
+    if (s == S.sec) {
+      fill_round(cxl + 3, y + 2, cw - 6, ch - 4, 14, mix_color(S.base->accent, 0xffffff, 0.65f), 255);
+      outline_round(cxl + 3, y + 2, cw - 6, ch - 4, 14, 2, S.base->accent, 255);
+    }
+    if (i) fill_round(cxl, y + 10, 2, ch - 20, 1, 0xc4c7cc, 255);
+    draw_text(strlen(ICON[s]) > 2 ? S.f22 : S.f30, ICON[s], cxl + cw / 2, y + (strlen(ICON[s]) > 2 ? 17 : 12), s == S.sec ? 0x3d4248 : 0x8a9097, 1, cw - 8);
+    i++;
+  }
+}
+
+/* decor, barre d'icones et carrousel : une image complete, refaite seulement quand elle change */
+static void gx_scene(int sel) {
+  if (gx_bg_tex) {
+    SDL_SetTextureBlendMode(gx_bg_tex, SDL_BLENDMODE_NONE);
+    SDL_RenderCopy(S.r, gx_bg_tex, NULL, NULL);
+  }
+  uint32_t ac = S.base->accent;
+  gx_toolbar();
+  gx_tri(46, 190, 104, 150, 104, 230, ac);       /* fleches bleues */
+  gx_tri(W - 46, 190, W - 104, 150, W - 104, 230, ac);
+  float maxrel = S.lite ? 4.6f : 5.6f, R = 1350, cx0 = W / 2.0f, cy0 = 405;
+  FlowItem items[32]; int n = 0;
+  for (int i = (int)S.scroll - 6; i <= (int)S.scroll + 7 && n < 32; i++) {
+    if (i < 0 || i >= S.nentries) continue;
+    float rel = i - S.scroll;
+    if (fabsf(rel) > maxrel) continue;
+    items[n].i = i; items[n].rel = rel; n++;
+  }
+  qsort(items, n, sizeof items[0], cmp_flow);
+  for (int k = 0; k < n; k++) {
+    Entry *en = &S.entries[items[k].i];
+    float rel = items[k].rel, th = rel * 0.135f, a = fabsf(rel);
+    float sc = a < 1 ? 1.0f - 0.18f * a : 0.82f - 0.02f * (a - 1);
+    int w = (int)(FLOW * 0.82f * sc), h = BOXES ? w * 3 / 2 : w;
+    float x = cx0 + R * sinf(th), y = cy0 + R * (1 - cosf(th));
+    SDL_Texture *t = en->is_folder ? folder_tex(en->node) : tile_tex(en->app, FLOW, TH(FLOW));
+    SDL_Rect d = { (int)(x - w / 2.0f), (int)(y - h / 2.0f), w, h };
+    if (S.glow) {                                /* ombre douce sous le boitier */
+      SDL_SetTextureColorMod(S.glow, 0, 0, 0);
+      SDL_SetTextureBlendMode(S.glow, SDL_BLENDMODE_BLEND);
+      SDL_SetTextureAlphaMod(S.glow, 70);
+      SDL_Rect sd = { d.x - w / 6, d.y + h - h / 10, w + w / 3, h / 5 };
+      SDL_RenderCopy(S.r, S.glow, NULL, &sd);
+      SDL_SetTextureBlendMode(S.glow, SDL_BLENDMODE_ADD);
+    }
+    if (t) {
+      int b = a > 1 ? (int)(255 - 18 * (a - 1)) : 255;
+      SDL_SetTextureColorMod(t, b, b, b);
+      SDL_RenderCopyEx(S.r, t, NULL, &d, th * 57.2958f, NULL, SDL_FLIP_NONE);
+      SDL_SetTextureColorMod(t, 255, 255, 255);
+    }
+    if (items[k].i == sel && a < 0.05f) {
+      outline_round(d.x - 4, d.y - 4, w + 8, h + 8, 10, 4, ac, 255);
+      if (!en->is_folder && menu_is_fav(&S.menu, en->app->id)) fav_badge(d.x, d.y, w);
+    }
+  }
+  if (!S.nentries) {
+    draw_text(S.f36, S.sec == SEC_HOME && S.depth ? "Ce dossier est vide" : "Rien à afficher ici", W / 2, 380, 0x6b737c, 1, 1400);
+  }
+  if (gx_bar_tex) { SDL_Rect bd = { 0, 740, W, H - 740 }; SDL_RenderCopy(S.r, gx_bar_tex, NULL, &bd); }
+}
+
+static void draw_gx(Entry *e) {
+  static SDL_Texture *scene;
+  static uint32_t scene_key;
+  gx_build_bg();
+  uint32_t ac = S.base->accent;
+  int sel = *cur_sel();
+  S.scroll += ((float)sel - S.scroll) * ease(0.18f);
+  if (fabsf(sel - S.scroll) < 0.002f) S.scroll = (float)sel;
+  uint32_t key = (((((uint32_t)sel * 31 + S.sec) * 31 + S.depth) * 31 + S.nentries) * 31 + S.th_ver) * 31 + tiles_gen;
+  key = key * 31 + (S.mode == MODE_MOVE) + 2u * (uint32_t)S.th_ver;
+  if (S.scroll == (float)sel && S.mode != MODE_MOVE) {   /* immobile : image en cache */
+    if (!scene) scene = SDL_CreateTexture(S.r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, W, H);
+    if (scene && key != scene_key) {
+      SDL_Texture *prev = SDL_GetRenderTarget(S.r);
+      SDL_SetRenderTarget(S.r, scene);
+      gx_scene(sel);
+      SDL_SetRenderTarget(S.r, prev);
+      scene_key = key;
+    }
+    if (scene) { SDL_SetTextureBlendMode(scene, SDL_BLENDMODE_NONE); SDL_RenderCopy(S.r, scene, NULL, NULL); }
+    else gx_scene(sel);
+  } else { gx_scene(sel); scene_key = 0; }
+
+  /* nom du jeu et horloge a afficheur */
+  if (e) {
+    const char *nm = e->is_folder ? e->node->name : menu_display_name(&S.menu, e->app);
+    draw_text(S.f36, nm, W / 2, 688, shade(mix_color(ac, 0x3a4652, 0.55f), 1.0f), 1, 1300);
+  }
+  time_t now = time(NULL);
+  struct tm *tm = localtime(&now);
+  int hh = tm->tm_hour, mm = tm->tm_min, dw = 46, dh = 78, gap = 14, total = dw * 4 + gap * 3 + 26;
+  int x0 = W / 2 - total / 2, y0 = 752;
+  uint32_t on = 0x7d828a, off = 0xd9dbdf;
+  if (S.th->clock == CLOCK_12) { hh %= 12; if (!hh) hh = 12; }
+  if (S.th->clock != CLOCK_HIDDEN) {
+    gx_digit(x0, y0, dw, dh, hh / 10, on, off);
+    gx_digit(x0 + dw + gap, y0, dw, dh, hh % 10, on, off);
+    int colon = (SDL_GetTicks() / 500) % 2 ? on : off, cxp = x0 + 2 * (dw + gap) + 2;
+    fill_round(cxp, y0 + 20, 9, 9, 4, colon, 255);
+    fill_round(cxp, y0 + 50, 9, 9, 4, colon, 255);
+    gx_digit(x0 + 2 * (dw + gap) + 26, y0, dw, dh, mm / 10, on, off);
+    gx_digit(x0 + 3 * (dw + gap) + 26, y0, dw, dh, mm % 10, on, off);
+  }
+  /* espace libre et nombre de jeux */
+  static Uint32 last; static long long free_mb = -1;
+  if (!last || SDL_GetTicks() - last > 5000) {
+    last = SDL_GetTicks();
+    char ip[64]; int temp;
+    plat_sysinfo(ip, sizeof ip, &free_mb, &temp);
+  }
+  char l1[96], l2[64];
+  if (free_mb >= 0) snprintf(l1, sizeof l1, tr("%lld Go libres"), free_mb / 1024); else l1[0] = 0;
+  snprintf(l2, sizeof l2, tr("%s : %d"), tr(SEC_NAMES[S.sec]), S.nentries);
+  draw_text(S.f30, l1, W / 2, 900, 0x4f5862, 1, 900);
+  draw_text(S.f30, l2, W / 2, 944, 0x4f5862, 1, 900);
+}
+
 static void draw(void) {
   frame_theme(selected());
   refresh_settings();
@@ -2401,6 +2747,10 @@ static void draw(void) {
     SDL_RenderPresent(S.r);
     return;
   }
+  if (GXMODE) {
+    draw_gx(e);
+    goto overlays;
+  }
   draw_background(e);
   draw_fx();
   draw_topbar();
@@ -2410,6 +2760,7 @@ static void draw(void) {
   default: if (S.sec == SEC_SYS) draw_settings(); else { draw_flow(); draw_flow_info(e); } break;
   }
   draw_footer();
+overlays:
   if (S.mode == MODE_CONTEXT) draw_list_panel(S.ctx_title, S.nchoices, choice_label, S.csel, NULL);
   if (S.mode == MODE_CONTEXT && S.quick) draw_quick_info();
   if (S.mode == MODE_PICKFOLDER) draw_list_panel("Ranger dans…", S.nfolders, folder_label, S.fsel, NULL);
@@ -2771,6 +3122,7 @@ static void quick_clear_cache(void) {
     if (!remove(path)) n++;
   }
   if (d) closedir(d);
+  case_img_forget();
   for (int i = 0; i < S.menu.napps; i++) {
     App *a = &S.menu.apps[i];
     if (a->boxtex) { SDL_DestroyTexture(a->boxtex); a->boxtex = NULL; }
@@ -2790,7 +3142,14 @@ static void quick_action(int act) {
     save();
     toast("Relance du launcher…");
     draw(); SDL_RenderPresent(S.r);
-    if (!plat_restart_ui()) { plat_log("menu rapide : relance de l'interface"); S.running = 0; break; }
+    if (!plat_restart_ui()) {
+      /* fin immediate : les fils (jaquettes, musique) tournent encore, un nettoyage
+         complet pourrait les faire planter. Le systeme libere tout a la sortie. */
+      plat_log("menu rapide : relance de l'interface");
+      plat_quit();
+      fflush(NULL);
+      _exit(0);
+    }
     snprintf(path, sizeof path, "%s/launcher5.elf", plat_data_dir());   /* secours (version de test sur PC) */
     if (plat_send_elf(path)) toast("Chargeur ELF introuvable : envoie /data/launcher5/launcher5.elf");
     break;
@@ -2933,6 +3292,7 @@ static void check_tile_shape(void) {
   if (S.tiles_corners == S.th->corners && ck == case_key) return;
   S.tiles_corners = S.th->corners;
   case_key = ck;
+  case_img_forget();                             /* images de boitier relues (ajoutees par FTP) */
   for (int i = 0; i < S.menu.napps; i++) drop_tiles(&S.menu.apps[i]);
 }
 
@@ -3011,7 +3371,7 @@ static int row_visible(int r) {
 }
 
 static const char *ROW_LABEL[R_COUNT] = {
-  "Thème de base", "Couleurs", "Couleur principale", "Couleur secondaire", "Fond : haut", "Fond : bas", "Arrière-plan",
+  "Thème de base", "Interface", "Couleurs", "Couleur principale", "Couleur secondaire", "Fond : haut", "Fond : bas", "Arrière-plan",
   "Image", "Illustration du jeu", "Effet animé", "Halos lumineux", "Particules", "Forme", "Sens", "Boîtier", "Coins des jaquettes",
   "Horloge", "Sons d'interface", "Musique", "Volume", "Enregistrer comme mon thème…", "Supprimer ce thème",
 };
@@ -3065,6 +3425,10 @@ static const char *row_value(int r, char *buf, long *sw) {
     if (!strcmp(t->music, "*")) return "Toutes, à la suite";
     return t->music;
   case R_VOLUME: sprintf(buf, "%d %%", t->volume); return buf;
+  case R_CASE: {
+    static const char *const CASES[CASE_COUNT] = { "Bleu", "Noir", "Blanc", "Cristal", "Steelbook", "Couleur du thème", "Images (boitiers/)", "Aucun" };
+    return CASES[t->case_style >= 0 && t->case_style < CASE_COUNT ? t->case_style : 0];
+  }
   }
   return "";
 }
@@ -3129,6 +3493,7 @@ static void theme_row_change(int d) {
   }
   case R_VOLUME: t->volume = step(t->volume, d); break;
   case R_AUTO: t->auto_color = !t->auto_color; break;
+  case R_LAYOUT: t->layout = cyc(t->layout, d, LAYOUT_COUNT); break;
   case R_FX: t->fx = cyc(t->fx, d, FX_COUNT); break;
   case R_SFX: t->sfx = step(t->sfx, d); if (t->sfx) { S.th = t; sfx(SFX_OK); } break;
   default: return;
@@ -3212,6 +3577,7 @@ static void theme_editor_input(int in) {
 /* titre de groupe affiche avant certaines lignes */
 static const char *row_group(int r) {
   switch (r) {
+  case R_LAYOUT: return "AFFICHAGE";
   case R_AUTO: return "COULEURS";
   case R_BG: return "ARRIÈRE-PLAN";
   case R_GLOW: return "EFFETS";
@@ -3229,11 +3595,12 @@ static int row_chips(int r, const char *const **opts, int *cur) {
   static const char *const FALL[] = { "Montent", "Tombent" };
   static const char *const COR[] = { "Droits", "Arrondis", "Ronds" };
   static const char *const CLK[] = { "24 h", "12 h", "Masquée" };
-  static const char *const CASES[] = { "Bleu", "Noir", "Cristal", "Steel", "Thème", "Aucun" };
+  static const char *const LAY[] = { "Launcher5", "Loader GX" };
   static const char *const AUTO[] = { "Du thème", "Du jeu" };
   static const char *const FXN[] = { "Aucun", "Grille", "Hyperespace", "Pluie" };
   const Theme *t = &S.edit;
   switch (r) {
+  case R_LAYOUT: *opts = LAY; *cur = t->layout; return LAYOUT_COUNT;
   case R_AUTO: *opts = AUTO; *cur = t->auto_color ? 1 : 0; return 2;
   case R_FX: *opts = FXN; *cur = t->fx; return FX_COUNT;
   case R_BG: *opts = BG; *cur = t->bg_mode; return BG_COUNT;
@@ -3241,7 +3608,6 @@ static int row_chips(int r, const char *const **opts, int *cur) {
   case R_PSTYLE: *opts = PST; *cur = t->pstyle; return PSTYLE_COUNT;
   case R_FALL: *opts = FALL; *cur = t->fall; return 2;
   case R_CORNERS: *opts = COR; *cur = t->corners; return CORNER_COUNT;
-  case R_CASE: *opts = CASES; *cur = t->case_style; return CASE_COUNT;
   case R_CLOCK: *opts = CLK; *cur = t->clock; return CLOCK_COUNT;
   }
   return 0;
@@ -3508,7 +3874,12 @@ static void loop_poll(void) {
   MU.loop = LD.c; LD.c = NULL;
   Mix_Volume(MUSIC_CH, MU.vol < 0 ? MIX_MAX_VOLUME : MU.vol * MIX_MAX_VOLUME / 100);
   if (Mix_PlayChannel(MUSIC_CH, MU.loop, -1) < 0) plat_log("lecture impossible : %s", Mix_GetError());
-  else plat_log("musique en boucle : %s", LD.path);
+  else {
+    Sint16 *smp = (Sint16 *)MU.loop->abuf;
+    long ns = (long)MU.loop->alen / 2, pk = 0;
+    for (long i = 0; i < ns; i += 97) if (abs(smp[i]) > pk) pk = abs(smp[i]);
+    plat_log("musique en boucle : %s (%.1f s, crete %ld)", LD.path, ns / 96000.0, pk);
+  }
   if (MU.paused) Mix_Pause(MUSIC_CH);
 }
 
@@ -3833,7 +4204,7 @@ static void move_cursor(int dx, int dy) {
     return;
   }
   int *sel = cur_sel();
-  if (dy && S.menu.view == VIEW_GRID) {
+  if (dy && S.menu.view == VIEW_GRID && !GXMODE) {
     if (S.mode != MODE_BROWSE) return;            /* en deplacement : gauche / droite seulement */
     int ns = *sel + dy * GRID_COLS;
     if (ns >= S.nentries && *sel / GRID_COLS < (S.nentries - 1) / GRID_COLS) ns = S.nentries - 1;
@@ -4867,9 +5238,9 @@ int main(int argc, char **argv) {
   free(steps);
 
   save();
-  TTF_Quit();
-  IMG_Quit();
-  SDL_Quit();
   plat_quit();
-  return 0;
+  /* sortie directe : les fils (jaquettes, musique, mises a jour) peuvent encore tourner,
+     un nettoyage complet de SDL pourrait les faire planter. Le systeme libere tout. */
+  fflush(NULL);
+  _exit(0);
 }

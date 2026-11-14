@@ -229,6 +229,10 @@ static const char *const T[][L_COUNT] = {
   { "BOÎTIERS DES JEUX", "GAME CASES", "CAJAS DE LOS JUEGOS", "SPIELEHÜLLEN", "CUSTODIE DEI GIOCHI", "CAIXAS DOS JOGOS" },
   { "Boîtier", "Case", "Caja", "Hülle", "Custodia", "Caixa" },
   { "Noir", "Black", "Negra", "Schwarz", "Nera", "Preta" },
+  { "Blanc", "White", "Blanca", "Weiß", "Bianca", "Branca" },
+  { "Steelbook", "Steelbook", "Steelbook", "Steelbook", "Steelbook", "Steelbook" },
+  { "Images (boitiers/)", "Images (boitiers/)", "Imágenes (boitiers/)", "Bilder (boitiers/)", "Immagini (boitiers/)", "Imagens (boitiers/)" },
+  { "Couleur du thème", "Theme colour", "Color del tema", "Theme-Farbe", "Colore del tema", "Cor do tema" },
   { "Steel", "Steel", "Steel", "Steel", "Steel", "Steel" },
   /* studio de theme */
   { "Thème de base", "Base theme", "Tema base", "Basis-Theme", "Tema di base", "Tema base" },

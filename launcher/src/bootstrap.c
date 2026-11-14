@@ -62,6 +62,9 @@ INCBIN(wall4, "assets/fonds/launcher5-04.jpg")
 INCBIN(wall5, "assets/fonds/launcher5-05.jpg")
 INCBIN(wall6, "assets/fonds/launcher5-06.jpg")
 INCBIN(wall7, "assets/fonds/launcher5-07.jpg")
+/* images de boitiers PS5 / PS4 (style « Images ») */
+INCBIN(case_ps5, "assets/boitiers/ps5.png")
+INCBIN(case_ps4, "assets/boitiers/ps4.png")
 
 typedef struct app_launch_ctx {
   uint32_t structsize;
@@ -124,6 +127,11 @@ static void install_wallpapers(void) {
     if (stat(path, &st) && write_file(path, W[i].start, (size_t)(W[i].end - W[i].start), 0644))
       logf("fond d'ecran non installe : %s", W[i].name);
   }
+  mkdir(DATA_DIR "/boitiers", 0755);             /* les images deja la (perso) sont gardees */
+  if (stat(DATA_DIR "/boitiers/ps5.png", &st) && write_file(DATA_DIR "/boitiers/ps5.png", case_ps5, (size_t)(case_ps5_end - case_ps5), 0644))
+    logf("boitier ps5 non installe");
+  if (stat(DATA_DIR "/boitiers/ps4.png", &st) && write_file(DATA_DIR "/boitiers/ps4.png", case_ps4, (size_t)(case_ps4_end - case_ps4), 0644))
+    logf("boitier ps4 non installe");
   remove(DATA_DIR "/sons/demarrage-techno.mp3");  /* son retire en 2.1.2 */
   rmdir(DATA_DIR "/sons");
 }
