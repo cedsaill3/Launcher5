@@ -1378,7 +1378,7 @@ static void meta_line(Entry *e, char *meta, size_t n) {
       { "cfg:return", "Revenir au launcher tout seul quand tu fermes un jeu" },
       { "cfg:folders", "Affiche la section où tu ranges tes jeux dans tes dossiers" },
       { "cfg:hidden", "Montre ou cache les jeux que tu as masqués" },
-      { "cfg:saver", "Diaporama de tes jaquettes quand la manette ne bouge plus" },
+      { "cfg:saver", "Diaporama de tes fonds d'écran au repos" },
       { "sys:home", "Ferme le launcher et revient à l'accueil de la PS5" },
     };
     snprintf(meta, n, "Réglage");
@@ -2086,7 +2086,7 @@ static void draw_boot(void) {
 }
 
 /* Economiseur d'ecran : tes jaquettes en diaporama */
-static void draw_saver(void) {
+static void draw_saver_covers(void) {           /* secours : pas d'image dans fonds/ */
   Uint32 now = SDL_GetTicks();
   if (!S.saver_t || now - S.saver_t > 7000) {
     int cand[256], n = 0;
@@ -2131,6 +2131,89 @@ static void draw_saver(void) {
   strftime(clk, sizeof clk, S.th->clock == CLOCK_12 ? "%I:%M" : "%H:%M", localtime(&tnow));
   draw_text_a(S.fbig, clk, W - CAR_X, H - 230, 0xffffff, 2, 0, 200);
   draw_text_a(S.f22, "Appuie sur une touche pour revenir", W - CAR_X, H - 80, 0x9aa4b5, 2, 0, 160);
+  draw_particles(S.lite);
+}
+
+/* Economiseur d'ecran : diaporama des fonds d'ecran (dossier fonds/), lent zoom
+   et fondu enchaine, horloge par-dessus. */
+static void scan_media_files(void);
+static SDL_Texture *SV[2];                       /* image affichee, image precedente (fondu) */
+static int sv_wall = -1;
+
+static void saver_free(void) {
+  for (int i = 0; i < 2; i++) if (SV[i]) { SDL_DestroyTexture(SV[i]); SV[i] = NULL; }
+  sv_wall = -1;
+}
+
+/* image recadree au format de l'ecran et un peu plus grande, preparee une fois :
+   ensuite elle glisse sans etre redimensionnee (fluide sans carte graphique) */
+#define SV_W (W * 106 / 100)
+#define SV_H (H * 106 / 100)
+static SDL_Texture *saver_prep(SDL_Texture *t) {
+  int tw, th;
+  SDL_QueryTexture(t, NULL, NULL, &tw, &th);
+  SDL_Rect src = { 0, 0, tw, th };
+  if ((long)tw * H > (long)th * W) { src.w = th * W / H; src.x = (tw - src.w) / 2; }
+  else { src.h = tw * H / W; src.y = (th - src.h) / 2; }
+  SDL_Texture *b = SDL_CreateTexture(S.r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, SV_W, SV_H);
+  if (!b) return t;
+  SDL_Texture *prev_rt = SDL_GetRenderTarget(S.r);
+  SDL_SetRenderTarget(S.r, b);
+  SDL_SetTextureBlendMode(t, SDL_BLENDMODE_NONE);
+  SDL_RenderCopy(S.r, t, &src, NULL);
+  SDL_SetTextureAlphaMod(S.shade_bottom, 255);              /* bas assombri sous l'horloge, inclus une fois */
+  SDL_Rect sh = { 0, H + (SV_H - H) / 2 - 420, SV_W, 420 };
+  SDL_RenderCopy(S.r, S.shade_bottom, NULL, &sh);
+  SDL_SetRenderTarget(S.r, prev_rt);
+  SDL_DestroyTexture(t);
+  SDL_SetTextureBlendMode(b, SDL_BLENDMODE_BLEND);
+  return b;
+}
+
+static void draw_saver(void) {
+  enum { SHOW = 9000, FADE = 1600 };
+  Uint32 now = SDL_GetTicks();
+  if (!S.saver_t) scan_media_files();            /* images ajoutees depuis la derniere fois */
+  if (!S.nwalls) { draw_saver_covers(); return; }
+  if (!S.saver_t || now - S.saver_t > SHOW) {
+    int pick = rand() % S.nwalls;
+    if (S.nwalls > 1) while (pick == sv_wall) pick = rand() % S.nwalls;
+    char path[PATH_LEN];
+    snprintf(path, sizeof path, "%s/fonds/%s", plat_data_dir(), S.walls[pick]);
+    SDL_Texture *t = load_tex(path);
+    if (t) t = saver_prep(t);
+    if (t) {
+      if (SV[1]) SDL_DestroyTexture(SV[1]);
+      SV[1] = SV[0]; SV[0] = t; sv_wall = pick;
+    }
+    S.saver_t = now;
+  }
+  if (!SV[0]) { draw_saver_covers(); return; }
+  Uint32 el = now - S.saver_t;
+  SDL_SetRenderDrawColor(S.r, 0, 0, 0, 255);
+  SDL_RenderClear(S.r);
+  for (int i = 1; i >= 0; i--) {
+    SDL_Texture *t = SV[i];
+    if (!t || (i && el >= FADE)) continue;
+    float pan = ((i ? 1.0f : 0.0f) + (float)el / SHOW) / 2;   /* 0..1 : glisse doucement d'un cote */
+    int side = ((sv_wall + i) & 1) ? 1 : -1;
+    SDL_Rect d = { -(int)((SV_W - W) * (side > 0 ? pan : 1 - pan)), -(SV_H - H) / 2, SV_W, SV_H };
+    int a = i ? 255 : el < FADE ? (int)(255 * el / FADE) : 255;
+    SDL_SetTextureBlendMode(t, a < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
+    SDL_SetTextureAlphaMod(t, (Uint8)a);
+    SDL_RenderCopy(S.r, t, NULL, &d);
+    SDL_SetTextureAlphaMod(t, 255);
+  }
+  /* horloge et date */
+  time_t tnow = time(NULL);
+  struct tm *tm = localtime(&tnow);
+  char clk[16], day[64];
+  strftime(clk, sizeof clk, S.th->clock == CLOCK_12 ? "%I:%M" : "%H:%M", tm);
+  static const char *JOURS_L[7] = { "dim.", "lun.", "mar.", "mer.", "jeu.", "ven.", "sam." };
+  snprintf(day, sizeof day, "%s %d/%02d", tr(JOURS_L[tm->tm_wday]), tm->tm_mday, tm->tm_mon + 1);
+  draw_text_a(S.fbig, clk, W - CAR_X, H - 330, 0xffffff, 2, 0, 235);
+  draw_text_a(S.f36, day, W - CAR_X - 4, H - 150, 0xdfe5ee, 2, 0, 225);
+  draw_text_a(S.f22, "Appuie sur une touche pour revenir", W - CAR_X - 4, H - 90, 0x9aa4b5, 2, 0, 160);
   draw_particles(S.lite);
 }
 
@@ -3606,7 +3689,7 @@ static void draw_settings(void) {
     "Cover Flow, Grille ou Carrousel  ·  aperçu à droite",
     "Boîtes verticales ou icônes carrées",
     "Téléchargées depuis la base Launcher5 sur Internet",
-    "Diaporama de tes jaquettes au repos",
+    "Diaporama de tes fonds d'écran au repos",
     "Volume des clics et du lancement de jeu",
     "Néon, Rétro 8-bit, Doux, Sci-fi, Cristal",
     "Joué à l'ouverture  ·  écoute en changeant",
@@ -3699,7 +3782,7 @@ static void handle_inner(int in);
 static void handle(int in) {
   S.last_input = SDL_GetTicks();
   if (!S.boot_done) { S.boot_done = 1; return; }
-  if (S.saver_on) { S.saver_on = 0; S.saver_t = 0; return; }
+  if (S.saver_on) { S.saver_on = 0; S.saver_t = 0; saver_free(); return; }
   if (S.launching) return;
   struct { int mode, sec, depth, sel, csel, fsel, color, kbr, kbc, row; size_t len; } a, b;
   Theme before = S.edit;
