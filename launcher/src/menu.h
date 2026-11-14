@@ -29,7 +29,7 @@ enum {
 /* Presentation des jeux */
 enum { VIEW_FLOW, VIEW_GRID, VIEW_CLASSIC, VIEW_COUNT };
 #define SFX_PACKS 5
-#define BOOT_SOUNDS 6
+#define BOOT_SOUNDS 7
 
 /* Precisions sur le contenu */
 #define APPF_MEDIA     1   /* lecture video / musique (aussi pour les homebrews) */

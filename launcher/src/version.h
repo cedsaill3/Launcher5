@@ -5,5 +5,5 @@
  */
 #pragma once
 
-#define L5_VERSION "2.1.0"
+#define L5_VERSION "2.1.1"
 #define L5_AUTHOR  "cedsaill"

@@ -62,6 +62,8 @@ INCBIN(wall4, "assets/fonds/launcher5-04.jpg")
 INCBIN(wall5, "assets/fonds/launcher5-05.jpg")
 INCBIN(wall6, "assets/fonds/launcher5-06.jpg")
 INCBIN(wall7, "assets/fonds/launcher5-07.jpg")
+/* son de demarrage fourni (musique libre de droits, Dragon Studio) */
+INCBIN(snd_techno, "assets/sons/demarrage-techno.mp3")
 
 typedef struct app_launch_ctx {
   uint32_t structsize;
@@ -124,6 +126,10 @@ static void install_wallpapers(void) {
     if (stat(path, &st) && write_file(path, W[i].start, (size_t)(W[i].end - W[i].start), 0644))
       logf("fond d'ecran non installe : %s", W[i].name);
   }
+  mkdir(DATA_DIR "/sons", 0755);
+  if (stat(DATA_DIR "/sons/demarrage-techno.mp3", &st) &&
+      write_file(DATA_DIR "/sons/demarrage-techno.mp3", snd_techno, (size_t)(snd_techno_end - snd_techno), 0644))
+    logf("son de demarrage non installe");
 }
 
 static int write_file(const char *path, const uint8_t *data, size_t size, int mode) {

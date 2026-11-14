@@ -2,7 +2,7 @@
 
 # Launcher5 — game loader pour PS5
 
-**par cedsaill** · v2.1.0 · [English below](#english)
+**par cedsaill** · v2.1.1 · [English below](#english)
 
 Launcher5 remplace la navigation dans tes jeux et homebrews par un vrai game loader :
 jaquettes officielles, cover flow en 3D, thèmes animés, sons, dossiers, musique d'ambiance.
@@ -26,7 +26,8 @@ jaquettes officielles, cover flow en 3D, thèmes animés, sons, dossiers, musiqu
 - **Jaquettes boîtes** pour tous les autres jeux, fabriquées à partir de leur illustration
   (bandeau PS5 / PS4), ou ta propre jaquette dans `jaquettes/`
 - **Menu Paramètres** complet, avec **aperçu en direct** de l'affichage choisi
-- **Sons** : 5 styles d'interface (Néon, Rétro 8-bit, Doux, Sci-fi, Cristal) et 6 sons de démarrage
+- **Sons** : 5 styles d'interface (Néon, Rétro 8-bit, Doux, Sci-fi, Cristal) et 7 sons de démarrage,
+  dont un morceau techno
 - **Masquer l'IP** à l'écran, pour les captures et les lives
 - 22 thèmes et 7 fonds d'écran inclus, effets animés (grille, hyperespace, pluie),
   couleurs automatiques selon le jeu
@@ -99,7 +100,8 @@ Le launcher recharge tout seul un menu, un thème ou une jaquette modifiés.
 Launcher5 © 2026 cedsaill. Les chargeurs ELF (`launcher/gpl/`) et la méthode
 d'installation de la tuile viennent des projets de John Törnblom (GPL v3) : `launcher5.elf`
 est distribué sous **GPL v3** (voir [launcher/COPYING](launcher/COPYING)).
-Polices DejaVu : licence libre. Les jaquettes appartiennent à leurs éditeurs.
+Polices DejaVu : licence libre. Musique de démarrage « Techno » : Dragon Studio, libre de droits.
+Les jaquettes appartiennent à leurs éditeurs.
 
 ---
 
@@ -113,7 +115,7 @@ interface sounds, folders, background music. The interface follows the console l
 **New in v2:** official PS5 covers downloaded automatically from the
 [Launcher5 cover database](https://github.com/cedsaill3/Launcher5-covers) on GitHub (works even
 when Sony servers are blocked by DNS) · box covers for every other game · full Settings menu with
-live layout preview · 5 interface sound styles and 6 startup sounds · hide IP option ·
+live layout preview · 5 interface sound styles and 7 startup sounds · hide IP option ·
 22 themes, 7 bundled wallpapers and animated effects.
 
 **Install:** download `launcher5.elf` from [Releases](../../releases) and send
@@ -129,4 +131,4 @@ verifies its SHA-256 and installs it. It is saved on the console as `/data/launc
 **Custom covers:** put `<game ID>.jpg` in `/data/launcher5/jaquettes/` over FTP.
 
 **License:** © 2026 cedsaill. Bundled ELF loaders by John Törnblom (GPL v3), so `launcher5.elf`
-is distributed under GPL v3. Cover art belongs to its publishers.
+is distributed under GPL v3. Startup music "Techno": Dragon Studio, royalty free. Cover art belongs to its publishers.
