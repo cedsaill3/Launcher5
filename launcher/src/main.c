@@ -105,6 +105,10 @@ static const char *SEC_NAMES[SEC_COUNT] = {
   "Mes dossiers", "Favoris", "Jeux PS5", "Jeux PS4", "Médias", "Homebrews", "Émulateurs", "Payloads", "Plus joués",
   "Récents", "Paramètres"
 };
+/* ordre d'affichage des sections (« Mes dossiers » apres les emulateurs) */
+static const int SEC_ORDER[SEC_COUNT] = { SEC_FAV, SEC_PS5, SEC_PS4, SEC_MEDIA, SEC_HB, SEC_EMU, SEC_HOME, SEC_PAYLOAD,
+                                          SEC_TOP, SEC_RECENT, SEC_SYS };
+static int sec_pos(int s) { int i = 0; while (i < SEC_COUNT - 1 && SEC_ORDER[i] != s) i++; return i; }
 /* sections triees par nom : saut par lettre (L2 / R2) */
 #define SEC_SORTED_BY_NAME(s) ((s) != SEC_HOME && (s) != SEC_RECENT && (s) != SEC_TOP)
 static const char *KIND_LABEL[KIND_COUNT] = { "JEU PS5", "JEU PS4", "HOMEBREW", "PAYLOAD", "MÉDIA", "RÉGLAGE" };
@@ -127,10 +131,10 @@ static int sec_match(int sec, const App *a) {
 /* ------------------------------------------------------------------ */
 /* Etat                                                                */
 /* ------------------------------------------------------------------ */
-enum { MODE_BROWSE, MODE_CONTEXT, MODE_MOVE, MODE_KEYBOARD, MODE_PICKFOLDER, MODE_COLOR, MODE_THEME };
+enum { MODE_BROWSE, MODE_CONTEXT, MODE_MOVE, MODE_KEYBOARD, MODE_PICKFOLDER, MODE_COLOR, MODE_THEME, MODE_COMMU };
 /* lignes de l'editeur de theme */
-enum { R_PRESET, R_AUTO, R_ACCENT, R_ACCENT2, R_TOP, R_BOTTOM, R_BG, R_WALL, R_ART, R_FX, R_GLOW, R_PART, R_PSTYLE,
-       R_FALL, R_CORNERS, R_CLOCK, R_SFX, R_MUSIC, R_VOLUME, R_SAVE, R_DELETE, R_COUNT };
+enum { R_PRESET, R_COMMU, R_AUTO, R_ACCENT, R_ACCENT2, R_TOP, R_BOTTOM, R_BG, R_WALL, R_ART, R_FX, R_GLOW, R_PART, R_PSTYLE,
+       R_FALL, R_CASE, R_CORNERS, R_CLOCK, R_SFX, R_MUSIC, R_VOLUME, R_SAVE, R_DELETE, R_COUNT };
 enum {
   ACT_LAUNCH, ACT_OPEN, ACT_MOVE, ACT_TO_FOLDER, ACT_OUT_OF_FOLDER, ACT_RENAME, ACT_HIDE,
   ACT_SHOW, ACT_COLOR, ACT_DELETE_FOLDER, ACT_NEW_FOLDER, ACT_TOGGLE_HIDDEN, ACT_RESET_NAME, ACT_THEME, ACT_SAVE_THEME,
@@ -957,25 +961,45 @@ static uint32_t mix_color(uint32_t c, uint32_t t, float k);
 /* contenu d'une jaquette boite (w x h) dans la cible de rendu courante :
    un boitier en plastique bleu, la jaquette dedans, bandeau PS5 / PS4 en haut */
 static void draw_box_contents(App *a, int w, int h) {
-  /* le boitier : plastique bleu, rouge pour les homebrews (reconnus d'un coup d'oeil) */
-  int hb = a->kind == KIND_HOMEBREW;
-  uint32_t cb = hb ? 0xc81e24 : 0x1a56d6, cl = hb ? 0xff8a8a : 0x6fa4ff;
-  uint32_t cd = hb ? 0x6e0b0e : 0x0d2f80, cr = hb ? 0xffb0b0 : 0x8fbaff;
-  int m = w * 4 / 100 + 1, mt = h * 3 / 100 + 1;
-  fill_round(0, 0, w, h, 0, cb, 255);
-  fill_round(0, 0, w, 3, 0, cl, 140);
-  fill_round(0, h - 3, w, 3, 0, cd, 160);
-  for (int i = 1; i < 6; i++) {                  /* petits ergots le long des bords */
-    fill_round(w * i / 6 - 6, 2, 12, 2, 0, cr, 110);
-    fill_round(w * i / 6 - 6, h - 4, 12, 2, 0, cr, 90);
+  /* le boitier, au style choisi dans le theme ; rouge pour les homebrews (reconnus d'un coup d'oeil) */
+  int hb = a->kind == KIND_HOMEBREW, cs = S.base->case_style;
+  uint32_t cb, cl, cd, cr;
+  int ca = 255;                                  /* opacite du plastique */
+  switch (hb && cs != CASE_NONE ? -1 : cs) {
+  case -1:          cb = 0xc81e24; cl = 0xff8a8a; cd = 0x6e0b0e; cr = 0xffb0b0; break;
+  case CASE_BLACK:  cb = 0x15171c; cl = 0x4a505c; cd = 0x050608; cr = 0x6a717e; break;
+  case CASE_CRYSTAL: cb = 0xdfe8f2; cl = 0xffffff; cd = 0x8796a8; cr = 0xffffff; ca = 175; break;
+  case CASE_STEEL:  cb = 0x8c959f; cl = 0xe6ebf0; cd = 0x3c434b; cr = 0xc9d0d8; break;
+  case CASE_THEME:  cb = shade(S.base->accent, 0.85f); cl = mix_color(S.base->accent, 0xffffff, 0.45f);
+                    cd = shade(S.base->accent, 0.4f); cr = mix_color(S.base->accent, 0xffffff, 0.6f); break;
+  default:          cb = 0x1a56d6; cl = 0x6fa4ff; cd = 0x0d2f80; cr = 0x8fbaff; break;
   }
-  fill_round(w - m / 2 - 1, h * 45 / 100, 2, h / 10, 0, cr, 120);   /* clip de fermeture */
+  int m = w * 4 / 100 + 1, mt = h * 3 / 100 + 1;
+  if (cs == CASE_NONE) {                         /* jaquette seule */
+    m = mt = 0;
+    if (hb) { m = mt = 4; fill_round(0, 0, w, h, 0, 0xc81e24, 255); }
+  } else if (cs == CASE_STEEL) {                 /* metal brosse : degrade vertical et reflets */
+    for (int y = 0; y < h; y += 2) {
+      float k = (float)y / h, sh = 0.75f + 0.25f * sinf(k * 9.0f);
+      fill_round(0, y, w, 2, 0, mix_color(cd, cl, sh * (1 - 0.5f * k)), 255);
+    }
+  } else {
+    fill_round(0, 0, w, h, 0, cb, ca);
+    fill_round(0, 0, w, 3, 0, cl, 140);
+    fill_round(0, h - 3, w, 3, 0, cd, 160);
+    for (int i = 1; i < 6; i++) {                /* petits ergots le long des bords */
+      fill_round(w * i / 6 - 6, 2, 12, 2, 0, cr, 110);
+      fill_round(w * i / 6 - 6, h - 4, 12, 2, 0, cr, 90);
+    }
+    fill_round(w - m / 2 - 1, h * 45 / 100, 2, h / 10, 0, cr, 120);   /* clip de fermeture */
+  }
   SDL_Rect in = { m, mt, w - 2 * m, h - 2 * mt };
   SDL_RenderSetViewport(S.r, &in);
   int iw = in.w, ih = in.h;
   SDL_Texture *art = box_art(a);
   int kind = a->box_state == 2 ? a->box_custom : 0;   /* 0 fabriquee, 1 perso, 2 officielle */
-  int bh = kind == 1 ? 0 : ih * 10 / 100;
+  int band = kind != 1 && cs != CASE_STEEL;      /* le steelbook n'a pas de bandeau */
+  int bh = band ? ih * 10 / 100 : 0;
   if (art && kind == 2) {                        /* officielle : l'image sous le bandeau */
     int tw, th;
     SDL_QueryTexture(art, NULL, NULL, &tw, &th);
@@ -992,7 +1016,7 @@ static void draw_box_contents(App *a, int w, int h) {
     SDL_Rect bot = { 0, ih * 62 / 100, iw, ih - ih * 62 / 100 };
     if (S.shade_bottom) SDL_RenderCopy(S.r, S.shade_bottom, NULL, &bot);
   }
-  if (kind != 1) {                               /* jaquette perso : telle quelle */
+  if (band) {                                    /* jaquette perso, steelbook : sans bandeau */
     if (a->kind == KIND_PS4) {                   /* PS4 : bleu en degrade, texte blanc */
       for (int x = 0; x < iw; x += 3) {
         float t = (float)x / iw;
@@ -1007,7 +1031,7 @@ static void draw_box_contents(App *a, int w, int h) {
       draw_text(S.f30, lab, 16, (bh - 36) / 2, tc, 0, iw - 32);
       if (!kind) box_title(a, iw, ih);           /* l'officielle a deja son titre */
     }
-  }
+  } else if (cs == CASE_STEEL && !kind && iw >= 260) box_title(a, iw, ih);
   SDL_RenderSetViewport(S.r, NULL);
 }
 
@@ -1341,7 +1365,8 @@ static void draw_topbar(void) {
   /* sections : la bande defile si elles ne tiennent pas toutes */
   int x0 = lx + lw + 90, x1 = S.mode == MODE_THEME ? W - 880 : W - CAR_X - 230;
   int total = 0, cur_x = 0, cur_w = 0;
-  for (int s = 0; s < SEC_COUNT; s++) {
+  for (int k = 0; k < SEC_COUNT; k++) {
+    int s = SEC_ORDER[k];
     if (!S.sec_has[s]) continue;
     int w = text_w(S.f26, SEC_NAMES[s]);
     if (s == S.sec) { cur_x = total; cur_w = w; }
@@ -1358,7 +1383,8 @@ static void draw_topbar(void) {
   SDL_Rect clip = { x0 - 4, 30, x1 - x0 + 8, 90 };
   SDL_RenderSetClipRect(S.r, &clip);
   int x = x0 - (int)off, tx = 0, tw = 0;
-  for (int s = 0; s < SEC_COUNT; s++) {
+  for (int k = 0; k < SEC_COUNT; k++) {
+    int s = SEC_ORDER[k];
     if (!S.sec_has[s]) continue;
     int w = text_w(S.f26, SEC_NAMES[s]);
     int on = s == S.sec;
@@ -1713,10 +1739,57 @@ static SDL_Texture *folder_tex(Node *f) {
    jaquette centrale : calcules une fois puis simplement recopies. Sans carte
    graphique (PS5), deformer des images a chaque image coute trop cher. */
 #define SIDE_W (FLOW_SIDE * 55 / 100)
+#define SPINE (BOXES ? FLOW_SIDE * 10 / 100 : 0)    /* epaisseur visible du boitier (tranche) */
 #define SIDE_H (TH(FLOW_SIDE) + 6 + TH(FLOW_SIDE) * 35 / 100 + 1)
 #define REFL_H (6 + TH(FLOW) * 35 / 100 + 1)
 enum { WARP_LEFT, WARP_RIGHT, WARP_REFL };
 static struct { SDL_Texture *src, *t; uint32_t ver; int kind; Uint32 used; } WCACHE[40];
+
+/* couleurs de la tranche d'un boitier (0 : pas de tranche) */
+static int case_spine(App *a, uint32_t *body, uint32_t *band) {
+  int cs = S.base->case_style;
+  if (!BOXES || !a || cs == CASE_NONE) return 0;
+  if (a->kind == KIND_HOMEBREW) *body = 0xc81e24;
+  else switch (cs) {
+  case CASE_BLACK: *body = 0x15171c; break;
+  case CASE_CRYSTAL: *body = 0xbfcad8; break;
+  case CASE_STEEL: *body = 0x8c959f; break;
+  case CASE_THEME: *body = shade(S.base->accent, 0.85f); break;
+  default: *body = 0x1a56d6; break;
+  }
+  if (cs == CASE_STEEL) *band = *body;
+  else *band = a->kind == KIND_PS5 ? 0xf4f4f6 : a->kind == KIND_PS4 ? 0x0a3a9c
+             : a->kind == KIND_HOMEBREW ? 0xa3151a : shade(S.base->accent, 0.8f);
+  return 1;
+}
+
+/* une face plate en perspective : quatre coins, une couleur par bord (ombre) */
+static void quad4(float x0, float y0t, float y0b, float x1, float y1t, float y1b, uint32_t c0, uint32_t c1, int a0, int a1) {
+  SDL_Vertex v[4];
+  float xs[4] = { x0, x1, x1, x0 }, ys[4] = { y0t, y1t, y1b, y0b };
+  uint32_t cs[4] = { c0, c1, c1, c0 };
+  int as[4] = { a0, a1, a1, a0 };
+  for (int i = 0; i < 4; i++) {
+    v[i].position.x = xs[i]; v[i].position.y = ys[i];
+    v[i].color.r = (cs[i] >> 16) & 255; v[i].color.g = (cs[i] >> 8) & 255; v[i].color.b = cs[i] & 255; v[i].color.a = (Uint8)as[i];
+    v[i].tex_coord.x = v[i].tex_coord.y = 0;
+  }
+  static const int idx[6] = { 0, 1, 2, 0, 2, 3 };
+  SDL_RenderGeometry(S.r, NULL, v, 4, idx, 6);
+}
+
+/* tranche du boitier collee au bord proche (xn), qui fuit vers xb ; avec son reflet */
+static void draw_spine(float xn, float xb, float h, uint32_t body, uint32_t band) {
+  float t0 = h * 0.03f, b0 = h * 0.97f;           /* le bord du fond parait plus court */
+  quad4(xn, 0, h, xb, t0, b0, shade(body, 0.78f), shade(body, 0.45f), 255, 255);
+  float bh = h * 0.09f;                            /* haut de la tranche : couleur du bandeau */
+  quad4(xn, 0, bh, xb, t0, t0 + bh * 0.94f, shade(band, 0.85f), shade(band, 0.55f), 255, 255);
+  SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_BLEND);
+  quad4(xn, 0, h, xn + (xb > xn ? 2.0f : -2.0f), 0, h, 0xffffff, 0xffffff, 90, 0);   /* arete eclairee */
+  SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_NONE);
+  float ry = h + 6, rh = h * 0.35f;                /* reflet au sol */
+  quad4(xn, ry, ry + rh, xb, ry + t0, ry + rh * 0.95f, shade(body, 0.6f), shade(body, 0.35f), 70, 55);
+}
 
 static void warp_forget(SDL_Texture *src) {
   for (int i = 0; i < 40; i++)
@@ -1726,14 +1799,17 @@ static void warp_forget(SDL_Texture *src) {
     }
 }
 
-static SDL_Texture *warp_tex(SDL_Texture *src, uint32_t ver, int kind) {
+static SDL_Texture *warp_tex(SDL_Texture *src, uint32_t ver, int kind, App *app) {
+  uint32_t body = 0, band = 0;
+  int spine = kind != WARP_REFL && case_spine(app, &body, &band);
   ver = ver * 31 + (uint32_t)S.th_ver;
+  ver = (ver * 31 + body) * 31 + band;
   int slot = 0;
   for (int i = 0; i < 40; i++) {
     if (WCACHE[i].t && WCACHE[i].src == src && WCACHE[i].ver == ver && WCACHE[i].kind == kind) { WCACHE[i].used = S.frame; return WCACHE[i].t; }
     if (!WCACHE[i].t || (WCACHE[slot].t && WCACHE[i].used < WCACHE[slot].used)) slot = i;
   }
-  int w = kind == WARP_REFL ? FLOW : SIDE_W, h = kind == WARP_REFL ? REFL_H : SIDE_H;
+  int w = kind == WARP_REFL ? FLOW : SIDE_W + SPINE, h = kind == WARP_REFL ? REFL_H : SIDE_H;
   if (WCACHE[slot].t) SDL_DestroyTexture(WCACHE[slot].t);
   WCACHE[slot].t = SDL_CreateTexture(S.r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, w, h);
   if (!WCACHE[slot].t) return NULL;
@@ -1746,8 +1822,14 @@ static SDL_Texture *warp_tex(SDL_Texture *src, uint32_t ver, int kind) {
   SDL_SetTextureBlendMode(src, SDL_BLENDMODE_NONE);
   if (kind == WARP_REFL) draw_persp(src, 0, FLOW, -6.0f - TH(FLOW) / 2.0f, TH(FLOW), TH(FLOW), 255, 255, 2);
   else {
-    float near = TH(FLOW_SIDE), far = near * 0.8f;
-    draw_persp(src, 0, SIDE_W, near / 2.0f, kind == WARP_LEFT ? far : near, kind == WARP_LEFT ? near : far, 255, 255, 1);
+    float near = TH(FLOW_SIDE), far = near * 0.8f, fx = kind == WARP_LEFT ? 0 : SPINE;   /* face avant */
+    draw_persp(src, fx, fx + SIDE_W, near / 2.0f, kind == WARP_LEFT ? far : near, kind == WARP_LEFT ? near : far, 255, 255, 1);
+    if (spine) {                                 /* la tranche, cote centre de l'ecran */
+      SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_NONE);
+      if (kind == WARP_LEFT) draw_spine(SIDE_W, SIDE_W + SPINE, near, body, band);
+      else draw_spine(SPINE, 0, near, body, band);
+      SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_BLEND);
+    }
   }
   SDL_SetTextureBlendMode(src, SDL_BLENDMODE_BLEND);
   SDL_SetRenderTarget(S.r, prev_rt);   /* cible d'avant (dessin imbrique) */
@@ -1815,17 +1897,18 @@ static void draw_flow(void) {
     float cy = FLOW_CY + (moving ? 8 * sinf(S.frame * 0.25f) : 0);
     SDL_Texture *cached = NULL;
     if (tex && a >= 0.999f) {                     /* sur le cote : texture deja deformee */
-      cached = warp_tex(tex, ver, rel < 0 ? WARP_LEFT : WARP_RIGHT);
+      cached = warp_tex(tex, ver, rel < 0 ? WARP_LEFT : WARP_RIGHT, e->is_folder ? NULL : e->app);
       if (cached) {
         SDL_SetTextureColorMod(cached, bright, bright, bright);
         SDL_SetTextureAlphaMod(cached, alpha);
-        SDL_Rect d = { (int)(cx - SIDE_W / 2.0f), (int)(cy - TH(FLOW_SIDE) / 2.0f), SIDE_W, SIDE_H };
+        int tw; SDL_QueryTexture(cached, NULL, NULL, &tw, NULL);
+        SDL_Rect d = { (int)(cx - SIDE_W / 2.0f) - (rel < 0 ? 0 : tw - SIDE_W), (int)(cy - TH(FLOW_SIDE) / 2.0f), tw, SIDE_H };
         SDL_RenderCopy(S.r, cached, NULL, &d);
       }
     } else if (tex && a < 0.001f) {               /* au centre, immobile : image droite + reflet en cache */
       SDL_Rect d = { (int)(cx - FLOW / 2.0f), (int)(cy - TH(FLOW) / 2.0f), FLOW, TH(FLOW) };
       SDL_RenderCopy(S.r, tex, NULL, &d);
-      cached = warp_tex(tex, ver, WARP_REFL);
+      cached = warp_tex(tex, ver, WARP_REFL, NULL);
       if (cached) { SDL_Rect r = { d.x, d.y + TH(FLOW), FLOW, REFL_H }; SDL_RenderCopy(S.r, cached, NULL, &r); }
     }
     if (cached) {}
@@ -1951,7 +2034,7 @@ static void draw_footer(void) {
   switch (S.mode) {
   case MODE_MOVE: hint = S.menu.view == VIEW_GRID ? "◀ ▶  Déplacer      ✕  Poser" : "◀ ▶  Déplacer      ✕  Poser"; break;
   case MODE_CONTEXT: case MODE_PICKFOLDER: case MODE_COLOR: hint = "✕  Choisir      ○  Annuler"; break;
-  case MODE_THEME: hint = ""; break;
+  case MODE_THEME: case MODE_COMMU: hint = ""; break;
   case MODE_KEYBOARD: hint = "✕  Touche      □  Effacer      △  Espace      OPTIONS  Valider      ○  Annuler"; break;
   default:
     if (S.sec == SEC_SYS) { hint = "▲▼  Choisir      ◀ ▶  Modifier      ✕  Valider      L1 R1  Sections"; break; }
@@ -1990,6 +2073,9 @@ static void check_tile_shape(void);
 static void open_theme_editor(void);
 static void music_fade(void);
 static void theme_editor_input(int in);
+static void commu_input(int in);
+static void draw_community(void);
+static void cm_poll(void);
 static void theme_saved_as(const char *name);
 
 static void draw_list_panel(const char *title, int n, const char *(*label)(int), int sel, uint32_t (*swatch)(int)) {
@@ -2290,7 +2376,13 @@ static void draw(void) {
   refresh_settings();
   check_tile_shape();
   update_sections();
-  if (!S.sec_has[S.sec]) for (S.sec = 0; S.sec < SEC_COUNT - 1 && !S.sec_has[S.sec]; S.sec++) {}
+  static int opened;                             /* a l'ouverture : premiere section dans l'ordre */
+  if (!opened || !S.sec_has[S.sec]) {
+    opened = 1;
+    int k = 0;
+    while (k < SEC_COUNT - 1 && !S.sec_has[SEC_ORDER[k]]) k++;
+    S.sec = SEC_ORDER[k];
+  }
   build_entries();
   clamp_sel();
   Entry *e = selected();
@@ -2320,7 +2412,8 @@ static void draw(void) {
   if (S.mode == MODE_CONTEXT) draw_list_panel(S.ctx_title, S.nchoices, choice_label, S.csel, NULL);
   if (S.mode == MODE_PICKFOLDER) draw_list_panel("Ranger dans…", S.nfolders, folder_label, S.fsel, NULL);
   if (S.mode == MODE_COLOR) draw_list_panel("Couleur du dossier", NPALETTE, color_label, S.color_sel, color_swatch);
-  if (S.mode == MODE_THEME) draw_theme_editor();
+  if (S.mode == MODE_THEME || S.mode == MODE_COMMU) draw_theme_editor();
+  if (S.mode == MODE_COMMU) draw_community();
   if (S.mode == MODE_KEYBOARD) draw_keyboard();
   draw_launching();
   draw_letter();
@@ -2756,8 +2849,11 @@ static void theme_changed(void) { S.th_ver++; }
 
 /* les tuiles deja calculees sont a refaire si leur forme change */
 static void check_tile_shape(void) {
-  if (S.tiles_corners == S.th->corners) return;
+  static uint32_t case_key = (uint32_t)-1;       /* boitier : style, et couleur pour « Theme » */
+  uint32_t ck = (uint32_t)S.base->case_style << 24 | (S.base->case_style == CASE_THEME ? (S.base->accent & 0xffffff) : 0);
+  if (S.tiles_corners == S.th->corners && ck == case_key) return;
   S.tiles_corners = S.th->corners;
+  case_key = ck;
   for (int i = 0; i < S.menu.napps; i++) drop_tiles(&S.menu.apps[i]);
 }
 
@@ -2836,8 +2932,8 @@ static int row_visible(int r) {
 }
 
 static const char *ROW_LABEL[R_COUNT] = {
-  "Thème de base", "Couleurs", "Couleur principale", "Couleur secondaire", "Fond : haut", "Fond : bas", "Arrière-plan",
-  "Image", "Illustration du jeu", "Effet animé", "Halos lumineux", "Particules", "Forme", "Sens", "Coins des jaquettes",
+  "Thème de base", "Thèmes de la communauté", "Couleurs", "Couleur principale", "Couleur secondaire", "Fond : haut", "Fond : bas", "Arrière-plan",
+  "Image", "Illustration du jeu", "Effet animé", "Halos lumineux", "Particules", "Forme", "Sens", "Boîtier", "Coins des jaquettes",
   "Horloge", "Sons d'interface", "Musique", "Volume", "Enregistrer comme mon thème…", "Supprimer ce thème",
 };
 
@@ -2890,6 +2986,7 @@ static const char *row_value(int r, char *buf, long *sw) {
     if (!strcmp(t->music, "*")) return "Toutes, à la suite";
     return t->music;
   case R_VOLUME: sprintf(buf, "%d %%", t->volume); return buf;
+  case R_COMMU: return "Parcourir ›";
   }
   return "";
 }
@@ -2938,6 +3035,7 @@ static void theme_row_change(int d) {
   case R_PSTYLE: t->pstyle = cyc(t->pstyle, d, PSTYLE_COUNT); break;
   case R_FALL: t->fall = !t->fall; break;
   case R_CORNERS: t->corners = cyc(t->corners, d, CORNER_COUNT); break;
+  case R_CASE: t->case_style = cyc(t->case_style, d, CASE_COUNT); break;
   case R_CLOCK: t->clock = cyc(t->clock, d, CLOCK_COUNT); break;
   case R_MUSIC: {
     if (!S.nmusics) { t->music[0] = 0; toast("Copie tes musiques (ogg, mp3, flac…) dans /data/launcher5/musique"); return; }
@@ -2978,6 +3076,289 @@ static void theme_saved_as(const char *name) {
   toast(msg);
 }
 
+/* ------------------------------------------------------------------ */
+/* Themes de la communaute : catalogue public sur GitHub. Chacun propose */
+/* son theme (formulaire du depot), on le telecharge ici d'une touche.   */
+/* ------------------------------------------------------------------ */
+#define THEMES_URL "https://raw.githubusercontent.com/cedsaill3/Launcher5-themes/main/"
+static const char *themes_url(void) {            /* L5_THEMES_URL : catalogue local pour les essais */
+  const char *e = getenv("L5_THEMES_URL");
+  return e && *e ? e : THEMES_URL;
+}
+
+typedef struct {
+  char id[48], name[48], author[40], file[96], wall[96], prev[96];
+  uint32_t c1, c2, top, bot;
+  SDL_Texture *tex;
+  int prev_state;                                /* 0 a demander, 1 en cours, 2 pret, 3 impossible */
+} CTheme;
+
+enum { CJ_INDEX, CJ_PREVIEW, CJ_INSTALL };
+static struct {
+  SDL_mutex *mx;
+  volatile int busy, done;
+  int job, item, state;                          /* state : 0 rien, 1 chargement, 2 pret, 3 erreur */
+  char url[2][300];
+  unsigned char *data[2]; size_t len[2]; long code[2];
+  CTheme *list; int n, sel, installing;
+} CM;
+
+static int cm_thread(void *u) {
+  (void)u;
+  static const size_t MAX[3][2] = { { 1 << 20, 0 }, { 2 << 20, 0 }, { 64 << 10, 12 << 20 } };
+  for (int i = 0; i < 2; i++) {
+    CM.data[i] = NULL; CM.len[i] = 0; CM.code[i] = 0;
+    if (CM.url[i][0]) CM.code[i] = plat_https_get(CM.url[i], &CM.data[i], &CM.len[i], MAX[CM.job][i]);
+  }
+  SDL_LockMutex(CM.mx);
+  CM.done = 1;
+  SDL_UnlockMutex(CM.mx);
+  return 0;
+}
+
+static int cm_start(int job, int item, const char *path1, const char *path2) {
+  if (!CM.mx && !(CM.mx = SDL_CreateMutex())) return 0;
+  if (CM.busy) return 0;
+  CM.job = job; CM.item = item;
+  snprintf(CM.url[0], sizeof CM.url[0], "%s%s", themes_url(), path1);
+  if (path2 && *path2) snprintf(CM.url[1], sizeof CM.url[1], "%s%s", themes_url(), path2); else CM.url[1][0] = 0;
+  CM.busy = 1; CM.done = 0;
+  SDL_Thread *th = SDL_CreateThread(cm_thread, "themes", NULL);
+  if (!th) { CM.busy = 0; return 0; }
+  SDL_DetachThread(th);
+  return 1;
+}
+
+static void cm_free_list(void) {
+  for (int i = 0; i < CM.n; i++) if (CM.list[i].tex) SDL_DestroyTexture(CM.list[i].tex);
+  free(CM.list); CM.list = NULL; CM.n = 0;
+}
+
+/* chemin du catalogue sans surprise : dossier attendu, lettres simples, pas de ".." */
+static int cm_path_ok(const char *p, const char *dir) {
+  if (!p || strncmp(p, dir, strlen(dir)) || strstr(p, "..")) return 0;
+  for (const char *c = p; *c; c++) if (!isalnum((unsigned char)*c) && !strchr("-_./", *c)) return 0;
+  return 1;
+}
+
+static uint32_t cm_color(json_t *v, uint32_t def) {
+  const char *s = json_string_value(v);
+  return s && s[0] == '#' && strlen(s) == 7 ? (uint32_t)strtoul(s + 1, NULL, 16) : def;
+}
+
+static void cm_parse_index(const unsigned char *d, size_t n) {
+  cm_free_list();
+  json_t *j = json_loadb((const char *)d, n, 0, NULL), *e;
+  json_t *arr = json_object_get(j, "themes");
+  size_t k, cnt = json_array_size(arr);
+  if (cnt > 300) cnt = 300;
+  CM.list = calloc(cnt ? cnt : 1, sizeof *CM.list);
+  json_array_foreach(arr, k, e) {
+    if (k >= cnt) break;
+    const char *id = json_string_value(json_object_get(e, "id"));
+    const char *nm = json_string_value(json_object_get(e, "nom"));
+    const char *th = json_string_value(json_object_get(e, "theme"));
+    const char *wl = json_string_value(json_object_get(e, "fond"));
+    const char *pv = json_string_value(json_object_get(e, "apercu"));
+    const char *au = json_string_value(json_object_get(e, "auteur"));
+    if (!id || !nm || !cm_path_ok(th, "themes/") || (wl && !cm_path_ok(wl, "fonds/")) || (pv && !cm_path_ok(pv, "apercus/"))) continue;
+    int idok = strlen(id) < sizeof CM.list[0].id;
+    for (const char *c = id; *c; c++) if (!islower((unsigned char)*c) && !isdigit((unsigned char)*c) && *c != '-') idok = 0;
+    if (!idok) continue;
+    CTheme *t = &CM.list[CM.n++];
+    snprintf(t->id, sizeof t->id, "%s", id);
+    snprintf(t->name, sizeof t->name, "%s", nm);
+    snprintf(t->author, sizeof t->author, "%s", au ? au : "");
+    snprintf(t->file, sizeof t->file, "%s", th);
+    snprintf(t->wall, sizeof t->wall, "%s", wl ? wl : "");
+    snprintf(t->prev, sizeof t->prev, "%s", pv ? pv : "");
+    t->c1 = cm_color(json_object_get(e, "couleur"), 0xff2bd6);
+    t->c2 = cm_color(json_object_get(e, "couleur2"), 0x00e5ff);
+    t->top = cm_color(json_object_get(e, "fond_haut"), 0x0d0221);
+    t->bot = cm_color(json_object_get(e, "fond_bas"), 0x2a0845);
+    t->prev_state = t->prev[0] ? 0 : 3;
+  }
+  json_decref(j);
+  CM.state = 2;
+  plat_log("themes de la communaute : %d", CM.n);
+}
+
+static int write_bytes(const char *path, const unsigned char *d, size_t n) {
+  FILE *f = fopen(path, "wb");
+  if (!f) return -1;
+  size_t w = fwrite(d, 1, n, f);
+  return fclose(f) || w != n ? -1 : 0;
+}
+
+/* theme recu : verifie, son fond range dans fonds/, puis ajoute aux themes et montre dans le Studio */
+static void cm_install_done(CTheme *ct) {
+  char dir[PATH_LEN], tmp[PATH_LEN + 16], path[PATH_LEN + THEME_FILE_LEN], file[THEME_FILE_LEN];
+  data_path(dir, sizeof dir, "themes");
+  mkdir(dir, 0755);
+  snprintf(tmp, sizeof tmp, "%s/.recu.json", dir);
+  Theme t;
+  if (CM.code[0] != 200 || write_bytes(tmp, CM.data[0], CM.len[0]) || theme_load(tmp, &t)) {
+    remove(tmp);
+    toast(CM.code[0] ? "⚠ Thème illisible" : "⚠ Pas d'accès à Internet");
+    return;
+  }
+  remove(tmp);
+  snprintf(t.name, sizeof t.name, "%s", ct->name);
+  snprintf(t.music, sizeof t.music, "%s", S.edit.music);   /* ta musique reste la tienne */
+  t.volume = S.edit.volume;
+  t.wallpaper[0] = 0;
+  if (ct->wall[0]) {
+    SDL_Surface *img = CM.code[1] == 200 ? IMG_Load_RW(SDL_RWFromConstMem(CM.data[1], (int)CM.len[1]), 1) : NULL;
+    char wdir[PATH_LEN], wpath[PATH_LEN + THEME_FILE_LEN];
+    data_path(wdir, sizeof wdir, "fonds");
+    mkdir(wdir, 0755);
+    snprintf(t.wallpaper, sizeof t.wallpaper, "communaute-%s.jpg", ct->id);
+    snprintf(wpath, sizeof wpath, "%s/%s", wdir, t.wallpaper);
+    if (!img || write_bytes(wpath, CM.data[1], CM.len[1])) {
+      if (img) SDL_FreeSurface(img);
+      toast("⚠ Fond d'écran du thème illisible");
+      return;
+    }
+    SDL_FreeSurface(img);
+    t.bg_mode = BG_IMAGE;
+  } else if (t.bg_mode == BG_IMAGE) t.bg_mode = BG_GRADIENT;
+  theme_file_name(t.name, file, sizeof file);
+  snprintf(path, sizeof path, "%s/%s", dir, file);
+  if (theme_save(path, &t)) { toast("⚠ Impossible d'enregistrer le thème"); return; }
+  scan_media_files();                            /* le nouveau fond apparait dans la liste */
+  load_presets();
+  S.edit = t;
+  S.preset = find_preset(t.name);
+  S.ed_dirty = 0;
+  S.ed_row = R_PRESET;
+  theme_changed();
+  S.mode = MODE_THEME;
+  char msg[160];
+  snprintf(msg, sizeof msg, tr("Thème « %s » installé : ✕ pour l'appliquer"), t.name);
+  toast(msg);
+  plat_log("theme de la communaute installe : %s", ct->id);
+}
+
+static void cm_next_preview(void) {               /* apercu du theme choisi, puis de ses voisins */
+  for (int d = 0; d < 4; d++)
+    for (int s = -1; s <= 1; s += 2) {
+      int i = CM.sel + d * s;
+      if (i < 0 || i >= CM.n || CM.list[i].prev_state) continue;
+      if (cm_start(CJ_PREVIEW, i, CM.list[i].prev, NULL)) CM.list[i].prev_state = 1;
+      return;
+    }
+}
+
+static void cm_poll(void) {
+  if (!CM.mx || !CM.busy) { if (S.mode == MODE_COMMU && CM.state == 2) cm_next_preview(); return; }
+  SDL_LockMutex(CM.mx);
+  int done = CM.done;
+  SDL_UnlockMutex(CM.mx);
+  if (!done) return;
+  CM.busy = 0;
+  switch (CM.job) {
+  case CJ_INDEX:
+    if (CM.code[0] == 200) cm_parse_index(CM.data[0], CM.len[0]);
+    else { CM.state = 3; plat_log("themes de la communaute : catalogue indisponible (%ld)", CM.code[0]); }
+    break;
+  case CJ_PREVIEW:
+    if (CM.item < CM.n) {
+      CTheme *t = &CM.list[CM.item];
+      SDL_Surface *img = CM.code[0] == 200 ? IMG_Load_RW(SDL_RWFromConstMem(CM.data[0], (int)CM.len[0]), 1) : NULL;
+      if (img) { t->tex = SDL_CreateTextureFromSurface(S.r, img); SDL_FreeSurface(img); }
+      t->prev_state = t->tex ? 2 : 3;
+    }
+    break;
+  case CJ_INSTALL:
+    CM.installing = 0;
+    if (CM.item < CM.n && S.mode == MODE_COMMU) cm_install_done(&CM.list[CM.item]);
+    break;
+  }
+  for (int i = 0; i < 2; i++) { free(CM.data[i]); CM.data[i] = NULL; }
+}
+
+static void open_community(void) {
+  S.mode = MODE_COMMU;
+  if (CM.state == 2 || CM.state == 1) return;    /* deja charge (ou en cours) */
+  CM.sel = 0;
+  CM.state = cm_start(CJ_INDEX, 0, "index.json", NULL) ? 1 : 3;
+}
+
+static void commu_input(int in) {
+  switch (in) {
+  case IN_UP: case IN_DOWN:
+    if (CM.n) CM.sel = (CM.sel + (in == IN_UP ? -1 : 1) + CM.n) % CM.n;
+    sfx(SFX_MOVE);
+    return;
+  case IN_BACK: S.mode = MODE_THEME; return;
+  case IN_OK:
+    if (CM.state == 3) { CM.state = 0; open_community(); return; }   /* reessayer */
+    if (CM.state != 2 || !CM.n || CM.installing) return;
+    if (CM.busy) { toast("Un instant…"); return; }
+    if (cm_start(CJ_INSTALL, CM.sel, CM.list[CM.sel].file, CM.list[CM.sel].wall)) {
+      CM.installing = 1;
+      sfx(SFX_OK);
+    }
+    return;
+  }
+}
+
+static void draw_community(void) {
+  int pw = 1400, ph = 800, px = (W - pw) / 2, py = (H - ph) / 2 + 10;
+  set_color(0x000000, 150);
+  SDL_Rect full = { 0, 0, W, H };
+  SDL_RenderFillRect(S.r, &full);
+  glass_panel(px, py, pw, ph);
+  draw_text(S.f36, "Thèmes de la communauté", px + 44, py + 30, 0xffffff, 0, 700);
+  draw_text_a(S.f22, "Propose le tien : github.com/cedsaill3/Launcher5-themes", px + pw - 44, py + 42, 0x9aa4b5, 2, 640, 220);
+  int lx = px + 30, ly = py + 104, lw = 560, rowh = 74, vis = 8;
+  if (CM.state != 2) {
+    const char *m = CM.state == 1 ? "Chargement du catalogue…" : "Catalogue indisponible (Internet ?)  ·  ✕ réessayer";
+    draw_text(S.f30, m, px + pw / 2, py + ph / 2 - 20, 0xffffff, 1, pw - 80);
+  } else if (!CM.n) {
+    draw_text(S.f30, "Aucun thème pour l'instant", px + pw / 2, py + ph / 2 - 20, 0xffffff, 1, pw - 80);
+  } else {
+    int first = CM.sel >= vis ? CM.sel - vis + 1 : 0;
+    for (int i = first; i < CM.n && i - first < vis; i++) {
+      CTheme *t = &CM.list[i];
+      int y = ly + (i - first) * rowh, on = i == CM.sel;
+      if (on) fill_round(lx, y - 6, lw, rowh - 8, 14, S.th->accent, 255);
+      fill_round(lx + 18, y + 6, 22, 22, 11, t->c1, 255);
+      fill_round(lx + 18, y + 34, 22, 14, 7, t->c2, 255);
+      draw_text(S.f30, t->name, lx + 60, y, on ? 0x0a0a12 : 0xffffff, 0, lw - 80);
+      char by[64];
+      snprintf(by, sizeof by, tr("par %s"), t->author[0] ? t->author : "?");
+      draw_text_a(S.f22, by, lx + 60, y + 36, on ? 0x0a0a12 : 0x9aa4b5, 0, lw - 80, 220);
+    }
+    if (CM.n > vis) {                            /* position dans la liste */
+      int bh = vis * rowh - 8, th = bh * vis / CM.n, ty = ly - 6 + (bh - th) * CM.sel / (CM.n - 1);
+      fill_round(lx + lw + 8, ly - 6, 4, bh, 2, 0xffffff, 30);
+      fill_round(lx + lw + 8, ty, 4, th, 2, S.th->accent, 220);
+    }
+    /* apercu du theme choisi */
+    CTheme *t = &CM.list[CM.sel];
+    int vx = px + 640, vy = py + 104, vw = 720, vh = 405;
+    if (t->tex) { SDL_Rect d = { vx, vy, vw, vh }; SDL_RenderCopy(S.r, t->tex, NULL, &d); }
+    else {
+      for (int i = 0; i < vh; i += 3) {
+        set_color(mix_color(t->top, t->bot, (float)i / vh), 255);
+        SDL_Rect rr = { vx, vy + i, vw, 3 };
+        SDL_RenderFillRect(S.r, &rr);
+      }
+      if (t->prev_state == 1) draw_text_a(S.f22, "Chargement de l'aperçu…", vx + vw / 2, vy + vh / 2 - 12, 0xffffff, 1, 0, 180);
+    }
+    outline_round(vx - 2, vy - 2, vw + 4, vh + 4, 10, 2, 0xffffff, 120);
+    draw_text(S.f48, t->name, vx, vy + vh + 26, 0xffffff, 0, vw);
+    char by[64];
+    snprintf(by, sizeof by, tr("par %s"), t->author[0] ? t->author : "?");
+    draw_text(S.f26, by, vx, vy + vh + 96, 0x9aa4b5, 0, vw);
+    fill_round(vx, vy + vh + 146, 120, 12, 6, t->c1, 255);
+    fill_round(vx + 132, vy + vh + 146, 60, 12, 6, t->c2, 255);
+  }
+  const char *hint = CM.installing ? "Téléchargement du thème…" : "▲▼  Choisir      ✕  Installer      ○  Retour";
+  draw_text(S.f26, hint, px + 44, py + ph - 60, CM.installing ? S.th->accent : 0xc8cfdb, 0, pw - 88);
+}
+
 static void theme_editor_input(int in) {
   switch (in) {
   case IN_UP: case IN_DOWN: {
@@ -2995,6 +3376,7 @@ static void theme_editor_input(int in) {
     S.mode = MODE_BROWSE;
     return;
   case IN_OK: case IN_START:
+    if (S.ed_row == R_COMMU && in == IN_OK) { open_community(); return; }
     if (S.ed_row == R_SAVE && in == IN_OK) {
       char base[64];
       snprintf(base, sizeof base, "%s", S.preset >= S.nbuiltin && !S.ed_dirty ? S.edit.name : tr("Mon thème"));
@@ -3039,6 +3421,7 @@ static const char *row_group(int r) {
   case R_AUTO: return "COULEURS";
   case R_BG: return "ARRIÈRE-PLAN";
   case R_GLOW: return "EFFETS";
+  case R_CASE: return "BOÎTIERS DES JEUX";
   case R_CLOCK: return "INTERFACE ET SON";
   }
   return NULL;
@@ -3052,6 +3435,7 @@ static int row_chips(int r, const char *const **opts, int *cur) {
   static const char *const FALL[] = { "Montent", "Tombent" };
   static const char *const COR[] = { "Droits", "Arrondis", "Ronds" };
   static const char *const CLK[] = { "24 h", "12 h", "Masquée" };
+  static const char *const CASES[] = { "Bleu", "Noir", "Cristal", "Steel", "Thème", "Aucun" };
   static const char *const AUTO[] = { "Du thème", "Du jeu" };
   static const char *const FXN[] = { "Aucun", "Grille", "Hyperespace", "Pluie" };
   const Theme *t = &S.edit;
@@ -3063,6 +3447,7 @@ static int row_chips(int r, const char *const **opts, int *cur) {
   case R_PSTYLE: *opts = PST; *cur = t->pstyle; return PSTYLE_COUNT;
   case R_FALL: *opts = FALL; *cur = t->fall; return 2;
   case R_CORNERS: *opts = COR; *cur = t->corners; return CORNER_COUNT;
+  case R_CASE: *opts = CASES; *cur = t->case_style; return CASE_COUNT;
   case R_CLOCK: *opts = CLK; *cur = t->clock; return CLOCK_COUNT;
   }
   return 0;
@@ -3250,7 +3635,10 @@ static void draw_theme_editor(void) {
 
 /* --- musique d'ambiance ------------------------------------------------ */
 #ifdef HAVE_MIXER
-static struct { int state; Mix_Music *m; char key[THEME_FILE_LEN]; int pos, vol, paused; volatile int finished; } MU = { .vol = -1 };
+static struct { int state; Mix_Music *m; Mix_Chunk *loop; char key[THEME_FILE_LEN]; int pos, vol, paused, gen; volatile int finished; } MU = { .vol = -1 };
+#define MUSIC_CH 0                               /* canal reserve a la musique en boucle */
+/* morceau en boucle decode en tache de fond (pas d'attente au demarrage) */
+static struct { SDL_mutex *mx; int busy, done, gen; char path[PATH_LEN]; Mix_Chunk *c; } LD;
 static void music_finished(void) { MU.finished = 1; }
 
 static int music_ready(void) {
@@ -3262,6 +3650,8 @@ static int music_ready(void) {
   }
   Mix_Init(MIX_INIT_OGG | MIX_INIT_MP3 | MIX_INIT_FLAC | MIX_INIT_MOD);
   Mix_HookMusicFinished(music_finished);
+  Mix_AllocateChannels(8);
+  Mix_ReserveChannels(1);                        /* canal MUSIC_CH : jamais pris par les sons d'interface */
   MU.state = 1;
   plat_log("musique prete");
   return 1;
@@ -3269,13 +3659,77 @@ static int music_ready(void) {
 
 static void music_stop(void) {
   if (MU.m) { Mix_HaltMusic(); Mix_FreeMusic(MU.m); MU.m = NULL; }
+  if (MU.loop) { Mix_HaltChannel(MUSIC_CH); Mix_FreeChunk(MU.loop); MU.loop = NULL; }
+  MU.gen++;                                      /* un chargement en cours ne sera pas joue */
   MU.finished = 0;
+}
+
+/* Boucle sans coupure : le morceau est decode une fois en memoire, ses silences de debut
+   et de fin sont retires, puis il est rejoue a l'echantillon pres. */
+static void loop_trim(Mix_Chunk *c) {
+  int freq, ch; Uint16 fmt;
+  if (!Mix_QuerySpec(&freq, &fmt, &ch) || fmt != AUDIO_S16SYS || ch < 1) return;
+  Sint16 *smp = (Sint16 *)c->abuf;
+  long frames = (long)c->alen / (2 * ch), a = 0, b = frames - 1;
+  #define LOUD(f) ({ int _l = 0; for (int _c = 0; _c < ch; _c++) if (abs(smp[(f) * ch + _c]) > 120) _l = 1; _l; })
+  while (a < b && !LOUD(a)) a++;
+  while (b > a && !LOUD(b)) b--;
+  #undef LOUD
+  if (b - a < freq / 4) return;                  /* presque vide : on ne touche a rien */
+  long n = b - a + 1;
+  memmove(smp, smp + a * ch, (size_t)n * ch * 2);
+  c->alen = (Uint32)(n * ch * 2);
+  long fade = freq / 200;                        /* 5 ms adoucis aux raccords : pas de clic */
+  for (long i = 0; i < fade && i < n; i++)
+    for (int k = 0; k < ch; k++) {
+      smp[i * ch + k] = (Sint16)(smp[i * ch + k] * i / fade);
+      smp[(n - 1 - i) * ch + k] = (Sint16)(smp[(n - 1 - i) * ch + k] * i / fade);
+    }
+}
+
+static int loop_loader(void *u) {
+  (void)u;
+  Mix_Chunk *c = Mix_LoadWAV(LD.path);
+  if (c) loop_trim(c);
+  SDL_LockMutex(LD.mx);
+  LD.c = c; LD.done = 1;
+  SDL_UnlockMutex(LD.mx);
+  return 0;
+}
+
+/* morceau pret : on le joue s'il est toujours voulu */
+static void loop_poll(void) {
+  if (!LD.mx || !LD.busy) return;
+  SDL_LockMutex(LD.mx);
+  int done = LD.done;
+  SDL_UnlockMutex(LD.mx);
+  if (!done) return;
+  LD.busy = 0;
+  if (LD.gen != MU.gen || !LD.c) {
+    if (LD.c) Mix_FreeChunk(LD.c);
+    else if (LD.gen == MU.gen) { plat_log("musique illisible : %s", LD.path); }
+    LD.c = NULL;
+    return;
+  }
+  MU.loop = LD.c; LD.c = NULL;
+  Mix_Volume(MUSIC_CH, MU.vol < 0 ? MIX_MAX_VOLUME : MU.vol * MIX_MAX_VOLUME / 100);
+  if (Mix_PlayChannel(MUSIC_CH, MU.loop, -1) < 0) plat_log("lecture impossible : %s", Mix_GetError());
+  else plat_log("musique en boucle : %s", LD.path);
+  if (MU.paused) Mix_Pause(MUSIC_CH);
 }
 
 static void music_play_file(const char *file, int loops) {
   char path[PATH_LEN];
   snprintf(path, sizeof path, "%s/musique/%s", plat_data_dir(), file);
   music_stop();
+  struct stat st;
+  if (loops < 0 && !stat(path, &st) && st.st_size < (12 << 20) && (LD.mx || (LD.mx = SDL_CreateMutex())) && !LD.busy) {
+    snprintf(LD.path, sizeof LD.path, "%s", path);
+    LD.gen = MU.gen; LD.done = 0; LD.c = NULL; LD.busy = 1;
+    SDL_Thread *th = SDL_CreateThread(loop_loader, "musique", NULL);
+    if (th) { SDL_DetachThread(th); return; }
+    LD.busy = 0;                                 /* pas de fil : lecture classique */
+  }
   MU.m = Mix_LoadMUS(path);
   if (!MU.m) { plat_log("musique illisible : %s (%s)", path, Mix_GetError()); return; }
   if (Mix_PlayMusic(MU.m, loops)) plat_log("lecture impossible : %s", Mix_GetError());
@@ -3285,12 +3739,17 @@ static void music_play_file(const char *file, int loops) {
 static void music_update(void) {
   const char *want = S.th->music;
   if (!want[0] || (!strcmp(want, "*") && !S.nmusics)) {
-    if (MU.m) music_stop();
+    if (MU.m || MU.loop || LD.busy) music_stop();
     MU.key[0] = 0;
     return;
   }
   if (!music_ready()) return;
-  if (MU.vol != S.th->volume) { MU.vol = S.th->volume; Mix_VolumeMusic(MU.vol * MIX_MAX_VOLUME / 100); }
+  loop_poll();
+  if (MU.vol != S.th->volume) {
+    MU.vol = S.th->volume;
+    Mix_VolumeMusic(MU.vol * MIX_MAX_VOLUME / 100);
+    Mix_Volume(MUSIC_CH, MU.vol * MIX_MAX_VOLUME / 100);
+  }
   if (strcmp(MU.key, want)) {
     snprintf(MU.key, sizeof MU.key, "%s", want);
     if (!strcmp(want, "*")) { MU.pos = rand() % S.nmusics; music_play_file(S.musics[MU.pos], 1); }
@@ -3303,11 +3762,15 @@ static void music_update(void) {
 }
 
 static void music_pause(int on) {
-  if (!MU.m || MU.paused == on) return;
+  if (MU.paused == on) return;
   MU.paused = on;
-  if (on) Mix_PauseMusic(); else Mix_ResumeMusic();
+  if (MU.loop) { if (on) Mix_Pause(MUSIC_CH); else Mix_Resume(MUSIC_CH); }
+  if (MU.m) { if (on) Mix_PauseMusic(); else Mix_ResumeMusic(); }
 }
-static void music_fade(void) { if (MU.m) Mix_FadeOutMusic(600); }
+static void music_fade(void) {
+  if (MU.m) Mix_FadeOutMusic(600);
+  if (MU.loop) Mix_FadeOutChannel(MUSIC_CH, 600);
+}
 
 /* --- sons d'interface : fabriques au premier usage ----------------------- */
 static Mix_Chunk *SFXC[SFX_COUNT];
@@ -3554,12 +4017,12 @@ static void jump_letter(int dir) {
 }
 
 static void change_section(int dir) {
-  int s = S.sec;
+  int k = sec_pos(S.sec);
   for (int i = 0; i < SEC_COUNT; i++) {
-    s = (s + dir + SEC_COUNT) % SEC_COUNT;
-    if (S.sec_has[s]) break;
+    k = (k + dir + SEC_COUNT) % SEC_COUNT;
+    if (S.sec_has[SEC_ORDER[k]]) break;
   }
-  S.sec = s;
+  S.sec = SEC_ORDER[k];
   S.scroll = (float)*cur_sel();
 }
 
@@ -4167,6 +4630,7 @@ static void handle_inner(int in) {
     if (settings_input(in)) return;
     if (in == IN_MENU || in == IN_START || in == IN_MOVE) return;
   }
+  if (S.mode == MODE_COMMU) { commu_input(in); return; }
   if (S.mode == MODE_THEME) { theme_editor_input(in); return; }
   if (S.mode == MODE_KEYBOARD) {
     switch (in) {
@@ -4541,6 +5005,7 @@ int main(int argc, char **argv) {
   while (S.running) {
     box_poll();
     up_poll();
+    cm_poll();
     Uint64 now = SDL_GetPerformanceCounter();
     S.dt = (float)(now - last) / SDL_GetPerformanceFrequency();
     if (S.dt > 0.1f) S.dt = 0.1f;

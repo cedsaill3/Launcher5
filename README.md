@@ -2,7 +2,7 @@
 
 # Launcher5 — game loader pour PS5
 
-**par cedsaill** · v2.2.0 · [English below](#english)
+**par cedsaill** · v2.3.0 · [English below](#english)
 
 Launcher5 remplace la navigation dans tes jeux et homebrews par un vrai game loader :
 jaquettes officielles, cover flow en 3D, thèmes animés, sons, dossiers, musique d'ambiance.
@@ -16,6 +16,18 @@ jaquettes officielles, cover flow en 3D, thèmes animés, sons, dossiers, musiqu
 | Paramètres (avec aperçu) | Studio Thème |
 |---|---|
 | ![Paramètres](docs/parametres.jpg) | ![Studio Thème](docs/studio-theme.png) |
+
+## Nouveautés de la v2.3
+- **Thèmes de la communauté** : Studio Thème › Thèmes de la communauté, puis ✕ pour installer un
+  thème partagé par les joueurs (fond d'écran compris). Pour proposer le tien :
+  [Launcher5-themes](https://github.com/cedsaill3/Launcher5-themes)
+- **Boîtiers en 3D** dans le Cover Flow : les boîtiers sur les côtés montrent leur tranche
+- **6 styles de boîtier** (Studio Thème › Boîtiers des jeux) : Bleu, Noir, Cristal, Steel, couleur du
+  thème ou jaquette seule
+- Musique d'ambiance en boucle **sans coupure** (le silence de fin du morceau est retiré)
+- Le launcher s'ouvre sur tes jeux ; « Mes dossiers » passe après les émulateurs
+
+![Thèmes de la communauté](docs/communaute.jpg)
 
 ## Nouveautés de la v2.2
 - **Vrais boîtiers** : chaque jeu est rangé dans un boîtier en plastique bleu avec son bandeau
@@ -117,6 +129,8 @@ Polices DejaVu : licence libre. Les jaquettes appartiennent à leurs éditeurs.
 Cover Flow with 3D perspective and reflections, cover grid, carousel, animated themes,
 interface sounds, folders, background music. The interface follows the console language
 (French, English, Spanish, German, Italian, Portuguese).
+
+**New in v2.3:** community themes you install straight from the console ([Launcher5-themes](https://github.com/cedsaill3/Launcher5-themes)), 3D game cases in Cover Flow, 6 case styles (blue, black, crystal, steel, theme colour, none), gapless background music loop.
 
 **New in v2.2:** real game cases (blue plastic case with the PS5 / PS4 banner, **red cases for homebrews**) and an animated launch screen in the game's colors.
 
