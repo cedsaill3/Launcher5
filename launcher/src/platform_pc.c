@@ -50,6 +50,15 @@ static void install_wallpapers(void) {
     }
     fclose(in);
   }
+  mkdir("fake_ps5/data/launcher5/sons", 0755);
+  FILE *in = fopen("assets/sons/demarrage-techno.mp3", "rb"), *out = NULL;
+  if (in && !(out = fopen("fake_ps5/data/launcher5/sons/demarrage-techno.mp3", "rb")) &&
+      (out = fopen("fake_ps5/data/launcher5/sons/demarrage-techno.mp3", "wb"))) {
+    char buf[65536]; size_t k;
+    while ((k = fread(buf, 1, sizeof buf, in)) > 0) fwrite(buf, 1, k, out);
+  }
+  if (out) fclose(out);
+  if (in) fclose(in);
 }
 
 int plat_init(void) {
