@@ -2,7 +2,7 @@
 
 # Launcher5 — game loader pour PS5
 
-**par cedsaill** · v2.3.2 · [English below](#english)
+**par cedsaill** · v2.4.0 · [English below](#english)
 
 Launcher5 remplace la navigation dans tes jeux et homebrews par un vrai game loader :
 jaquettes officielles, cover flow en 3D, thèmes animés, sons, dossiers, musique d'ambiance.
@@ -16,6 +16,10 @@ jaquettes officielles, cover flow en 3D, thèmes animés, sons, dossiers, musiqu
 | Paramètres (avec aperçu) | Studio Thème |
 |---|---|
 | ![Paramètres](docs/parametres.jpg) | ![Studio Thème](docs/studio-theme.png) |
+
+## Nouveautés de la v2.4
+- **Menu rapide** sur la touche **OPTIONS** : relancer le launcher, vider le cache des jaquettes
+  (elles se refont toutes seules), avec l'espace libre, la température et la durée depuis l'allumage
 
 ## Nouveautés de la v2.3
 - **Boîtiers en 3D** dans le Cover Flow : les boîtiers sur les côtés montrent leur tranche
@@ -92,6 +96,7 @@ La nouvelle version est enregistrée sur la console :
 | ✕ | jouer / ouvrir |
 | △ | options (dossiers, renommer, masquer, thème…) |
 | □ | déplacer |
+| OPTIONS | menu rapide (relancer, vider le cache des jaquettes) |
 | ○ | retour |
 
 ## Personnaliser
@@ -126,6 +131,8 @@ Cover Flow with 3D perspective and reflections, cover grid, carousel, animated t
 interface sounds, folders, background music. The interface follows the console language
 (French, English, Spanish, German, Italian, Portuguese).
 
+**New in v2.4:** quick menu on the **OPTIONS** button (restart the launcher, clear the cover cache, console info).
+
 **New in v2.3:** 3D game cases in Cover Flow, 6 case styles (blue, black, crystal, steel, theme colour, none), gapless background music loop.
 
 **New in v2.2:** real game cases (blue plastic case with the PS5 / PS4 banner, **red cases for homebrews**) and an animated launch screen in the game's colors.
@@ -144,7 +151,7 @@ verifies its SHA-256 and installs it. It is saved on the console as `/data/launc
 **point your autoload to that file** so the console always starts the latest version.
 
 **Controls:** touchpad = Cover Flow / Grid / Carousel · L1/R1 = sections · ✕ play · △ options ·
-□ move · ○ back.
+□ move · OPTIONS quick menu · ○ back.
 
 **Custom covers:** put `<game ID>.jpg` in `/data/launcher5/jaquettes/` over FTP.
 

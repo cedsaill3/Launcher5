@@ -216,6 +216,15 @@ static const char *const T[][L_COUNT] = {
     "Menu aggiornato dal PC", "Menu atualizado a partir do PC" },
   { "Thème « %s » reçu depuis le PC", "Theme “%s” received from the PC", "Tema «%s» recibido desde el PC", "Theme „%s“ vom PC empfangen",
     "Tema «%s» ricevuto dal PC", "Tema «%s» recebido do PC" },
+  /* menu rapide */
+  { "Menu rapide", "Quick menu", "Menú rápido", "Schnellmenü", "Menu rapido", "Menu rápido" },
+  { "Relancer le launcher", "Restart the launcher", "Reiniciar el launcher", "Launcher neu starten", "Riavvia il launcher", "Reiniciar o launcher" },
+  { "Vider le cache des jaquettes", "Clear the cover cache", "Vaciar la caché de portadas", "Cover-Cache leeren", "Svuota la cache delle copertine", "Limpar a cache das capas" },
+  { "allumée depuis %ld h %02ld", "on for %ld h %02ld", "encendida desde hace %ld h %02ld", "seit %ld h %02ld an", "accesa da %ld h %02ld", "ligada há %ld h %02ld" },
+  { "Cache vidé (%d fichiers) : les jaquettes se refont", "Cache cleared (%d files): covers are being rebuilt",
+    "Caché vaciada (%d archivos): se rehacen las portadas", "Cache geleert (%d Dateien): Cover werden neu erstellt",
+    "Cache svuotata (%d file): le copertine si rifanno", "Cache limpa (%d ficheiros): as capas são refeitas" },
+  { "Relance du launcher…", "Restarting the launcher…", "Reiniciando el launcher…", "Launcher wird neu gestartet…", "Riavvio del launcher…", "A reiniciar o launcher…" },
   /* boitiers des jeux */
   { "BOÎTIERS DES JEUX", "GAME CASES", "CAJAS DE LOS JUEGOS", "SPIELEHÜLLEN", "CUSTODIE DEI GIOCHI", "CAIXAS DOS JOGOS" },
   { "Boîtier", "Case", "Caja", "Hülle", "Custodia", "Caixa" },
