@@ -5,7 +5,7 @@
 **par cedsaill** · v2.4.0 · [English below](#english)
 
 Launcher5 remplace la navigation dans tes jeux et homebrews par un vrai game loader :
-jaquettes officielles, cover flow en 3D, thèmes animés, sons, dossiers, musique d'ambiance.
+jaquettes officielles, cover flow, thèmes animés, sons, dossiers, musique d'ambiance.
 
 ![Cover Flow](docs/coverflow.jpg)
 
@@ -18,7 +18,7 @@ jaquettes officielles, cover flow en 3D, thèmes animés, sons, dossiers, musiqu
 | ![Paramètres](docs/parametres.jpg) | ![Studio Thème](docs/studio-theme.png) |
 
 ## Fonctions
-- **3 affichages** au pavé tactile : Cover Flow en 3D (boîtiers avec tranche et reflets), Grille, Carrousel
+- **3 affichages** au pavé tactile : Cover Flow, Grille, Carrousel
 - **Jaquettes officielles** des jeux PS5, téléchargées toutes seules depuis la
   [base Launcher5](https://github.com/cedsaill3/Launcher5-covers) (marche même quand Sony est bloqué par DNS) ;
   boîtiers PS5 / PS4 pour les autres jeux, homebrews en rouge, ou ta jaquette dans `jaquettes/`
@@ -96,7 +96,7 @@ Polices DejaVu : licence libre. Les jaquettes appartiennent à leurs éditeurs.
 ## English
 
 **Launcher5** is a game loader for jailbroken PS5 consoles, by **cedsaill**: official covers,
-Cover Flow with 3D perspective and reflections, cover grid, carousel, animated themes,
+Cover Flow, cover grid, carousel, animated themes,
 interface sounds, folders, background music. The interface follows the console language
 (French, English, Spanish, German, Italian, Portuguese).
 
