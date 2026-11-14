@@ -3002,11 +3002,11 @@ static void theme_row_change(int d) {
     int i = S.preset < 0 ? (d > 0 ? 0 : S.npresets - 1) : cyc(S.preset, d, S.npresets);
     Theme keep = *t;
     *t = S.presets[i];
-    if (i < S.nbuiltin) {  /* les themes fournis gardent ta musique, et ton image s'ils n'ont pas la leur */
+    if (keep.music[0] || i < S.nbuiltin) {  /* ta musique te suit d'un theme a l'autre */
       snprintf(t->music, sizeof t->music, "%s", keep.music);
       t->volume = keep.volume;
-      if (!t->wallpaper[0]) snprintf(t->wallpaper, sizeof t->wallpaper, "%s", keep.wallpaper);
     }
+    if (i < S.nbuiltin && !t->wallpaper[0]) snprintf(t->wallpaper, sizeof t->wallpaper, "%s", keep.wallpaper);
     S.preset = i;
     S.ed_dirty = 0;
     theme_changed();
@@ -4269,9 +4269,12 @@ static void settings_change(int d, int activate) {
       int i = find_preset(S.cur.name);
       i = i < 0 ? 0 : ((i + d) % S.npresets + S.npresets) % S.npresets;
       Theme t = S.presets[i];
-      if (i < S.nbuiltin) {                      /* garde la musique, et l'image si le theme n'en a pas */
+      if (S.cur.music[0]) {                      /* ta musique te suit d'un theme a l'autre */
         snprintf(t.music, sizeof t.music, "%s", S.cur.music);
         t.volume = S.cur.volume;
+      }
+      if (i < S.nbuiltin) {                      /* et l'image si le theme fourni n'en a pas */
+        if (!t.music[0]) { snprintf(t.music, sizeof t.music, "%s", S.cur.music); t.volume = S.cur.volume; }
         if (!t.wallpaper[0]) snprintf(t.wallpaper, sizeof t.wallpaper, "%s", S.cur.wallpaper);
       }
       apply_theme(&t);

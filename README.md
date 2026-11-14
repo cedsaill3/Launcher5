@@ -2,7 +2,7 @@
 
 # Launcher5 — game loader pour PS5
 
-**par cedsaill** · v2.3.0 · [English below](#english)
+**par cedsaill** · v2.3.1 · [English below](#english)
 
 Launcher5 remplace la navigation dans tes jeux et homebrews par un vrai game loader :
 jaquettes officielles, cover flow en 3D, thèmes animés, sons, dossiers, musique d'ambiance.
@@ -24,7 +24,8 @@ jaquettes officielles, cover flow en 3D, thèmes animés, sons, dossiers, musiqu
 - **Boîtiers en 3D** dans le Cover Flow : les boîtiers sur les côtés montrent leur tranche
 - **6 styles de boîtier** (Studio Thème › Boîtiers des jeux) : Bleu, Noir, Cristal, Steel, couleur du
   thème ou jaquette seule
-- Musique d'ambiance en boucle **sans coupure** (le silence de fin du morceau est retiré)
+- Musique d'ambiance en boucle **sans coupure** (le silence de fin du morceau est retiré) ; ta musique
+  te suit quand tu changes de thème
 - Le launcher s'ouvre sur tes jeux ; « Mes dossiers » passe après les émulateurs
 
 ![Thèmes de la communauté](docs/communaute.jpg)
