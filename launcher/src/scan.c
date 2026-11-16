@@ -5,10 +5,11 @@
  *   /user/app/<ID>/sce_sys/param.sfo    jeux PS4
  *   /user/appmeta/<ID>/icon0.png        jaquettes
  *   /data/homebrew/<nom>/               homebrews
- *   /data/payloads/(nom).elf            payloads
+ *   /data/payloads/(nom).elf            payloads (et dossiers de Payload Manager, etaHEN)
  *
  * Launcher5 (c) 2026 cedsaill
  */
+#include <ctype.h>
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -190,23 +191,254 @@ static void scan_homebrew(Menu *m) {
   closedir(d);
 }
 
-static void scan_payloads(Menu *m) {
-  char dir[PATH_LEN];
-  P(dir, sizeof dir, "/data/payloads", NULL, NULL);
+/* Icones des payloads : Payload Manager garde la liste de son depot (repo_cache_*.json :
+   fichier, nom, icon_key) et les icones (repo_icons_*.json : icon_key -> PNG en base64).
+   L'icone est extraite une fois dans cache/ et sert de jaquette. */
+typedef struct { char file[96], name[64], key[72]; } RepoIcon;
+static RepoIcon *RI;
+static int nRI, ri_loaded;
+static json_t *ICONS, *ICONS2;                   /* objets icon_key -> « data:image/png;base64,… » */
+
+static int has_affix(const char *s, const char *pre, const char *suf) {
+  size_t l = strlen(s), lp = strlen(pre), ls = strlen(suf);
+  return l > lp + ls && !strncmp(s, pre, lp) && !strcmp(s + l - ls, suf);
+}
+
+static void repo_list_add(const char *path) {     /* liste au format du depot : payloads[] */
+  json_t *j = json_load_file(path, 0, NULL);
+  size_t i; json_t *v;
+  json_array_foreach(json_object_get(j, "payloads"), i, v) {
+    const char *f = json_string_value(json_object_get(v, "filename"));
+    const char *n = json_string_value(json_object_get(v, "name"));
+    const char *k = json_string_value(json_object_get(v, "icon_key"));
+    if (!k || (!f && !n)) continue;
+    RepoIcon *r = realloc(RI, sizeof *RI * (nRI + 1));
+    if (!r) break;
+    RI = r;
+    snprintf(RI[nRI].file, sizeof RI[nRI].file, "%s", f ? f : "");
+    snprintf(RI[nRI].name, sizeof RI[nRI].name, "%s", n ? n : "");
+    snprintf(RI[nRI].key, sizeof RI[nRI].key, "%s", k);
+    nRI++;
+  }
+  json_decref(j);
+}
+
+/* listes et icones a relire (apres une mise a jour du catalogue) */
+void payload_icons_reset(void) {
+  free(RI); RI = NULL; nRI = 0; ri_loaded = 0;
+  if (ICONS) json_decref(ICONS);
+  if (ICONS2) json_decref(ICONS2);
+  ICONS = ICONS2 = NULL;
+}
+
+static void repo_icons_load(void) {
+  ri_loaded = 1;
+  char dir[PATH_LEN], p[PATH_LEN + 300];
+  /* catalogue de Launcher5 (meme format que le depot de Payload Manager) */
+  snprintf(p, sizeof p, "%s/cache/payloads_index.json", plat_data_dir());
+  repo_list_add(p);
+  snprintf(p, sizeof p, "%s/cache/payloads_icons.json", plat_data_dir());
+  json_t *mine = json_load_file(p, 0, NULL);
+  json_t *mic = json_object_get(mine, "icons");
+  if (json_is_object(mic)) { ICONS2 = mic; json_incref(mic); }
+  json_decref(mine);
+  P(dir, sizeof dir, "/data/pldmgr", NULL, NULL);
   DIR *d = opendir(dir);
   if (!d) return;
   struct dirent *e;
   while ((e = readdir(d))) {
+    snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+    if (has_affix(e->d_name, "repo_cache_", ".json")) repo_list_add(p);
+    else if (has_affix(e->d_name, "repo_icons_", ".json") && !ICONS) {
+      json_t *j = json_load_file(p, 0, NULL);
+      json_t *ic = json_object_get(j, "icons");
+      if (json_is_object(ic)) { ICONS = ic; json_incref(ic); }
+      json_decref(j);
+    }
+  }
+  closedir(d);
+}
+
+static int b64v(int c) {
+  return c >= 'A' && c <= 'Z' ? c - 'A' : c >= 'a' && c <= 'z' ? c - 'a' + 26 : c >= '0' && c <= '9' ? c - '0' + 52
+       : c == '+' ? 62 : c == '/' ? 63 : -1;
+}
+
+/* icone d'un payload (meme fichier, sinon meme nom dans une liste) ; 0 si trouvee */
+int payload_icon_path(const char *file, const char *id, char *res, size_t rn) {
+  if (!ri_loaded) repo_icons_load();
+  if ((!ICONS && !ICONS2) || !nRI) return -1;
+  const char *key = NULL;
+  for (int i = 0; i < nRI && !key; i++) if (RI[i].file[0] && !strcasecmp(RI[i].file, file)) key = RI[i].key;
+  for (int i = 0; i < nRI && !key; i++) if (RI[i].name[0] && id && !strcasecmp(RI[i].name, id)) key = RI[i].key;
+  if (!key) return -1;
+  char out[PATH_LEN];
+  snprintf(out, sizeof out, "%s/cache/pl_%.24s.png", plat_data_dir(), key);   /* PNG ou JPEG selon l'icone */
+  if (!exists(out)) snprintf(out, sizeof out, "%s/cache/pl_%.24s.jpg", plat_data_dir(), key);
+  if (!exists(out)) {
+    const char *uri = json_string_value(json_object_get(ICONS, key));
+    if (!uri) uri = json_string_value(json_object_get(ICONS2, key));
+    const char *b = uri ? strstr(uri, "base64,") : NULL;
+    if (!b) return -1;
+    b += 7;
+    size_t n = strlen(b);
+    unsigned char *buf = malloc(n / 4 * 3 + 3);
+    if (!buf) return -1;
+    size_t k = 0;
+    unsigned acc = 0;
+    int bits = 0;
+    for (size_t i = 0; i < n; i++) {
+      int v = b64v((unsigned char)b[i]);
+      if (v < 0) continue;
+      acc = ((acc << 6) | (unsigned)v) & 0xffffffu;
+      bits += 6;
+      if (bits >= 8) { bits -= 8; buf[k++] = (unsigned char)((acc >> bits) & 0xff); }
+    }
+    int png = k > 8 && !memcmp(buf, "\x89PNG", 4), jpg = k > 8 && buf[0] == 0xff && buf[1] == 0xd8;
+    int ok = png || jpg;
+    snprintf(out, sizeof out, "%s/cache/pl_%.24s.%s", plat_data_dir(), key, png ? "png" : "jpg");
+    if (ok) {
+      char tmp[PATH_LEN + 8];
+      snprintf(tmp, sizeof tmp, "%s.tmp", out);
+      FILE *f = fopen(tmp, "wb");
+      ok = f && fwrite(buf, 1, k, f) == k;
+      if (f) fclose(f);
+      ok = ok && !rename(tmp, out);
+      if (!ok) remove(tmp);
+    }
+    free(buf);
+    if (!ok) return -1;
+  }
+  snprintf(res, rn, "%s", out);
+  return 0;
+}
+
+static int payload_icon(App *a, const char *file, const char *id) {
+  return payload_icon_path(file, id, a->icon, sizeof a->icon);
+}
+
+/* Fiche d'un payload laissee par Payload Manager : meta.json dans son dossier
+   (si elle parle bien de ce fichier) ou <fichier>.json a cote. */
+static void payload_meta(App *a, const char *dir, const char *file) {
+  char p[PATH_LEN];
+  json_t *j = NULL;
+  snprintf(p, sizeof p, "%s/meta.json", dir);
+  json_t *m = json_load_file(p, 0, NULL);
+  const char *fn = json_string_value(json_object_get(m, "filename"));
+  if (m && fn && !strcmp(fn, file)) j = m; else json_decref(m);
+  if (!j) { snprintf(p, sizeof p, "%s/%s.json", dir, file); j = json_load_file(p, 0, NULL); }
+  if (!json_is_object(j)) { json_decref(j); payload_icon(a, file, NULL); return; }
+  const char *name = json_string_value(json_object_get(j, "name"));
+  const char *desc = json_string_value(json_object_get(j, "description"));
+  const char *cat = json_string_value(json_object_get(j, "category"));
+  const char *ver = json_string_value(json_object_get(j, "version"));
+  const char *pid = json_string_value(json_object_get(j, "id"));
+  payload_icon(a, file, pid ? pid : name);
+  if (name && *name) snprintf(a->title, sizeof a->title, "%s", name);
+  if (desc) snprintf(a->desc, sizeof a->desc, "%s", desc);
+  if (cat) snprintf(a->cat, sizeof a->cat, "%s", cat);
+  if (ver) snprintf(a->ver, sizeof a->ver, "%s", ver);
+  json_decref(j);
+}
+
+/* Payloads : /data/payloads, puis les dossiers des gestionnaires courants (Payload
+   Manager, etaHEN, autoloader), en lecture seule. Seuls les .elf sont gardes (le
+   chargeur du port 9021 n'accepte que ce format) ; Launcher5 lui-meme est ignore. */
+static int seen_payload(Menu *m, const char *file) {
+  for (int i = 0; i < m->napps; i++) {
+    const App *x = &m->apps[i];
+    if (x->kind != KIND_PAYLOAD) continue;
+    const char *b = strrchr(x->path, '/');
+    if (b && !strcasecmp(b + 1, file)) return 1;
+  }
+  return 0;
+}
+
+static void scan_payload_dir(Menu *m, const char *dir, int depth) {
+  DIR *d = opendir(dir);
+  if (!d) return;
+  struct dirent *e;
+  while ((e = readdir(d))) {
+    if (e->d_name[0] == '.') continue;
+    char p[PATH_LEN];
+    snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+    struct stat st;
+    if (stat(p, &st)) continue;
+    if (S_ISDIR(st.st_mode)) { if (depth > 0) scan_payload_dir(m, p, depth - 1); continue; }
     size_t l = strlen(e->d_name);
     if (l < 5 || strcasecmp(e->d_name + l - 4, ".elf")) continue;
+    char low[256];
+    size_t k = 0;
+    for (; e->d_name[k] && k + 1 < sizeof low; k++) low[k] = (char)tolower((unsigned char)e->d_name[k]);
+    low[k] = 0;
+    if (strstr(low, "launcher5")) continue;   /* Launcher5 lui-meme : pas dans la liste */
+    if (seen_payload(m, e->d_name)) continue;    /* meme fichier deja trouve ailleurs */
     App a = {0};
     snprintf(a.id, sizeof a.id, "elf:%.35s", e->d_name);
     snprintf(a.title, sizeof a.title, "%.*s", (int)(l - 4), e->d_name);
-    P(a.path, sizeof a.path, "/data/payloads/%s", e->d_name, NULL);
+    snprintf(a.path, sizeof a.path, "%s", p);
     a.kind = KIND_PAYLOAD;
+    payload_meta(&a, dir, e->d_name);
+    if (payload_hidden(e->d_name) || payload_hidden(a.title)) continue;   /* inutile dans un launcher */
+    {                                            /* icone perso : image du meme nom a cote du payload */
+      static const char *const EXT[] = { "png", "jpg", "jpeg", "webp" };
+      char img[PATH_LEN];
+      for (size_t x = 0; x < sizeof EXT / sizeof EXT[0]; x++) {
+        snprintf(img, sizeof img, "%.*s.%s", (int)(strlen(p) - 4), p, EXT[x]);
+        if (exists(img)) { snprintf(a.icon, sizeof a.icon, "%s", img); break; }
+      }
+    }
+    /* meme nom deja trouve : ignore, sauf la copie de Launcher5 (/data/payloads), qui l'emporte */
+    char mine[PATH_LEN];
+    P(mine, sizeof mine, "/data/payloads/", NULL, NULL);
+    int dup = 0;
+    if (strncmp(p, mine, strlen(mine)))
+      for (int i = 0; i < m->napps && !dup; i++)
+        dup = m->apps[i].kind == KIND_PAYLOAD && !strcasecmp(m->apps[i].title, a.title);
+    if (dup) continue;
     menu_add_app(m, &a);
   }
   closedir(d);
+}
+
+/* Payloads exclus : exploits de l'hyperviseur qui demandent le mode repos (byepervisor,
+   HyperHEN, chargeur Linux). Ils n'ont rien a faire dans un launcher, ni au demarrage. */
+int payload_excluded(const char *name) {
+  static const char *const K[] = { "byepervisor", "hyperhen", "linuxloader", "ps5linux" };
+  char n[256];
+  size_t k = 0;
+  for (const char *p = name ? name : ""; *p && k + 1 < sizeof n; p++)
+    if (isalnum((unsigned char)*p)) n[k++] = (char)tolower((unsigned char)*p);
+  n[k] = 0;
+  for (size_t i = 0; i < sizeof K / sizeof K[0]; i++) if (strstr(n, K[i])) return 1;
+  return 0;
+}
+
+/* Payloads sans interet pour un launcher (outils de developpement, debogage, statistiques,
+   habillage de l'accueil, autre gestionnaire de payloads) : ni dans la section, ni dans le
+   catalogue. Restent : jailbreak, monteurs de jeux, FTP et envoi de jeux, fichiers,
+   sauvegardes, triche, correctifs, heure, DNS. */
+int payload_hidden(const char *name) {
+  static const char *const K[] = { "klogsrv", "gdbsrv", "shsrv", "ps5debug", "ps5exporter",
+                                   "liveshell", "welcomehub", "pldmgr" };
+  char n[256];
+  size_t k = 0;
+  for (const char *p = name ? name : ""; *p && k + 1 < sizeof n; p++)
+    if (isalnum((unsigned char)*p)) n[k++] = (char)tolower((unsigned char)*p);
+  n[k] = 0;
+  for (size_t i = 0; i < sizeof K / sizeof K[0]; i++) if (strstr(n, K[i])) return 1;
+  return 0;
+}
+
+static void scan_payloads(Menu *m) {
+  static const struct { const char *dir; int depth; } DIRS[] = {
+    { "/data/payloads", 1 }, { "/data/pldmgr/payloads", 3 }, { "/data/etaHEN/payloads", 1 }, { "/data/ps5_autoloader", 0 },
+  };
+  for (size_t i = 0; i < sizeof DIRS / sizeof DIRS[0]; i++) {
+    char dir[PATH_LEN];
+    P(dir, sizeof dir, DIRS[i].dir, NULL, NULL);
+    scan_payload_dir(m, dir, DIRS[i].depth);
+  }
 }
 
 static void add_system(Menu *m, const char *id, const char *title) {

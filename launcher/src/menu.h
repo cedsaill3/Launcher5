@@ -54,6 +54,8 @@ typedef struct App {
   int  box_state, box_custom; /* 0 a faire, 1 en cours, 2 prete, 3 impossible */
   long long box_sig;         /* jaquette perso vue lors de la fabrication */
   int  box_pref;             /* jaquette deja preparee sur le disque (prechargement) */
+  char desc[160];            /* payload : description (fiche du gestionnaire de payloads) */
+  char cat[48], ver[24];     /* payload : categorie et version */
 } App;
 
 typedef struct Node {

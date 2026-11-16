@@ -21,6 +21,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/sysctl.h>
 #include <unistd.h>
 
 #include "platform.h"
@@ -87,6 +88,11 @@ static int send_payload(const char *path, char *msg, size_t n) {
   if (!buf) { fclose(f); snprintf(msg, n, "%s", tr("Mémoire insuffisante")); return -1; }
   size_t got = fread(buf, 1, (size_t)size, f);
   fclose(f);
+  if (got != (size_t)size) {                     /* fichier lu en partie : on n'envoie rien */
+    free(buf);
+    snprintf(msg, n, tr("Impossible de lire %s"), path);
+    return -1;
+  }
 
   int s = socket(AF_INET, SOCK_STREAM, 0);
   struct sockaddr_in addr = { 0 };
@@ -236,6 +242,30 @@ static long long free_mb_of(const char *path) {
   struct statvfs v;
   if (statvfs(path, &v)) return -1;
   return (long long)v.f_bavail * (long long)v.f_frsize / (1024 * 1024);
+}
+
+/* noms des processus de la console (les payloads se nomment eux-memes : kstuff.elf,
+   shadowmountplus.elf, ftpsrv.elf…), un par ligne */
+int plat_procs(char *out, size_t n) {
+  int mib[4] = { 1 /* CTL_KERN */, 14 /* KERN_PROC */, 8 /* KERN_PROC_PROC */, 0 };
+  size_t len = 0, k = 0;
+  out[0] = 0;
+  if (sysctl(mib, 4, NULL, &len, NULL, 0)) return -1;
+  len += len / 2 + 65536;                        /* la liste peut grandir entre les deux appels */
+  unsigned char *buf = malloc(len);
+  if (!buf) return -1;
+  if (sysctl(mib, 4, buf, &len, NULL, 0)) { free(buf); return -1; }
+  for (unsigned char *p = buf; p + 460 < buf + len;) {
+    int size = *(int *)p;
+    if (size <= 0) break;
+    const char *nm = (const char *)p + 447;
+    size_t l = strnlen(nm, 20);
+    if (k + l + 2 < n) { memcpy(out + k, nm, l); k += l; out[k++] = '\n'; }
+    p += size;
+  }
+  out[k] = 0;
+  free(buf);
+  return 0;
 }
 
 void plat_sysinfo(char *ip, size_t iplen, long long *free_mb, int *temp_c) {
@@ -482,6 +512,10 @@ long plat_https_get(const char *url, unsigned char **data, size_t *len, size_t m
 
 /* Envoi d'un ELF au chargeur de la console (mise a jour du launcher) */
 int plat_restart_ui(void) { return write_request("restart", "launcher", NULL); }
+
+/* l'interface est fermee proprement par le systeme ; la tuile Launcher5 la rouvre */
+int plat_close_ui(void) { return write_request("close", "background", NULL); }
+
 
 /* Nouvelle version : le bootstrap la lance lui-meme (chargeur integre), sinon par le port 9021.
    On attend qu'il ait pris la demande avant de rendre la main. */

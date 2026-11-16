@@ -209,30 +209,83 @@ find_pid(const char* name) {
   size_t buf_size;
   uint8_t *buf;
 
-  if(sysctl(mib, 4, 0, &buf_size, 0, 0)) {
+  /* Launcher5 : the process list can grow between the two sysctl calls (new
+     processes or threads), so leave some room and retry a few times. */
+  for(int tries=0;; tries++) {
+    if(sysctl(mib, 4, 0, &buf_size, 0, 0)) {
+      perror("sysctl");
+      return -1;
+    }
+    buf_size += buf_size / 2 + 65536;
+
+    if(!(buf=malloc(buf_size))) {
+      perror("malloc");
+      return -1;
+    }
+
+    if(!sysctl(mib, 4, buf, &buf_size, 0, 0)) {
+      break;
+    }
     perror("sysctl");
-    return -1;
+    free(buf);
+    if(tries >= 4) {
+      return -1;
+    }
+    usleep(50000);
   }
 
-  if(!(buf=malloc(buf_size))) {
-    perror("malloc");
-    return -1;
-  }
-
-  if(sysctl(mib, 4, buf, &buf_size, 0, 0)) {
-    perror("sysctl");
-    return -1;
-  }
-
+  int entries = 0;
   for(uint8_t *ptr=buf; ptr<(buf+buf_size);) {
     int ki_structsize = *(int*)ptr;
+    if(ki_structsize <= 0) {
+      break;
+    }
+    entries++;
     pid_t ki_pid = *(pid_t*)&ptr[72];
     char *ki_tdname = (char*)&ptr[447];
 
-    ptr += ki_structsize;
     if(!strcmp(name, ki_tdname) && mypid != ki_pid) {
       pid = ki_pid;
     }
+    ptr += ki_structsize;
+  }
+
+  /* Launcher5 : the name can sit in another field of the entry (process name rather
+     than thread name) ; look for it anywhere in each entry as a second chance. */
+  if(pid < 0) {
+    size_t nl = strlen(name);
+    for(uint8_t *ptr=buf; ptr<(buf+buf_size) && pid < 0;) {
+      int sz = *(int*)ptr;
+      if(sz <= 0) {
+        break;
+      }
+      for(int o = 0; o + (int)nl < sz; o++) {
+        if(!memcmp(ptr + o, name, nl) && ptr[o + nl] == 0 && *(pid_t*)&ptr[72] != mypid) {
+          pid = *(pid_t*)&ptr[72];
+          char msg[96];
+          snprintf(msg, sizeof(msg), "%s found at offset %d (pid %d)", name, o, pid);
+          hbldr_notify(msg);
+          break;
+        }
+      }
+      ptr += sz;
+    }
+  }
+
+  if(pid < 0) {                                  /* Launcher5 : diagnostic in the log */
+    char msg[600];
+    int k = snprintf(msg, sizeof(msg), "%s not in %d processes:", name, entries);
+    for(uint8_t *ptr=buf; ptr<(buf+buf_size) && k < (int)sizeof(msg) - 40;) {
+      int sz = *(int*)ptr;
+      if(sz <= 0) {
+        break;
+      }
+      if(strncmp((char*)&ptr[447], "Sce", 3) == 0 || strstr((char*)&ptr[447], "Core")) {
+        k += snprintf(msg + k, sizeof(msg) - k, " %.20s", (char*)&ptr[447]);
+      }
+      ptr += sz;
+    }
+    hbldr_notify(msg);
   }
 
   free(buf);

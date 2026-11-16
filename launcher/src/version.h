@@ -5,5 +5,6 @@
  */
 #pragma once
 
-#define L5_VERSION "2.5.4"
+#define L5_VERSION "2.5.5"
+#define L5_PLUGIN_VERSION "2.55"   /* meme version au format « N.NN » (plugin OnionHEN) */
 #define L5_AUTHOR  "cedsaill"

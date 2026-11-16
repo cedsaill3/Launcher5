@@ -1,5 +1,5 @@
 =====================================================================
-  LAUNCHER5  v2.5.4  
+  LAUNCHER5  v2.5.5  
   par cedsaill
 =====================================================================
 
@@ -7,7 +7,18 @@
 
 INSTALLATION
   1. PS5 jailbreakée avec un chargeur ELF actif (port 9021).
-  2. Envoie le fichier launcher5.elf 
+  2. Envoie le fichier launcher5.elf au port 9021.
+  3. Au premier lancement, kstuff-lite et ShadowMountPlus sont
+     téléchargés (empreintes vérifiées) et Launcher5 s'inscrit dans
+     ps5_autoloader (ancien autoload.txt sauvegardé) : aux allumages
+     suivants, tout démarre seul.
+
+PAYLOADS
+  Section Payloads : ✕ envoie un payload, △ > Envoyer au démarrage
+  l'ajoute à la liste lancée à chaque allumage. OPTIONS > Catalogue de
+  payloads pour en installer ou les mettre à jour. Les payloads noyau
+  (kstuff, HEN...) partent seulement au démarrage, jamais deux fois.
+  Paramètres > Démarrage de Launcher5 : à la main, OnionHEN ou autoloader.
 
 UTILISATION (manette)
   Pavé tactile ........ changer d'affichage : Cover Flow / Grille / Carrousel
@@ -36,9 +47,7 @@ MISES À JOUR
   Paramètres > Mettre à jour : ✕ télécharge, vérifie et installe.
   La nouvelle version est enregistrée sur la console :
       /data/launcher5/launcher5.elf
-  AUTOLOAD : si ta console lance un ELF automatiquement au démarrage,
-  fais-le pointer sur /data/launcher5/launcher5.elf pour démarrer
-  toujours la dernière version.
+  En mode autoloader, la copie de ps5_autoloader suit toute seule.
 
 JAQUETTES
   Les jaquettes officielles des jeux PS5 se téléchargent toutes seules
@@ -52,7 +61,15 @@ JAQUETTES
 
 INSTALL
   1. Jailbroken PS5 with an ELF loader running (port 9021).
-  2. Send launcher5.elf 
+  2. Send launcher5.elf to port 9021.
+  3. On first launch, kstuff-lite and ShadowMountPlus are
+     downloaded (verified checksums) and Launcher5 adds itself to
+     ps5_autoloader: everything starts on its own at every boot.
+
+PAYLOADS
+  Payloads section: Cross sends, Triangle > Send at startup adds to the
+  boot list. OPTIONS > Payload catalogue installs and updates payloads.
+  Kernel payloads (kstuff, HEN...) only run at boot, never twice.
 
 CONTROLS
   Touchpad: Cover Flow / Grid / Carousel   L1/R1: sections
@@ -64,8 +81,7 @@ LANGUAGE
 
 UPDATES
   Settings > Update downloads, verifies and installs the new version.
-  It is saved as /data/launcher5/launcher5.elf: point your autoload
-  to that file to always start the latest version.
+  In autoloader mode the ps5_autoloader copy is kept up to date.
 
 CUSTOMISE
   /data/launcher5/fonds (wallpapers), musique (music), themes (.json),
@@ -83,3 +99,5 @@ LICENCE / LICENSE
   (voir COPYING).
   Sources / source code : https://github.com/cedsaill3/Launcher5
   Polices DejaVu : licence libre.
+  Payloads non inclus, téléchargés depuis leurs sources / payloads are
+  not bundled, they are downloaded from their own sources.

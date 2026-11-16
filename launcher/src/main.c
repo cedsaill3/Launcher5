@@ -31,8 +31,26 @@
 #endif
 #include <sys/stat.h>
 #include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <ctype.h>
 #include <jansson.h>
+
+/* Horloge du launcher : monotone. Un payload qui remet l'heure de la console a jour
+   (ps5-date-time-sync…) ne doit pas faire sauter les messages, animations et delais. */
+static Uint32 l5_ticks(void) {
+  static long long base = -1;
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  long long ms = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+  if (base < 0) base = ms;
+  return (Uint32)(ms - base + 1);
+}
+#define SDL_GetTicks() l5_ticks()
 
 extern const unsigned char font_regular[], font_bold[];
 extern const unsigned int font_regular_len, font_bold_len;
@@ -132,16 +150,17 @@ static int sec_match(int sec, const App *a) {
 /* ------------------------------------------------------------------ */
 /* Etat                                                                */
 /* ------------------------------------------------------------------ */
-enum { MODE_BROWSE, MODE_CONTEXT, MODE_MOVE, MODE_KEYBOARD, MODE_PICKFOLDER, MODE_COLOR, MODE_THEME };
+enum { MODE_BROWSE, MODE_CONTEXT, MODE_MOVE, MODE_KEYBOARD, MODE_PICKFOLDER, MODE_COLOR, MODE_THEME, MODE_INFO, MODE_CATALOG, MODE_HELP };
 /* lignes de l'editeur de theme */
 enum { R_PRESET, R_LAYOUT, R_AUTO, R_ACCENT, R_ACCENT2, R_TOP, R_BOTTOM, R_BG, R_WALL, R_ART, R_FX, R_GLOW, R_PART, R_PSTYLE,
        R_FALL, R_CASE, R_CORNERS, R_CLOCK, R_SFX, R_MUSIC, R_VOLUME, R_SAVE, R_DELETE, R_COUNT };
 enum {
   ACT_LAUNCH, ACT_OPEN, ACT_MOVE, ACT_TO_FOLDER, ACT_OUT_OF_FOLDER, ACT_RENAME, ACT_HIDE,
   ACT_SHOW, ACT_COLOR, ACT_DELETE_FOLDER, ACT_NEW_FOLDER, ACT_TOGGLE_HIDDEN, ACT_RESET_NAME, ACT_THEME, ACT_SAVE_THEME,
-  ACT_VIEW, ACT_FAV, ACT_UNFAV,
+  ACT_VIEW, ACT_FAV, ACT_UNFAV, ACT_INFO, ACT_SEARCH, ACT_CATALOG, ACT_BOOT,
+  ACT_START_MANUAL, ACT_START_PLUGIN, ACT_START_AUTOLOAD, ACT_FIRST_YES, ACT_FIRST_NO, ACT_K_BOOT, ACT_K_SEND, ACT_HELP_PAY,
   /* menu rapide (touche OPTIONS) */
-  ACT_Q_RESTART, ACT_Q_CACHE, ACT_Q_QUIT,
+  ACT_Q_RESTART, ACT_Q_CACHE, ACT_Q_QUIT, ACT_Q_RESUME, ACT_Q_CATALOG,
 };
 
 typedef struct { int is_folder; int index; App *app; Node *node; } Entry;
@@ -459,7 +478,138 @@ static int cmp_name(const void *a, const void *b) {
   return strcasecmp(menu_display_name(&S.menu, ((const Entry *)a)->app), menu_display_name(&S.menu, ((const Entry *)b)->app));
 }
 
+/* ------------------------------------------------------------------ */
+/* Tags automatiques (d'apres les statistiques) et filtre (touche □)   */
+/* ------------------------------------------------------------------ */
+enum { FIL_ALL, FIL_NEW, FIL_NEVER, FIL_RARE, FIL_RECENT, FIL_ABANDONED, FIL_COUNT };
+static const char *FILTER_NAMES[FIL_COUNT] = { "Tous", "Nouveaux", "Jamais joués", "Peu joués", "Joués récemment", "Abandonnés" };
+static int filter_now;                           /* filtre en cours (sections de jeux) */
+
+/* dossier ou fichier du jeu sur la console (taille, date d'installation) */
+static void app_dir(App *a, char *out, size_t n) {
+  out[0] = 0;
+  if (!a || a->kind == KIND_SYSTEM) return;
+  if (a->path[0]) snprintf(out, n, "%s", a->path);
+  else if (a->kind == KIND_PS5 || a->kind == KIND_PS4 || a->kind == KIND_MEDIA) snprintf(out, n, "/user/app/%s", a->id);
+}
+
+static time_t app_installed(App *a) {            /* date d'installation (fichiers du jeu), gardee en memoire */
+  static struct { App *a; time_t t; } IC[512];
+  static int n, napps = -1;
+  if (napps != S.menu.napps) { n = 0; napps = S.menu.napps; }
+  for (int i = 0; i < n; i++) if (IC[i].a == a) return IC[i].t;
+  struct stat sb;
+  char d[PATH_LEN];
+  app_dir(a, d, sizeof d);
+  const char *p = d[0] && !access(d, F_OK) ? d : a->icon;
+  time_t t = p[0] && !stat(p, &sb) ? sb.st_mtime : 0;
+  if (n < 512) { IC[n].a = a; IC[n].t = t; n++; }
+  return t;
+}
+
+static int app_tag(App *a, int f) {
+  if (f == FIL_ALL) return 1;
+  if (!a || a->kind == KIND_SYSTEM) return 0;
+  Stat *st = menu_stat(&S.menu, a->id, 0);
+  int played = st && st->launches > 0;
+  time_t now = time(NULL), t;
+  switch (f) {
+  case FIL_NEW: t = app_installed(a); return !played && t && now - t < 7 * 86400;
+  case FIL_NEVER: return !played;
+  case FIL_RARE: return played && st->launches <= 2 && st->playtime < 3600;
+  case FIL_RECENT: return played && st->last && now - st->last < 7 * 86400;
+  case FIL_ABANDONED: return played && st->last && now - st->last > 60 * 86400;
+  }
+  return 1;
+}
+
+/* --- Recherche (L3 / R3 ou △ › Rechercher) : jeux, homebrews, payloads, reglages --- */
+static char search_q[NAME_LEN];                  /* recherche en cours (vide : aucune) */
+
+/* Transition douce : le contenu glisse un court instant (section, vue) */
+static Uint32 tr_t;
+static int tr_dx, tr_dy;
+static void transition(int dx, int dy) { tr_t = SDL_GetTicks(); tr_dx = dx; tr_dy = dy; if (!tr_t) tr_t = 1; }
+static int tr_offset(int *dx, int *dy) {          /* 1 tant que la transition dure */
+  *dx = *dy = 0;
+  if (!tr_t) return 0;
+  float k = (SDL_GetTicks() - tr_t) / 240.0f;
+  if (k >= 1) { tr_t = 0; return 0; }
+  float r = (1 - k) * (1 - k) * (1 - k);          /* ralentit en arrivant */
+  *dx = (int)(tr_dx * r); *dy = (int)(tr_dy * r);
+  return 1;
+}
+
+/* Parallaxe : le fond (prepare un peu plus large que l'ecran) glisse avec la selection */
+#define PAR 64
+static float par_x;
+
+/* minuscules, accents retires : « Éte » trouve « ete » */
+static void fold(const char *s, char *out, size_t n) {
+  static const char *const FROM[] = { "à", "â", "ä", "á", "ã", "é", "è", "ê", "ë", "î", "ï", "í", "ô", "ö", "ó", "õ", "ù", "û", "ü", "ú",
+                                      "ç", "ñ", "À", "Â", "Ä", "É", "È", "Ê", "Ë", "Î", "Ï", "Ô", "Ö", "Ù", "Û", "Ü", "Ç", "ß" };
+  static const char TO[] = "aaaaaeeeeiiioooouuuucnaaaeeeeiioouuucs";
+  size_t k = 0;
+  while (*s && k + 1 < n) {
+    int done = 0;
+    if ((unsigned char)*s >= 0xC0)
+      for (size_t i = 0; i < sizeof FROM / sizeof FROM[0]; i++) {
+        size_t l = strlen(FROM[i]);
+        if (!strncmp(s, FROM[i], l)) { out[k++] = TO[i]; s += l; done = 1; break; }
+      }
+    if (!done) { out[k++] = (char)tolower((unsigned char)*s); s++; }
+  }
+  out[k] = 0;
+}
+
+static int search_match(App *a, const char *q) {
+  char fq[NAME_LEN], f[NAME_LEN];
+  fold(q, fq, sizeof fq);
+  if (!fq[0]) return 0;
+  fold(menu_display_name(&S.menu, a), f, sizeof f);
+  if (strstr(f, fq)) return 1;
+  fold(a->title, f, sizeof f);
+  if (strstr(f, fq)) return 1;
+  fold(a->id, f, sizeof f);
+  return strstr(f, fq) != NULL;
+}
+
+static int search_count(const char *q) {
+  int n = 0;
+  for (int i = 0; i < S.menu.napps; i++)
+    if ((S.show_hidden || !menu_is_hidden(&S.menu, S.menu.apps[i].id)) && search_match(&S.menu.apps[i], q)) n++;
+  return n;
+}
+
+/* payload installe par Launcher5 (/data/payloads) */
+static int pay_ours(const App *a) {
+  char d[PATH_LEN];
+  snprintf(d, sizeof d, "%s/data/payloads/", plat_root());
+  return a->kind == KIND_PAYLOAD && !strncmp(a->path, d, strlen(d));
+}
+/* copie d'un autre gestionnaire remplacee par celle de Launcher5 (meme nom) : masquee */
+static int pay_shadowed(const App *a) {
+  if (a->kind != KIND_PAYLOAD || pay_ours(a)) return 0;
+  for (int i = 0; i < S.menu.napps; i++) {
+    const App *o = &S.menu.apps[i];
+    if (o != a && pay_ours(o) && !strcasecmp(o->title, a->title)) return 1;
+  }
+  return 0;
+}
+
 static void build_entries(void) {
+  if (search_q[0] && S.sec != SEC_SYS) {         /* resultats de la recherche, toutes sections confondues */
+    S.nentries = 0;
+    for (int i = 0; i < S.menu.napps; i++) {
+      App *a = &S.menu.apps[i];
+      if (!S.show_hidden && menu_is_hidden(&S.menu, a->id)) continue;
+      if (pay_shadowed(a) || !search_match(a, search_q)) continue;
+      Entry e = { 0, -1, a, NULL };
+      push_entry(e);
+    }
+    qsort(S.entries, S.nentries, sizeof(Entry), cmp_name);
+    return;
+  }
   S.nentries = 0;
   if (S.sec == SEC_HOME) {
     Node *n = current_node();
@@ -484,6 +634,8 @@ static void build_entries(void) {
     } else if (S.sec == SEC_FAV) {
       if (!menu_is_fav(&S.menu, a->id)) continue;
     } else if (!sec_match(S.sec, a)) continue;
+    if (filter_now && S.sec != SEC_SYS && !app_tag(a, filter_now)) continue;
+    if (pay_shadowed(a)) continue;
     Entry e = { 0, -1, a, NULL };
     push_entry(e);
   }
@@ -522,6 +674,7 @@ static long long file_sig(const char *path) {
   return (long long)st.st_mtime * 1000003LL + (long long)st.st_size;
 }
 
+static const char *active_line(void);
 static void toast(const char *msg) {
   snprintf(S.toast, sizeof S.toast, "%s", msg);
   S.toast_until = SDL_GetTicks() + 3000;
@@ -1010,6 +1163,35 @@ static int case_img(App *a) {                    /* numero de l'image du boitier
 
 static void box_title(App *a, int w, int h);
 
+/* Jaquette de payload : fond a la couleur de sa categorie, grand symbole (ou l'icone
+   de Payload Manager, a ses proportions), version dessous. */
+static void payload_style(const App *a, uint32_t *col, const char **glyph);
+static void payload_art(App *a, SDL_Texture *ic, int iw, int ih, int top) {
+  uint32_t c;
+  const char *g;
+  payload_style(a, &c, &g);
+  for (int y = top; y < ih; y += 4)
+    fill_round(0, y, iw, 4, 0, mix_color(shade(c, 0.55f), shade(c, 0.16f), (float)(y - top) / (ih - top)), 255);
+  int cx = iw / 2, cy = top + (ih - top) * 40 / 100, r = iw * 30 / 100;
+  if (ic) {                                      /* icone du gestionnaire : proportions gardees */
+    int tw, th;
+    SDL_QueryTexture(ic, NULL, NULL, &tw, &th);
+    int dw = iw * 84 / 100, dh = th * dw / (tw ? tw : 1);
+    if (dh > (ih - top) * 55 / 100) { dh = (ih - top) * 55 / 100; dw = tw * dh / (th ? th : 1); }
+    fill_round(cx - dw / 2 - 6, cy - dh / 2 - 6, dw + 12, dh + 12, 10, 0x000000, 90);
+    SDL_Rect d = { cx - dw / 2, cy - dh / 2, dw, dh };
+    SDL_RenderCopy(S.r, ic, NULL, &d);
+    r = dh / 2;
+  } else {
+    fill_round(cx - r, cy - r, r * 2, r * 2, r, c, 80);
+    outline_round(cx - r, cy - r, r * 2, r * 2, r, iw >= 200 ? 4 : 2, mix_color(c, 0xffffff, 0.45f), 220);
+    TTF_Font *f = iw >= 200 ? S.f84 : S.f48;
+    draw_text(f, g, cx, cy - TTF_FontHeight(f) / 2, 0xffffff, 1, 0);
+  }
+  if (a->ver[0] && iw >= 140)
+    draw_text(iw >= 200 ? S.f26 : S.f22, a->ver, cx, cy + r + (iw >= 200 ? 18 : 8), mix_color(c, 0xffffff, 0.65f), 1, iw - 16);
+}
+
 static void draw_box_contents(App *a, int w, int h) {
   /* le boitier, au style choisi dans le theme ; rouge pour les homebrews (reconnus d'un coup d'oeil) */
   int hb = a->kind == KIND_HOMEBREW, cs = S.base->case_style;
@@ -1027,6 +1209,9 @@ static void draw_box_contents(App *a, int w, int h) {
       else { sr.h = tw * in.h / in.w; sr.y = (th - sr.h) / 2; }
       SDL_RenderCopy(S.r, art, &sr, NULL);
       if (!kind && in.w >= 260) box_title(a, in.w, in.h);
+    } else if (a->kind == KIND_PAYLOAD) {
+      payload_art(a, cover(a), in.w, in.h, 0);
+      if (in.w >= 260) box_title(a, in.w, in.h);
     } else {
       uint32_t c = a->has_vibe ? a->vibe : hash_color(a->id);
       fill_round(0, 0, in.w, in.h, 0, shade(c, 0.28f), 255);
@@ -1085,7 +1270,11 @@ static void draw_box_contents(App *a, int w, int h) {
     SDL_Rect sr = { 0, (th - sh) / 2, tw, sh }, dr = { 0, bh, iw, ah };
     SDL_RenderCopy(S.r, art, &sr, &dr);
   } else if (art) SDL_RenderCopy(S.r, art, NULL, NULL);
-  else {                                         /* provisoire : meme mise en page avec l'icone */
+  else if (a->kind == KIND_PAYLOAD) {            /* payload : jaquette generee */
+    payload_art(a, cover(a), iw, ih, bh);
+    SDL_Rect bot = { 0, ih * 70 / 100, iw, ih - ih * 70 / 100 };
+    if (S.shade_bottom) SDL_RenderCopy(S.r, S.shade_bottom, NULL, &bot);
+  } else {                                       /* provisoire : meme mise en page avec l'icone */
     uint32_t c = a->has_vibe ? a->vibe : hash_color(a->id);
     fill_round(0, 0, iw, ih, 0, shade(c, 0.28f), 255);
     SDL_Texture *ic = cover(a);
@@ -1266,6 +1455,7 @@ static SDL_Texture *wallpaper(void) {
 
 /* Mode leger (sans carte graphique) : le fond complet est calcule une seule
    fois dans une texture, puis simplement recopie a chaque image. */
+static int bg_w = W;                            /* largeur du fond dessine (plus large en cache : parallaxe) */
 static void draw_background(Entry *e) {
   if (!S.lite) { draw_background_full(e, 1); return; }
   /* l'illustration du jeu ne compte que si le theme l'affiche */
@@ -1276,18 +1466,27 @@ static void draw_background(Entry *e) {
   int stable = SDL_GetTicks() - since > 150 || !S.bgcache;
   if (stable && (S.bg_key_app != key_app || S.bg_key_ver != S.th_ver || S.bg_key_acc != (S.th->accent ^ S.th->accent2 << 1) ||
                  (key_app && !key_app->bgtex && !key_app->bg_failed) || !S.bgcache)) {
-    if (!S.bgcache) S.bgcache = SDL_CreateTexture(S.r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, W, H);
+    if (!S.bgcache) S.bgcache = SDL_CreateTexture(S.r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, W + 2 * PAR, H);
     S.bg_key_app = key_app;
     S.bg_key_ver = S.th_ver;
     S.bg_key_acc = S.th->accent ^ S.th->accent2 << 1;
     SDL_SetRenderTarget(S.r, S.bgcache);
     S.bg_cur = S.bg_prev = NULL;
     S.bg_fade = 1;
+    bg_w = W + 2 * PAR;
     draw_background_full(key_app ? e : NULL, 0);
+    bg_w = W;
     SDL_SetRenderTarget(S.r, NULL);
     SDL_SetTextureBlendMode(S.bgcache, SDL_BLENDMODE_NONE);
   }
-  SDL_RenderCopy(S.r, S.bgcache, NULL, NULL);
+  {                                              /* parallaxe : de gauche a droite le long de la liste */
+    float t = S.sec == SEC_SYS || S.nentries < 2 ? 0.5f : (float)*cur_sel() / (S.nentries - 1);
+    float want = (t * 2 - 1) * PAR * 0.85f;
+    par_x += (want - par_x) * ease(0.06f);
+    if (fabsf(want - par_x) < 0.5f) par_x = want;
+    SDL_Rect sr = { PAR + (int)par_x, 0, W, H };
+    SDL_RenderCopy(S.r, S.bgcache, &sr, NULL);
+  }
   draw_particles(1);   /* un peu de vie par-dessus */
 }
 
@@ -1300,7 +1499,7 @@ static void draw_background_full(Entry *e, int animated) {
     int g = (int)(((t >> 8) & 255) * (1 - k) + ((b >> 8) & 255) * k);
     int bl = (int)((t & 255) * (1 - k) + (b & 255) * k);
     SDL_SetRenderDrawColor(S.r, r, g, bl, 255);
-    SDL_Rect rr = { 0, y, W, 6 };
+    SDL_Rect rr = { 0, y, bg_w, 6 };
     SDL_RenderFillRect(S.r, &rr);
   }
 
@@ -1321,7 +1520,7 @@ static void draw_background_full(Entry *e, int animated) {
   SDL_Texture *want = (e && !e->is_folder && art) ? blurred(e->app) : NULL;
   if (want != S.bg_cur) { S.bg_prev = S.bg_cur; S.bg_cur = want; S.bg_fade = animated ? 0 : 1; }
   S.bg_fade += (1 - S.bg_fade) * ease(0.12f);
-  SDL_Rect full = { -40, -40, W + 80, H + 80 };
+  SDL_Rect full = { -40, -40, bg_w + 80, H + 80 };
   if (S.bg_prev && animated && art) { SDL_SetTextureAlphaMod(S.bg_prev, (Uint8)(art * (1 - S.bg_fade))); SDL_RenderCopy(S.r, S.bg_prev, NULL, &full); }
   if (S.bg_cur) { SDL_SetTextureAlphaMod(S.bg_cur, (Uint8)(art * S.bg_fade)); SDL_RenderCopy(S.r, S.bg_cur, NULL, &full); }
 
@@ -1335,9 +1534,9 @@ static void draw_background_full(Entry *e, int animated) {
   /* assombrissement pour la lisibilite (plus leger sur une image perso) */
   SDL_SetTextureAlphaMod(S.shade_left, wall ? 200 : 255);
   SDL_SetTextureAlphaMod(S.shade_bottom, wall ? 220 : 255);
-  SDL_Rect left = { 0, 0, W * 3 / 4, H };
+  SDL_Rect left = { 0, 0, W * 3 / 4 + (bg_w - W) / 2, H };
   SDL_RenderCopy(S.r, S.shade_left, NULL, &left);
-  SDL_Rect bottom = { 0, H / 2, W, H / 2 };
+  SDL_Rect bottom = { 0, H / 2, bg_w, H / 2 };
   SDL_RenderCopy(S.r, S.shade_bottom, NULL, &bottom);
 
   if (S.th->fx == FX_GRID) {                     /* soleil retro pose sur l'horizon */
@@ -1526,6 +1725,9 @@ static void draw_topbar(void) {
     S.sys_t = SDL_GetTicks();
   }
   if (S.sysline[0]) draw_text_a(S.f22, S.sysline, W - CAR_X, 114, 0x9aa4b5, 2, 0, 170);
+  const char *act = active_line();               /* payloads actifs, sous l'IP */
+  int toasting = S.toast[0] && SDL_GetTicks() < S.toast_until;   /* un message passe devant */
+  if (act[0] && !toasting) draw_text_a(S.f22, act, W - CAR_X, S.sysline[0] ? 140 : 114, 0x2ecc71, 2, 0, 200);
 }
 
 static void playtime_str(long secs, char *out, size_t n) {
@@ -1548,6 +1750,231 @@ static void pill(int x, int y, const char *txt, uint32_t bg, uint32_t fg, int fi
   draw_text(f, txt, x + 28, y + 13, fg, 0, 0);
 }
 
+static int pay_active(const App *a);
+static int boot_index(const App *a);
+/* byepervisor, HyperHEN… : demandent le mode repos. Visibles (mises a jour par le catalogue),
+   mais jamais envoyes ni mis au demarrage. */
+static int pay_incompatible(const App *a) {
+  if (!a || a->kind != KIND_PAYLOAD) return 0;
+  const char *b = strrchr(a->path, '/');
+  return payload_excluded(a->title) || payload_excluded(b ? b + 1 : a->path);
+}
+static int payload_sensitive(const App *a);
+static const char *pay_label(const App *a);
+/* --- Reprendre / Nouveau : le dernier jeu lance et les jeux tout juste installes --- */
+static App *resume_app(void) {                   /* dernier jeu lance depuis moins de 14 jours */
+  static Uint32 at = (Uint32)-1;
+  static App *cached;
+  if (at == S.frame) return cached;
+  at = S.frame;
+  App *best = NULL;
+  time_t bt = 0, now = time(NULL);
+  for (int i = 0; i < S.menu.nstats; i++) {
+    Stat *st = &S.menu.stats[i];
+    if (st->last <= bt || now - st->last > 14 * 86400) continue;
+    App *a = menu_find_app(&S.menu, st->id);
+    if (!a || a->kind == KIND_SYSTEM || a->kind == KIND_PAYLOAD || menu_is_hidden(&S.menu, a->id)) continue;
+    best = a;
+    bt = st->last;
+  }
+  return cached = best;
+}
+
+static int app_is_new(App *a) {                  /* installe il y a moins de 7 jours, jamais lance */
+  if (!a || a->kind == KIND_SYSTEM || a->kind == KIND_PAYLOAD) return 0;
+  Stat *st = menu_stat(&S.menu, a->id, 0);
+  if (st && st->launches) return 0;
+  return app_tag(a, FIL_NEW);
+}
+
+/* texte de la pastille (« ▶ REPRENDRE », « NOUVEAU ») ou NULL */
+static const char *fresh_tag(Entry *e, char *buf, size_t n) {
+  if (!e || e->is_folder) return NULL;
+  if (e->app->kind == KIND_PAYLOAD) {
+    if (pay_incompatible(e->app)) { snprintf(buf, n, "⊘ %s", tr("INCOMPATIBLE")); return buf; }
+    if (pay_active(e->app)) { snprintf(buf, n, "● %s %s", pay_label(e->app), tr("ACTIF")); return buf; }
+    int k = boot_index(e->app);
+    if (k >= 0) { snprintf(buf, n, tr("AU DÉMARRAGE %d"), k + 1); return buf; }
+    if (payload_sensitive(e->app)) { snprintf(buf, n, "⚠ %s", tr("NOYAU")); return buf; }   /* a lancer au demarrage */
+    return NULL;
+  }
+  if (e->app == resume_app()) { snprintf(buf, n, "▶ %s", tr("REPRENDRE")); return buf; }
+  if (app_is_new(e->app)) { snprintf(buf, n, "%s", tr("NOUVEAU")); return buf; }
+  return NULL;
+}
+
+static int fresh_pill_w(const char *t) { return t ? text_w(S.f22, t) + 30 : 0; }
+
+static void fresh_pill(const char *t, int x, int y, int h, int a) {
+  if (!t) return;
+  int w = fresh_pill_w(t), on = !strncmp(t, "●", 3), off = !strncmp(t, "⊘", 3);   /* actif : vert, incompatible : rouge */
+  fill_round(x, y, w, h, h / 2, on ? 0x2ecc71 : off ? 0xd63a3a : 0xffffff, (int)(0.92f * a));
+  draw_text_a(S.f22, t, x + 15, y + (h - 26) / 2, off ? 0xffffff : 0x0a0a12, 0, 0, a);
+}
+
+/* ------------------------------------------------------------------ */
+/* Payloads connus : categorie, description, et port ouvert quand ils   */
+/* tournent (statut « ACTIF » verifie en arriere-plan)                  */
+/* ------------------------------------------------------------------ */
+/* probe : 1 seulement si une connexion de test est sans effet sur le payload (FTP, web) ;
+   les autres (shell, journal, debogueur) ne sont jamais contactes. */
+typedef struct { const char *key, *cat, *desc; int port, probe; } PayInfo;
+/* nom du service verifie (la pastille dit « FTP ACTIF » : un serveur FTP tourne, quel qu'il soit) */
+static const char *pay_service(const char *key) { return !strcmp(key, "ftp") ? "FTP" : !strcmp(key, "websrv") ? "WEB" : ""; }
+static const PayInfo PAYINFO[] = {
+  { "ftp", "Réseau", "Serveur FTP : les fichiers de la console depuis ton PC", 2121, 1 },
+  { "klog", "Debug", "Journal du noyau en direct sur le réseau", 3232, 0 },
+  { "shsrv", "Outils", "Terminal à distance (telnet)", 2323, 0 },
+  { "websrv", "Outils", "Serveur web : homebrews dans le navigateur", 8080, 1 },
+  { "gdbsrv", "Debug", "Débogage à distance avec GDB", 2159, 0 },
+  { "kstuff", "Jailbreak", "Fonctions avancées du noyau (fself, fpkg)", 0, 0 },
+  { "etahen", "Jailbreak", "Menu homebrew et outils de la scène", 0, 0 },
+  { "byepervisor", "Jailbreak", "Désactive l'hyperviseur (firmwares compatibles)", 0, 0 },
+  { "elfldr", "Outils", "Chargeur ELF : reçoit les payloads sur le port 9021", 0, 0 },
+  { "launcher5", "Outils", "Launcher5 lui-même", 0, 0 },
+};
+#define NPAYINFO (int)(sizeof PAYINFO / sizeof PAYINFO[0])
+
+static const PayInfo *pay_info(const App *a) {
+  if (!a || a->kind != KIND_PAYLOAD) return NULL;
+  const char *b = strrchr(a->path, '/');
+  b = b ? b + 1 : a->path[0] ? a->path : a->id;
+  char low[NAME_LEN];
+  size_t k = 0;
+  for (; b[k] && k + 1 < sizeof low; k++) low[k] = (char)tolower((unsigned char)b[k]);
+  low[k] = 0;
+  for (int i = 0; i < NPAYINFO; i++) if (strstr(low, PAYINFO[i].key)) return &PAYINFO[i];
+  return NULL;
+}
+
+/* couleur et symbole d'un payload selon sa categorie (fiche du gestionnaire, sinon table) */
+static void payload_style(const App *a, uint32_t *col, const char **glyph) {
+  const PayInfo *pi = pay_info(a);
+  char c[64];
+  snprintf(c, sizeof c, "%s", a->cat[0] ? a->cat : pi ? pi->cat : "");
+  for (char *p = c; *p; p++) *p = (char)tolower((unsigned char)*p);
+  if (strstr(c, "jailbreak") || strstr(c, "system")) { *col = 0xd63a3a; *glyph = "⚡"; }
+  else if (strstr(c, "network") || strstr(c, "server") || strstr(c, "réseau")) { *col = 0x2f8fe0; *glyph = "⇅"; }
+  else if (strstr(c, "debug")) { *col = 0x9b59b6; *glyph = "◎"; }
+  else if (strstr(c, "loader")) { *col = 0xe67e22; *glyph = "⇪"; }
+  else if (c[0]) { *col = 0x16a085; *glyph = "⚙"; }
+  else { *col = 0x5b6b82; *glyph = "⚙"; }
+}
+
+/* un service ecoute-t-il sur ce port de la console ? (connexion locale, 200 ms max) */
+static int port_open(int port) {
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return 0;
+  fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+  struct sockaddr_in sa;
+  memset(&sa, 0, sizeof sa);
+  sa.sin_family = AF_INET;
+  sa.sin_port = htons((uint16_t)port);
+  sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  int ok = 0;
+  if (!connect(fd, (struct sockaddr *)&sa, sizeof sa)) ok = 1;
+  else if (errno == EINPROGRESS) {
+    fd_set w;
+    FD_ZERO(&w);
+    FD_SET(fd, &w);
+    struct timeval tv = { 0, 200000 };
+    if (select(fd + 1, NULL, &w, NULL, &tv) > 0) {
+      int err = 0;
+      socklen_t l = sizeof err;
+      ok = !getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &l) && !err;
+    }
+  }
+  close(fd);
+  return ok;
+}
+
+static volatile int pay_up[NPAYINFO];            /* 1 : le port du payload repond */
+static volatile Uint32 pay_want;                 /* derniere fois que l'ecran en avait besoin */
+static int pay_thread_on;
+
+static int pay_probe_thread(void *u) {           /* toutes les 2,5 s, seulement quand on regarde */
+  (void)u;
+  for (;;) {
+    if (SDL_GetTicks() - pay_want < 6000)
+      for (int i = 0; i < NPAYINFO; i++) if (PAYINFO[i].probe) pay_up[i] = port_open(PAYINFO[i].port);
+    SDL_Delay(2500);
+  }
+  return 0;
+}
+
+/* Payloads actifs, affiches sous l'IP : noms des processus (kstuff, ShadowMount, FTP…) et
+   port de l'interface web de Kraken (8097), verifies toutes les 4 s en arriere-plan. */
+static char act_buf[2][120];
+static SDL_atomic_t act_idx;
+
+static int active_thread(void *u) {
+  (void)u;
+  static char procs[24576];
+  static const struct { const char *prefix, *label; } KNOWN[] = {
+    { "kstuff", "kstuff" }, { "etahen", "etaHEN" }, { "shadowmount", "ShadowMount" },
+    { "ftpsrv", "FTP" }, { "zftpd", "FTP" }, { "websrv", "Web" },
+  };
+  for (;;) {
+    int on[8] = { 0 }, kraken;
+    if (!plat_procs(procs, sizeof procs))
+      for (char *l = procs; *l;) {
+        char *e = strchr(l, '\n');
+        if (e) *e = 0;
+        char low[24];
+        size_t k = 0;
+        for (; l[k] && k + 1 < sizeof low; k++) low[k] = (char)tolower((unsigned char)l[k]);
+        low[k] = 0;
+        for (size_t i = 0; i < sizeof KNOWN / sizeof KNOWN[0]; i++)
+          if (!strncmp(low, KNOWN[i].prefix, strlen(KNOWN[i].prefix))) on[i] = 1;
+        if (!e) break;
+        l = e + 1;
+      }
+    kraken = port_open(8097);
+    /* ordre : kstuff, etaHEN, ShadowMount, Kraken, FTP, Web */
+    const char *show[8];
+    int ns = 0;
+    for (int i = 0; i < 3; i++) if (on[i]) show[ns++] = KNOWN[i].label;
+    if (kraken) show[ns++] = "Kraken";
+    if (on[3] || on[4]) show[ns++] = "FTP";
+    if (on[5]) show[ns++] = "Web";
+    char line[120] = "";
+    for (int i = 0; i < ns; i++) {
+      if (i) strcat(line, "  ·  ");
+      strcat(line, show[i]);
+    }
+    int w = !SDL_AtomicGet(&act_idx);
+    if (line[0]) snprintf(act_buf[w], sizeof act_buf[w], "●  %s", line);
+    else act_buf[w][0] = 0;
+    SDL_AtomicSet(&act_idx, w);
+    SDL_Delay(4000);
+  }
+  return 0;
+}
+
+static const char *active_line(void) {
+  static int started;
+  if (!started) {
+    started = 1;
+    SDL_Thread *t = SDL_CreateThread(active_thread, "l5active", NULL);
+    if (t) SDL_DetachThread(t);
+  }
+  return act_buf[SDL_AtomicGet(&act_idx)];
+}
+
+static const char *pay_label(const App *a) { const PayInfo *pi = pay_info(a); return pi ? pay_service(pi->key) : ""; }
+
+static int pay_active(const App *a) {
+  const PayInfo *pi = pay_info(a);
+  if (!pi || !pi->probe) return 0;
+  pay_want = SDL_GetTicks();
+  if (!pay_thread_on) {
+    pay_thread_on = 1;
+    SDL_Thread *t = SDL_CreateThread(pay_probe_thread, "l5ports", NULL);
+    if (t) SDL_DetachThread(t);
+  }
+  return pay_up[pi - PAYINFO];
+}
+
 /* ligne d'informations sous le titre */
 static void meta_line(Entry *e, char *meta, size_t n) {
   if (e->is_folder) {
@@ -1565,6 +1992,21 @@ static void meta_line(Entry *e, char *meta, size_t n) {
     snprintf(meta, n, "Réglage");
     for (size_t i = 0; i < sizeof DESC / sizeof DESC[0]; i++)
       if (!strcmp(DESC[i][0], e->app->id)) snprintf(meta, n, "%s", DESC[i][1]);
+  } else if (e->app->kind == KIND_PAYLOAD) {
+    const PayInfo *pi = pay_info(e->app);
+    Stat *st = menu_stat(&S.menu, e->app->id, 0);
+    char when[48] = "";
+    if (st && st->last) { char w[40]; ago(st->last, w, sizeof w); snprintf(when, sizeof when, tr("  ·  envoyé %s"), w); }
+    const char *cat = e->app->cat[0] ? e->app->cat : pi ? tr(pi->cat) : tr("Payload ELF");
+    const char *desc = e->app->desc[0] ? e->app->desc : pi ? tr(pi->desc) : "";
+    char ver[32] = "";
+    if (e->app->ver[0]) snprintf(ver, sizeof ver, "%s  ·  ", e->app->ver);
+    if (pay_incompatible(e->app))
+      snprintf(meta, n, "⊘ %s", tr("Incompatible avec Launcher5 : demande le mode repos"));
+    else if (payload_sensitive(e->app) && boot_index(e->app) < 0)    /* avertissement permanent */
+      snprintf(meta, n, "⚠ %s", tr("Payload noyau : à lancer au démarrage (△ › Envoyer au démarrage)"));
+    else if (desc[0]) snprintf(meta, n, "%s%s  ·  %s%s", ver, cat, desc, when);
+    else snprintf(meta, n, "%s%s%s", ver, cat, when[0] ? when : tr("  ·  jamais envoyé"));
   } else {
     Stat *st = menu_stat(&S.menu, e->app->id, 0);
     if (st && st->playtime > 0) {
@@ -1589,7 +2031,7 @@ static void draw_hero(Entry *e) {
   if (!e) {
     const char *msg = S.sec == SEC_HOME && S.depth ? "Ce dossier est vide" : "Rien à afficher ici";
     draw_text_a(S.f84, msg, x, y + 60, 0xffffff, 0, 1300, a);
-    draw_text_a(S.f30, S.sec == SEC_HOME ? "Range des jeux dedans avec △ › Ranger dans un dossier." : "Lance des jeux pour remplir cette section.",
+    draw_text_a(S.f30, search_q[0] ? "Aucun résultat  ·  ○ pour effacer la recherche" : S.sec == SEC_HOME ? "Range des jeux dedans avec △ › Ranger dans un dossier." : "Lance des jeux pour remplir cette section.",
                 x, y + 180, 0x9aa4b5, 0, 0, a);
     return;
   }
@@ -1600,6 +2042,9 @@ static void draw_hero(Entry *e) {
   int kw = text_w(S.f22, kind);
   fill_round(x, y, kw + 30, 38, 19, kc, (int)(0.9f * a));
   draw_text_a(S.f22, kind, x + 15, y + 6, 0x0a0a12, 0, 0, a);
+  char fb[48];
+  const char *ft = fresh_tag(e, fb, sizeof fb);
+  if (ft) { fresh_pill(ft, x + kw + 42, y, 38, a); kw += fresh_pill_w(ft) + 12; }
   if (S.sec == SEC_HOME && S.depth) {
     char path[300] = "";
     Node *n = &S.menu.root;
@@ -1940,6 +2385,40 @@ static int cmp_flow(const void *a, const void *b) {
   return x < y ? 1 : x > y ? -1 : 0;
 }
 
+/* --- Petits effets : apparition en cascade, ombre, zoom doux, bordure animee --- */
+static float casc(int i) {                       /* progression (0..1) du i-eme element apres un changement de jeu */
+  float p = ((float)(SDL_GetTicks() - S.sel_since) - i * 70.0f) / 230.0f;
+  if (p <= 0) return 0;
+  if (p >= 1) return 1;
+  return 1 - (1 - p) * (1 - p);
+}
+
+static void drop_shadow(int cx, int base, int w, int h, int alpha) {   /* ombre douce au pied du boitier */
+  if (!S.glow || alpha <= 0) return;
+  SDL_SetTextureColorMod(S.glow, 0, 0, 0);
+  SDL_SetTextureBlendMode(S.glow, SDL_BLENDMODE_BLEND);
+  SDL_SetTextureAlphaMod(S.glow, (Uint8)(alpha > 255 ? 255 : alpha));
+  SDL_Rect d = { cx - w * 5 / 8, base - h / 12, w * 5 / 4, h / 6 };
+  SDL_RenderCopy(S.r, S.glow, NULL, &d);
+  SDL_SetTextureBlendMode(S.glow, SDL_BLENDMODE_ADD);
+  SDL_SetTextureColorMod(S.glow, 255, 255, 255);
+  SDL_SetTextureAlphaMod(S.glow, 255);
+}
+
+/* point lumineux qui fait le tour du boitier choisi, avec une petite trainee */
+static void border_run(int x, int y, int w, int h, uint32_t c) {
+  float per = 2.0f * (w + h), p = fmodf(SDL_GetTicks() * 0.45f, per);
+  for (int k = 0; k < 14; k++) {
+    float q = fmodf(p - k * 7 + per, per), px, py;
+    if (q < w) { px = x + q; py = y; }
+    else if (q < w + h) { px = x + w; py = y + (q - w); }
+    else if (q < 2 * w + h) { px = x + w - (q - w - h); py = y + h; }
+    else { px = x; py = y + h - (q - 2 * w - h); }
+    int a = (int)(230 * (1 - k / 14.0f)), r = k < 3 ? 5 : 4;
+    fill_round((int)px - r, (int)py - r, r * 2, r * 2, r, k < 2 ? 0xffffff : c, a);
+  }
+}
+
 static void draw_flow(void) {
   int sel = *cur_sel();
   S.scroll += ((float)sel - S.scroll) * ease(0.18f);
@@ -1992,6 +2471,17 @@ static void draw_flow(void) {
     SDL_Texture *tex = e->is_folder ? folder_tex(e->node) : tile_tex(e->app, FLOW, TH(FLOW));
     uint32_t ver = e->is_folder ? folder_key(e->node) : 0;
     float cy = FLOW_CY + (moving ? 8 * sinf(S.frame * 0.25f) : 0);
+    drop_shadow((int)cx, (int)(cy + (hl > hr ? hl : hr) / 2), (int)w, (int)hsz, (int)((center ? 120 : 80) * alpha / 255));
+    /* zoom doux : le boitier choisi grossit un instant quand il se pose, puis revient */
+    static int pop_key = -1;
+    static Uint32 pop_t;
+    float zoom = 1;
+    if (center && a < 0.001f) {
+      int pk = S.sec * 100000 + S.depth * 10000 + i;
+      if (pk != pop_key) { pop_key = pk; pop_t = SDL_GetTicks(); }
+      float zt = (SDL_GetTicks() - pop_t) / 320.0f;
+      if (zt < 1) zoom = 1 + 0.045f * sinf(zt * 3.14159f);
+    }
     SDL_Texture *cached = NULL;
     if (tex && a >= 0.999f) {                     /* sur le cote : texture deja deformee */
       cached = warp_tex(tex, ver, rel < 0 ? WARP_LEFT : WARP_RIGHT, e->is_folder ? NULL : e->app);
@@ -2003,10 +2493,11 @@ static void draw_flow(void) {
         SDL_RenderCopy(S.r, cached, NULL, &d);
       }
     } else if (tex && a < 0.001f) {               /* au centre, immobile : image droite + reflet en cache */
-      SDL_Rect d = { (int)(cx - FLOW / 2.0f), (int)(cy - TH(FLOW) / 2.0f), FLOW, TH(FLOW) };
+      int zw = (int)(FLOW * zoom), zh = (int)(TH(FLOW) * zoom);
+      SDL_Rect d = { (int)(cx - zw / 2.0f), (int)(cy - zh / 2.0f), zw, zh };
       SDL_RenderCopy(S.r, tex, NULL, &d);
       cached = warp_tex(tex, ver, WARP_REFL, NULL);
-      if (cached) { SDL_Rect r = { d.x, d.y + TH(FLOW), FLOW, REFL_H }; SDL_RenderCopy(S.r, cached, NULL, &r); }
+      if (cached) { SDL_Rect r = { d.x, d.y + zh, zw, (int)(REFL_H * zoom) }; SDL_RenderCopy(S.r, cached, NULL, &r); }
     }
     if (cached) {}
     else if (tex && S.lite) {
@@ -2023,7 +2514,7 @@ static void draw_flow(void) {
     else if (e->is_folder) draw_folder_tile(e->node, (int)(cx - w / 2), (int)(cy - hsz / 2), (int)w, (int)hsz);
 
     if (center && a < 0.05f) {
-      int x = (int)(cx - size / 2), y = (int)(cy - hsz / 2), sz = (int)size, szh = (int)hsz, rad = tile_rad() * sz / TILE_SEL;
+      int sz = (int)(size * zoom), szh = (int)(hsz * zoom), x = (int)(cx - sz / 2.0f), y = (int)(cy - szh / 2.0f), rad = tile_rad() * sz / TILE_SEL;
       if (!e->is_folder && menu_is_hidden(&S.menu, e->app->id)) {
         fill_round(x, y, sz, szh, rad, 0x000000, 160);
         draw_text(S.f26, "masqué", x + sz / 2, y + szh / 2 - 16, 0xcccccc, 1, 0);
@@ -2036,6 +2527,7 @@ static void draw_flow(void) {
       }
       if (!e->is_folder && menu_is_fav(&S.menu, e->app->id)) fav_badge(x, y, sz);
       outline_round(x, y, sz, szh, rad, 4, moving ? 0xffc53d : 0xffffff, 255);
+      if (!moving) border_run(x, y, sz, szh, S.th->accent);
     }
   }
 }
@@ -2047,20 +2539,29 @@ static void draw_flow_info(Entry *e) {
   int maxw = S.mode == MODE_THEME ? 980 : 1500;
   if (!e) {
     draw_text_a(S.f48, S.sec == SEC_HOME && S.depth ? "Ce dossier est vide" : "Rien à afficher ici", cx, FLOW_CY - 40, 0xffffff, 1, maxw, a);
-    draw_text_a(S.f26, S.sec == SEC_HOME ? "Range des jeux dedans avec △ › Ranger dans un dossier." : "Lance des jeux pour remplir cette section.",
+    draw_text_a(S.f26, search_q[0] ? "Aucun résultat  ·  ○ pour effacer la recherche" : S.sec == SEC_HOME ? "Range des jeux dedans avec △ › Ranger dans un dossier." : "Lance des jeux pour remplir cette section.",
                 cx, FLOW_CY + 40, 0x9aa4b5, 1, maxw, a);
     return;
   }
   const char *kind = e->is_folder ? "DOSSIER" : KIND_LABEL[e->app->kind];
   uint32_t kc = e->is_folder ? e->node->color : S.th->accent;
   int kw = text_w(S.f22, kind);
-  fill_round(cx - (kw + 30) / 2, y, kw + 30, 36, 18, kc, (int)(0.9f * a));
-  draw_text_a(S.f22, kind, cx, y + 5, 0x0a0a12, 1, 0, a);
+  char fb[48];
+  const char *ft = fresh_tag(e, fb, sizeof fb);
+  int fw = ft ? fresh_pill_w(ft) + 12 : 0, kx = cx - (kw + 30 + fw) / 2;
+  float c0 = casc(0), c1 = casc(1), c2 = casc(2);   /* apparition en cascade */
+  int a0 = (int)(255 * c0), a1 = (int)(255 * c1), a2 = (int)(255 * c2);
+  y = 790;
+  int y0 = y + (int)(14 * (1 - c0)), y1 = y + 46 + (int)(14 * (1 - c1)), y2 = y + 124 + (int)(14 * (1 - c2));
+  (void)a;
+  fill_round(kx, y0, kw + 30, 36, 18, kc, (int)(0.9f * a0));
+  draw_text_a(S.f22, kind, kx + 15, y0 + 5, 0x0a0a12, 0, 0, a0);
+  fresh_pill(ft, kx + kw + 42, y0, 36, a0);
   const char *title = e->is_folder ? e->node->name : menu_display_name(&S.menu, e->app);
-  draw_text_a(S.f48, title, cx, y + 46, 0xffffff, 1, maxw, a);
+  draw_text_a(S.f48, title, cx, y1, 0xffffff, 1, maxw, a1);
   char meta[200];
   meta_line(e, meta, sizeof meta);
-  draw_text_a(S.f26, meta, cx, y + 124, 0xc9d1dc, 1, maxw, a);
+  draw_text_a(S.f26, meta, cx, y2, 0xc9d1dc, 1, maxw, a2);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2138,7 +2639,8 @@ static void draw_footer(void) {
     snprintf(buf, sizeof buf, tr("%s      L1 R1  Sections      Pavé tactile  Vue : %s"),
              tr(S.sec == SEC_HOME ? (S.depth ? "✕  Ouvrir      ○  Retour      △  Options      □  Déplacer"
                                              : "✕  Ouvrir / Jouer      △  Options      □  Déplacer")
-                                  : "✕  Jouer      △  Options"),
+                                  : S.sec == SEC_PAYLOAD ? "✕  Envoyer      △  Options      □  Filtrer"
+                                  : "✕  Jouer      △  Options      □  Filtrer"),
              tr(VIEW_NAMES[S.menu.view]));
     hint = buf;
   }
@@ -2172,10 +2674,24 @@ static void music_fade(void);
 static void theme_editor_input(int in);
 static void draw_gx(Entry *e);
 static void draw_quick_info(void);
+static void draw_info(void);
+static void draw_help(void);
+static void open_help(int kind);
+static void draw_catalog(void);
+static void open_start_menu(void);
+static void first_run_autoload(void);
+static void start_mode_set(int m);
+static void open_catalog(void);
 static void theme_saved_as(const char *name);
 
 static void draw_list_panel(const char *title, int n, const char *(*label)(int), int sel, uint32_t (*swatch)(int)) {
-  int pw = 760, ph = 120 + n * 66, px = (W - pw) / 2, py = (H - ph) / 2;
+  int pw = 760, ph = 120 + n * 66;
+  for (int i = 0; i < n; i++) {                  /* plus large si un choix ne tient pas */
+    int need = text_w(S.f30, label(i)) + 130 + (swatch ? 54 : 0);
+    if (need > pw) pw = need;
+  }
+  if (pw > W - 160) pw = W - 160;
+  int px = (W - pw) / 2, py = (H - ph) / 2;
   if (ph > H - 140) { ph = H - 140; py = 70; }
   glass_panel(px, py, pw, ph);
   draw_text(S.f36, title, px + 44, py + 32, 0xffffff, 0, pw - 88);
@@ -2229,7 +2745,12 @@ static void utf8_at(const char *s, int idx, char *out) {
 static void draw_keyboard(void) {
   int pw = 1200, ph = 650, px = (W - pw) / 2, py = (H - ph) / 2 - 20;
   glass_panel(px, py, pw, ph);
-  draw_text(S.f36, S.kb_title, px + 44, py + 30, 0xffffff, 0, pw - 88);
+  if (S.kb_action == ACT_SEARCH && S.kb_buf[0]) {   /* resultats en direct pendant la frappe */
+    char t[120];
+    int n = search_count(S.kb_buf);
+    snprintf(t, sizeof t, tr(n > 1 ? "Rechercher  ·  %d résultats" : "Rechercher  ·  %d résultat"), n);
+    draw_text(S.f36, t, px + 44, py + 30, 0xffffff, 0, pw - 88);
+  } else draw_text(S.f36, S.kb_title, px + 44, py + 30, 0xffffff, 0, pw - 88);
   fill_round(px + 44, py + 88, pw - 88, 72, 16, 0x05070d, 255);
   outline_round(px + 44, py + 88, pw - 88, 72, 16, 2, S.th->accent, 120);
   char shown[NAME_LEN + 4];
@@ -2387,16 +2908,17 @@ static void saver_free(void) {
   sv_wall = -1;
 }
 
-/* image recadree au format de l'ecran et un peu plus grande, preparee une fois :
-   ensuite elle glisse sans etre redimensionnee (fluide sans carte graphique) */
-#define SV_W (W * 106 / 100)
-#define SV_H (H * 106 / 100)
+/* image recadree, plus large que l'ecran, preparee une fois : ensuite elle glisse
+   sans etre redimensionnee. Environ un pixel par image : un mouvement continu
+   (plus lent, elle avancerait par a-coups d'un pixel de temps en temps). */
+#define SV_W (W + 640)
+#define SV_H H
 static SDL_Texture *saver_prep(SDL_Texture *t) {
   int tw, th;
   SDL_QueryTexture(t, NULL, NULL, &tw, &th);
   SDL_Rect src = { 0, 0, tw, th };
-  if ((long)tw * H > (long)th * W) { src.w = th * W / H; src.x = (tw - src.w) / 2; }
-  else { src.h = tw * H / W; src.y = (th - src.h) / 2; }
+  if ((long)tw * SV_H > (long)th * SV_W) { src.w = (int)((long)th * SV_W / SV_H); src.x = (tw - src.w) / 2; }
+  else { src.h = (int)((long)tw * SV_H / SV_W); src.y = (th - src.h) / 2; }
   SDL_Texture *b = SDL_CreateTexture(S.r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, SV_W, SV_H);
   if (!b) return t;
   SDL_Texture *prev_rt = SDL_GetRenderTarget(S.r);
@@ -2437,7 +2959,8 @@ static void draw_saver(void) {
   for (int i = 1; i >= 0; i--) {
     SDL_Texture *t = SV[i];
     if (!t || (i && el >= FADE)) continue;
-    float pan = ((i ? 1.0f : 0.0f) + (float)el / SHOW) / 2;   /* 0..1 : glisse doucement d'un cote */
+    float pan = (float)(i ? SHOW + el : el) / (SHOW + FADE);   /* 0..1 sur toute sa duree d'affichage */
+    if (pan > 1) pan = 1;
     int side = ((sv_wall + i) & 1) ? 1 : -1;
     SDL_Rect d = { -(int)((SV_W - W) * (side > 0 ? pan : 1 - pan)), -(SV_H - H) / 2, SV_W, SV_H };
     int a = i ? 255 : el < FADE ? (int)(255 * el / FADE) : 255;
@@ -2621,7 +3144,10 @@ static void gx_toolbar(void) {
 }
 
 /* decor, barre d'icones et carrousel : une image complete, refaite seulement quand elle change */
+static SDL_Rect gx_sel;
+static int gx_sel_ok;
 static void gx_scene(int sel) {
+  gx_sel_ok = 0;
   if (gx_bg_tex) {
     SDL_SetTextureBlendMode(gx_bg_tex, SDL_BLENDMODE_NONE);
     SDL_RenderCopy(S.r, gx_bg_tex, NULL, NULL);
@@ -2632,7 +3158,9 @@ static void gx_scene(int sel) {
   gx_toolbar();
   gx_tri(46, 190, 104, 150, 104, 230, ac);       /* fleches bleues */
   gx_tri(W - 46, 190, W - 104, 150, W - 104, 230, ac);
-  float maxrel = S.lite ? 4.6f : 5.6f, R = 1350, cx0 = W / 2.0f, cy0 = 405;
+  int tdx, tdy;
+  tr_offset(&tdx, &tdy);
+  float maxrel = S.lite ? 4.6f : 5.6f, R = 1350, cx0 = W / 2.0f + tdx, cy0 = 405;
   FlowItem items[32]; int n = 0;
   for (int i = (int)S.scroll - 6; i <= (int)S.scroll + 7 && n < 32; i++) {
     if (i < 0 || i >= S.nentries) continue;
@@ -2665,6 +3193,8 @@ static void gx_scene(int sel) {
     }
     if (items[k].i == sel && a < 0.05f) {
       outline_round(d.x - 4, d.y - 4, w + 8, h + 8, 10, 4, ac, 255);
+      gx_sel = (SDL_Rect){ d.x - 4, d.y - 4, w + 8, h + 8 };   /* bordure animee : dessinee hors du cache */
+      gx_sel_ok = 1;
       if (!en->is_folder && menu_is_fav(&S.menu, en->app->id)) fav_badge(d.x, d.y, w);
     }
   }
@@ -2685,7 +3215,7 @@ static void draw_gx(Entry *e) {
   uint32_t key = (((((uint32_t)sel * 31 + S.sec) * 31 + S.depth) * 31 + S.nentries) * 31 + S.th_ver) * 31 + tiles_gen;
   key = key * 31 + (S.mode == MODE_MOVE) + 2u * (uint32_t)S.th_ver;
   int moving = S.th->fx != FX_NONE || S.th->particles != PART_NONE;   /* effet anime : pas d'image figee */
-  if (S.scroll == (float)sel && S.mode != MODE_MOVE && !moving) {   /* immobile : image en cache */
+  if (S.scroll == (float)sel && S.mode != MODE_MOVE && !moving && !tr_t) {   /* immobile : image en cache */
     if (!scene) scene = SDL_CreateTexture(S.r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, W, H);
     if (scene && key != scene_key) {
       SDL_Texture *prev = SDL_GetRenderTarget(S.r);
@@ -2697,11 +3227,19 @@ static void draw_gx(Entry *e) {
     if (scene) { SDL_SetTextureBlendMode(scene, SDL_BLENDMODE_NONE); SDL_RenderCopy(S.r, scene, NULL, NULL); }
     else gx_scene(sel);
   } else { gx_scene(sel); scene_key = 0; }
+  if (gx_sel_ok && S.mode != MODE_MOVE) border_run(gx_sel.x, gx_sel.y, gx_sel.w, gx_sel.h, ac);
 
   /* nom du jeu et horloge a afficheur */
   if (e) {
     const char *nm = e->is_folder ? e->node->name : menu_display_name(&S.menu, e->app);
     draw_text(S.f36, nm, W / 2, 688, shade(mix_color(ac, 0x3a4652, 0.55f), 1.0f), 1, 1300);
+    char fb[48];
+    const char *ft = fresh_tag(e, fb, sizeof fb);
+    if (ft) {
+      int fw = fresh_pill_w(ft);
+      fill_round(W / 2 - fw / 2, 644, fw, 34, 17, ac, 255);
+      draw_text(S.f22, ft, W / 2, 648, 0xffffff, 1, 0);
+    }
   }
   time_t now = time(NULL);
   struct tm *tm = localtime(&now);
@@ -2894,7 +3432,11 @@ static void draw_xmb(Entry *e) {
       if (!en->is_folder && menu_is_fav(&S.menu, en->app->id)) fav_badge(d.x, d.y, w);
       int cy = d.y + h / 2;
       draw_text_a(S.f48, nm, tx, cy - 50, 0xffffff, 0, W - tx - 120, alpha);
-      if (!en->is_folder) draw_text_a(S.f26, KIND_LABEL[en->app->kind], tx + 2, cy + 14, mix_color(ac2, 0xffffff, 0.3f), 0, 0, alpha);
+      if (!en->is_folder) {
+        int kw = draw_text_a(S.f26, KIND_LABEL[en->app->kind], tx + 2, cy + 14, mix_color(ac2, 0xffffff, 0.3f), 0, 0, alpha);
+        char fb[48];
+        fresh_pill(fresh_tag(en, fb, sizeof fb), tx + kw + 24, cy + 14, 34, alpha);
+      }
     } else {
       draw_text_a(S.f30, nm, tx, d.y + h / 2 - 20, 0xd8d8d8, 0, W - tx - 120, alpha);
     }
@@ -2920,7 +3462,7 @@ static void draw_xmb(Entry *e) {
   else snprintf(hint, sizeof hint, "%s      %s", tr("▲▼  Choisir      ◀ ▶  Sections"),
                 tr(S.sec == SEC_HOME ? (S.depth ? "✕  Ouvrir      ○  Retour      △  Options      □  Déplacer"
                                                 : "✕  Ouvrir / Jouer      △  Options      □  Déplacer")
-                                     : "✕  Jouer      △  Options"));
+                                     : "✕  Jouer      △  Options      □  Filtrer"));
   draw_text_a(S.f22, hint, 96, H - 62, 0xffffff, 0, 0, 150);
   if (S.nentries) {
     char pos[32];
@@ -2934,14 +3476,39 @@ static void draw(void) {
   refresh_settings();
   check_tile_shape();
   update_sections();
-  static int opened;                             /* a l'ouverture : premiere section dans l'ordre */
+  static int opened, want_resume;                /* a l'ouverture : premiere section dans l'ordre */
   if (!opened || !S.sec_has[S.sec]) {
+    if (!opened) want_resume = 1;
     opened = 1;
     int k = 0;
     while (k < SEC_COUNT - 1 && !S.sec_has[SEC_ORDER[k]]) k++;
     S.sec = SEC_ORDER[k];
+    if (want_resume) {                           /* ... ou celle du dernier jeu lance, pret a reprendre */
+      App *r = resume_app();
+      int s = !r ? -1 : r->kind == KIND_PS5 ? SEC_PS5 : r->kind == KIND_PS4 ? SEC_PS4
+            : r->kind == KIND_HOMEBREW ? SEC_HB : r->kind == KIND_MEDIA ? SEC_MEDIA : -1;
+      if (s >= 0 && S.sec_has[s]) S.sec = s; else want_resume = 0;
+    }
   }
   build_entries();
+  {                                              /* premiere visite des Payloads : l'aide s'ouvre une fois */
+    static int seen = -1;
+    char mk[PATH_LEN];
+    snprintf(mk, sizeof mk, "%s/cache/help_payloads_seen", plat_data_dir());
+    if (seen < 0) seen = !access(mk, F_OK);
+    if (!seen && S.sec == SEC_PAYLOAD && S.mode == MODE_BROWSE && !S.launching) {
+      seen = 1;
+      FILE *hf = fopen(mk, "w");
+      if (hf) { fputs("1\n", hf); fclose(hf); }
+      open_help(1);
+    }
+  }
+  if (want_resume) {
+    want_resume = 0;
+    App *r = resume_app();
+    for (int i = 0; i < S.nentries; i++)
+      if (!S.entries[i].is_folder && S.entries[i].app == r) { *cur_sel() = i; S.scroll = (float)i; break; }
+  }
   clamp_sel();
   Entry *e = selected();
   int key = (S.sec << 20) ^ (S.depth << 16) ^ *cur_sel();
@@ -2969,17 +3536,33 @@ static void draw(void) {
   draw_background(e);
   draw_fx();
   draw_topbar();
-  switch (S.menu.view) {
-  case VIEW_GRID: if (S.sec == SEC_SYS) draw_settings(); else draw_grid(); break;
-  case VIEW_CLASSIC: if (S.sec == SEC_SYS) draw_settings(); else { draw_hero(e); draw_carousel(); } break;
-  default: if (S.sec == SEC_SYS) draw_settings(); else { draw_flow(); draw_flow_info(e); } break;
+  {
+    int tdx, tdy;
+    if (tr_offset(&tdx, &tdy)) { SDL_Rect vp = { tdx, tdy, W, H }; SDL_RenderSetViewport(S.r, &vp); }
+    switch (S.menu.view) {
+    case VIEW_GRID: if (S.sec == SEC_SYS) draw_settings(); else draw_grid(); break;
+    case VIEW_CLASSIC: if (S.sec == SEC_SYS) draw_settings(); else { draw_hero(e); draw_carousel(); } break;
+    default: if (S.sec == SEC_SYS) draw_settings(); else { draw_flow(); draw_flow_info(e); } break;
+    }
+    SDL_RenderSetViewport(S.r, NULL);
   }
   draw_footer();
 overlays:
+  if (((filter_now && S.sec != SEC_HOME) || search_q[0]) && S.sec != SEC_SYS && S.mode != MODE_THEME) {
+    char fl[200];
+    if (search_q[0]) snprintf(fl, sizeof fl, tr("« %s »  ·  ○ effacer"), search_q);
+    else snprintf(fl, sizeof fl, "□  %s", tr(FILTER_NAMES[filter_now]));
+    int fw = text_w(S.f22, fl) + 34, fx = (GXMODE ? W - 60 : W - 96) - fw, fy = GXMODE ? 34 : H - 124;
+    fill_round(fx, fy, fw, 38, 19, S.th->accent, 235);
+    draw_text(S.f22, fl, fx + 17, fy + 6, 0x0a0a12, 0, 0);
+  }
   if (S.mode == MODE_CONTEXT) draw_list_panel(S.ctx_title, S.nchoices, choice_label, S.csel, NULL);
   if (S.mode == MODE_CONTEXT && S.quick) draw_quick_info();
   if (S.mode == MODE_PICKFOLDER) draw_list_panel("Ranger dans…", S.nfolders, folder_label, S.fsel, NULL);
   if (S.mode == MODE_COLOR) draw_list_panel("Couleur du dossier", NPALETTE, color_label, S.color_sel, color_swatch);
+  if (S.mode == MODE_INFO) draw_info();
+  if (S.mode == MODE_HELP) draw_help();
+  if (S.mode == MODE_CATALOG) draw_catalog();
   if (S.mode == MODE_THEME) draw_theme_editor();
   if (S.mode == MODE_KEYBOARD) draw_keyboard();
   draw_launching();
@@ -2998,6 +3581,409 @@ static void add_choice(const char *label, int action) {
   S.choices[S.nchoices++].action = action;
 }
 
+/* ------------------------------------------------------------------ */
+/* Payloads au demarrage (comme l'autoload de Payload Manager) : envoyes */
+/* dans l'ordre, une seule fois par allumage de la console. OnionHEN    */
+/* n'est pas renvoye s'il tourne deja (Launcher5 lance comme plugin).   */
+/* ------------------------------------------------------------------ */
+#define BOOT_MAX 16
+static char BOOTL[BOOT_MAX][NAME_LEN];           /* noms des payloads (pas des fichiers : mises a jour suivies) */
+static int nboot = -1;
+static volatile int boot_sent, boot_fail, boot_finished;
+typedef struct BootJob BootJob;
+static BootJob *boot_job;                 /* en attente (compte a rebours) */
+static Uint32 boot_at;
+static int boot_cancel;
+static int start_mode(void);
+
+static void boot_file(char *o, size_t n) { snprintf(o, n, "%s/autostart.json", plat_data_dir()); }
+
+/* fichier a envoyer pour ce nom : celui affiche dans la section (la copie de Launcher5
+   si le catalogue l'a installee ou mise a jour, sinon celle d'un autre gestionnaire) */
+static App *boot_resolve(const char *name) {
+  App *other = NULL;
+  for (int i = 0; i < S.menu.napps; i++) {
+    App *a = &S.menu.apps[i];
+    if (a->kind != KIND_PAYLOAD || strcasecmp(a->title, name)) continue;
+    if (pay_ours(a)) return a;
+    if (!other && !pay_shadowed(a)) other = a;
+  }
+  return other;
+}
+
+static void boot_load(void) {
+  nboot = 0;
+  char p[PATH_LEN];
+  boot_file(p, sizeof p);
+  json_t *j = json_load_file(p, 0, NULL);
+  size_t i; json_t *v;
+  json_t *names = json_object_get(j, "names");
+  if (json_is_array(names)) {
+    json_array_foreach(names, i, v) {
+      const char *nm = json_string_value(v);
+      if (nm && *nm && nboot < BOOT_MAX) snprintf(BOOTL[nboot++], NAME_LEN, "%s", nm);
+    }
+  } else {                                       /* ancienne liste (identifiants de fichiers) */
+    json_array_foreach(json_object_get(j, "payloads"), i, v) {
+      const char *id = json_string_value(v);
+      App *a = id ? menu_find_app(&S.menu, id) : NULL;
+      if (a && nboot < BOOT_MAX) snprintf(BOOTL[nboot++], NAME_LEN, "%s", a->title);
+    }
+  }
+  json_decref(j);
+}
+
+/* noms, et fichiers a envoyer au prochain demarrage (lus par le bootstrap) */
+static void boot_save(void) {
+  json_t *arr = json_array(), *paths = json_array();
+  for (int i = 0; i < nboot; i++) {
+    json_array_append_new(arr, json_string(BOOTL[i]));
+    App *a = boot_resolve(BOOTL[i]);
+    if (a && a->path[0]) json_array_append_new(paths, json_string(a->path));
+  }
+  json_t *j = json_pack("{s:o, s:o}", "names", arr, "paths", paths);
+  char p[PATH_LEN], t[PATH_LEN + 8];
+  boot_file(p, sizeof p);
+  snprintf(t, sizeof t, "%s.tmp", p);
+  if (j && !json_dump_file(j, t, JSON_INDENT(2))) rename(t, p);
+  json_decref(j);
+}
+
+static int boot_index(const App *a) {
+  if (nboot < 0) boot_load();
+  if (a->kind != KIND_PAYLOAD) return -1;
+  for (int i = 0; i < nboot; i++) if (!strcasecmp(BOOTL[i], a->title)) return i;
+  return -1;
+}
+
+/* fichiers recalcules (mise a jour d'un payload, par le catalogue ou un autre gestionnaire) */
+static void boot_refresh(void) {
+  if (nboot < 0) boot_load();
+  if (nboot > 0) boot_save();
+}
+
+static void boot_toggle(App *a) {
+  int k = boot_index(a);
+  char msg[160];
+  if (k >= 0) {
+    memmove(BOOTL[k], BOOTL[k + 1], (size_t)(nboot - k - 1) * NAME_LEN);
+    nboot--;
+    snprintf(msg, sizeof msg, tr("« %s » ne sera plus envoyé au démarrage"), menu_display_name(&S.menu, a));
+  } else {
+    if (pay_incompatible(a)) { sfx(SFX_ERROR); toast("Incompatible avec Launcher5 : demande le mode repos"); return; }
+    if (nboot >= BOOT_MAX) { toast("Liste de démarrage pleine"); return; }
+    snprintf(BOOTL[nboot++], NAME_LEN, "%s", a->title);
+    snprintf(msg, sizeof msg, tr("« %s » sera envoyé au démarrage (position %d)"), menu_display_name(&S.menu, a), nboot);
+  }
+  boot_save();
+  toast(msg);
+}
+
+
+static int onion_running(void) {                 /* /system_tmp est vide a chaque allumage */
+  char p[PATH_LEN];
+  struct stat st;
+  snprintf(p, sizeof p, "%s/system_tmp/onionhen", plat_root());
+  return !stat(p, &st);
+}
+
+struct BootJob { int n; App apps[BOOT_MAX]; };
+
+static int boot_thread(void *u) {
+  BootJob *j = u;
+  SDL_Delay(1500);                               /* le launcher finit de s'installer */
+  for (int i = 0; i < j->n; i++) {
+    char msg[200] = "";
+    if (!plat_launch(&S.menu, &j->apps[i], msg, sizeof msg)) boot_sent++; else boot_fail++;
+    plat_log("demarrage : %s -> %s", j->apps[i].path, msg[0] ? msg : "?");
+    SDL_Delay(2000);                             /* chaque payload a le temps de s'installer */
+  }
+  free(j);
+  boot_finished = 1;
+  return 0;
+}
+
+__attribute__((unused)) static void boot_run(void) {   /* remplace par l'envoi du bootstrap */
+  if (nboot < 0) boot_load();
+  if (!nboot) return;
+  char p[PATH_LEN];
+  /* la liste n'a de sens que si Launcher5 fait partie de la chaine de demarrage (le chargeur
+     ELF nomme pareil un lancement par l'autoloader et un envoi a la main : « payload.elf ») */
+  if (start_mode() == 0) { plat_log("demarrage : mode manuel, liste non envoyee"); return; }
+  /* une fois par allumage : marqueur dans /system_tmp, que la PS5 vide a chaque demarrage */
+  snprintf(p, sizeof p, "%s/system_tmp/launcher5_boot_list", plat_root());
+  if (!access(p, F_OK)) { plat_log("demarrage : payloads deja envoyes depuis l'allumage"); return; }
+  FILE *f = fopen(p, "w");
+  if (!f) { plat_log("demarrage : marqueur impossible dans /system_tmp, liste non envoyee"); return; }
+  fprintf(f, "done\n");
+  fclose(f);
+  BootJob *j = calloc(1, sizeof *j);
+  if (!j) return;
+  int onion = onion_running();
+  for (int i = 0; i < nboot; i++) {
+    App *a = menu_find_app(&S.menu, BOOTL[i]);
+    if (!a || a->kind != KIND_PAYLOAD) continue;
+    char low[NAME_LEN];
+    size_t k = 0;
+    for (const char *s = a->title; *s && k + 1 < sizeof low; s++) low[k++] = (char)tolower((unsigned char)*s);
+    low[k] = 0;
+    if (onion && strstr(low, "onion")) { plat_log("demarrage : OnionHEN tourne deja, pas renvoye"); continue; }
+    j->apps[j->n++] = *a;
+  }
+  if (!j->n) { free(j); return; }
+  plat_log("demarrage : %d payload(s) a envoyer", j->n);
+  boot_job = j;                                  /* envoi apres 5 s : ○ pour annuler */
+  boot_at = SDL_GetTicks() + 5000;
+}
+
+static void boot_poll(void) {
+  if (boot_job) {
+    Uint32 now = SDL_GetTicks();
+    if (boot_cancel) {
+      free(boot_job); boot_job = NULL;
+      plat_log("demarrage : envoi annule");
+      toast("Payloads au démarrage annulés");
+    } else if ((Sint32)(now - boot_at) >= 0) {
+      SDL_Thread *t = SDL_CreateThread(boot_thread, "l5boot", boot_job);
+      if (t) SDL_DetachThread(t); else free(boot_job);
+      boot_job = NULL;
+    } else {
+      static int shown = -1;
+      int left = (int)((boot_at - now + 999) / 1000);
+      if (left != shown) {
+        shown = left;
+        char msg[160];
+        snprintf(msg, sizeof msg, tr("Payloads au démarrage dans %d s  ·  ○ pour annuler"), left);
+        toast(msg);
+      }
+    }
+    return;
+  }
+  if (boot_finished != 1) return;
+  boot_finished = 2;
+  char msg[160];
+  if (boot_fail) snprintf(msg, sizeof msg, tr("Démarrage : %d payload(s) envoyé(s), %d en échec"), boot_sent, boot_fail);
+  else snprintf(msg, sizeof msg, tr("Démarrage : %d payload(s) envoyé(s)"), boot_sent);
+  toast(msg);
+}
+
+
+/* ------------------------------------------------------------------ */
+/* Aide : commandes de la manette (Parametres) et payloads (section)   */
+/* La manette est un schema simple dessine ici, pas une image.         */
+/* ------------------------------------------------------------------ */
+static int help_kind;                            /* 0 : manette, 1 : payloads */
+
+static void open_help(int kind) { help_kind = kind; S.mode = MODE_HELP; }
+
+static void pad_button(int cx, int cy, int r, const char *g, uint32_t c) {
+  fill_round(cx - r, cy - r, r * 2, r * 2, r, 0x1b2130, 255);
+  outline_round(cx - r, cy - r, r * 2, r * 2, r, 2, c, 230);
+  draw_text(S.f22, g, cx, cy - 14, c, 1, 0);
+}
+
+static void draw_pad(int x, int y) {            /* manette schematique : 560 x 330 */
+  uint32_t body = 0x262d3d, edge = 0x4a5468, ac = S.th->accent;
+  fill_round(x + 60, y + 40, 440, 200, 90, body, 255);       /* corps */
+  fill_round(x, y + 110, 190, 220, 95, body, 255);           /* poignees */
+  fill_round(x + 370, y + 110, 190, 220, 95, body, 255);
+  outline_round(x + 60, y + 40, 440, 200, 90, 2, edge, 255);
+  fill_round(x + 95, y, 120, 26, 12, body, 255);             /* L1 / R1 */
+  fill_round(x + 345, y, 120, 26, 12, body, 255);
+  draw_text(S.f22, "L1", x + 155, y + 1, 0xffffff, 1, 0);
+  draw_text(S.f22, "R1", x + 405, y + 1, 0xffffff, 1, 0);
+  draw_text(S.f22, "L2", x + 155, y - 34, 0x9aa4b5, 1, 0);
+  draw_text(S.f22, "R2", x + 405, y - 34, 0x9aa4b5, 1, 0);
+  fill_round(x + 205, y + 62, 150, 80, 14, 0x1b2130, 255);   /* pave tactile */
+  outline_round(x + 205, y + 62, 150, 80, 14, 2, edge, 255);
+  draw_text(S.f22, "TOUCH", x + 280, y + 88, 0x9aa4b5, 1, 0);
+  fill_round(x + 368, y + 62, 34, 14, 7, edge, 255);         /* OPTIONS */
+  draw_text(S.f22, "OPTIONS", x + 385, y + 36, 0x9aa4b5, 1, 0);
+  int dx = x + 140, dy = y + 130;                            /* croix */
+  fill_round(dx - 14, dy - 44, 28, 88, 6, 0x1b2130, 255);
+  fill_round(dx - 44, dy - 14, 88, 28, 6, 0x1b2130, 255);
+  int fx = x + 420, fy = y + 130;                            /* boutons d'action */
+  pad_button(fx, fy - 40, 22, "△", ac);
+  pad_button(fx - 40, fy, 22, "□", ac);
+  pad_button(fx + 40, fy, 22, "○", ac);
+  pad_button(fx, fy + 40, 22, "✕", ac);
+  pad_button(x + 210, y + 210, 30, "L3", 0x9aa4b5);          /* sticks */
+  pad_button(x + 350, y + 210, 30, "R3", 0x9aa4b5);
+  fill_round(x + 266, y + 156, 28, 28, 14, 0x1b2130, 255);   /* PS */
+  draw_text(S.f22, "PS", x + 280, y + 158, 0x9aa4b5, 1, 0);
+}
+
+static void draw_help(void) {
+  int px = 90, py = 60, pw = W - 180, ph = H - 120;
+  glass_panel(px, py, pw, ph);
+  draw_text(S.f22, "○  Fermer", px + 52, py + ph - 56, 0x9aa4b5, 0, 0);
+  if (help_kind == 1)
+    draw_text(S.f22, "Retrouve cette aide : △ sur un payload, ou OPTIONS", px + pw - 52, py + ph - 56, 0x9aa4b5, 2, 0);
+  if (help_kind == 0) {
+    static const char *const K[][2] = {
+      { "✕", "Jouer · envoyer · ouvrir" },
+      { "○", "Retour · effacer la recherche" },
+      { "△", "Options : infos, favoris, démarrage…" },
+      { "□", "Filtre (Mes dossiers : déplacer)" },
+      { "L1 / R1", "Changer de section" },
+      { "L2 / R2", "Saut par lettre" },
+      { "L3 / R3", "Rechercher" },
+      { "Pavé tactile", "Vue : Cover Flow, Grille, Carrousel" },
+      { "OPTIONS", "Menu rapide : reprendre, catalogue, relancer…" },
+      { "Croix", "Naviguer" },
+      { "PS", "Menu de la PS5" },
+    };
+    draw_text(S.f48, "Commandes de la manette", px + 50, py + 34, 0xffffff, 0, pw - 100);
+    draw_pad(px + 70, py + 220);
+    int lx = px + 720, ly = py + 140;
+    for (size_t i = 0; i < sizeof K / sizeof K[0]; i++) {
+      int y = ly + (int)i * 62;
+      fill_round(lx, y, 190, 46, 23, 0x1b2130, 255);
+      draw_text(S.f26, tr(K[i][0]), lx + 95, y + 8, S.th->accent, 1, 180);
+      draw_text(S.f26, tr(K[i][1]), lx + 214, y + 8, 0xffffff, 0, px + pw - lx - 260);
+    }
+    return;
+  }
+  static const char *const STEP[][2] = {
+    { "Ajouter des payloads", "OPTIONS › Catalogue de payloads, ou copie tes .elf dans /data/payloads (FTP, Forge5). Une image du même nom devient son icône." },
+    { "Les lancer à chaque allumage", "Déjà en place : kstuff-lite et ShadowMountPlus. Pour en ajouter : △ sur un payload › Envoyer au démarrage." },
+    { "Démarrer avec le jailbreak", "Paramètres › Démarrage de Launcher5 › Autoloader ou Plugin OnionHEN. Envoi une fois par allumage, avant le launcher." },
+    { "Payloads noyau  ⚠", "kstuff, etaHEN… : seulement au démarrage. Les envoyer depuis le launcher fait planter la console." },
+    { "Les autres payloads", "✕ pour les envoyer quand tu veux (FTP, outils…). « ● ACTIF » quand le service tourne." },
+    { "Mises à jour", "Le catalogue affiche « Mise à jour ». La liste de démarrage suit la nouvelle version toute seule." },
+    { "Incompatibles", "Byepervisor, HyperHEN… : demandent le mode repos, incompatibles avec Launcher5." },
+  };
+  draw_text(S.f48, "Payloads et démarrage", px + 50, py + 34, 0xffffff, 0, pw - 100);
+  for (size_t i = 0; i < sizeof STEP / sizeof STEP[0]; i++) {
+    int step = (ph - 230) / (int)(sizeof STEP / sizeof STEP[0]);   /* tout tient au-dessus du bas */
+    if (step > 118) step = 118;
+    int y = py + 130 + (int)i * step, x = px + 60;
+    char n[8];
+    snprintf(n, sizeof n, "%d", (int)i + 1);
+    fill_round(x, y, 56, 56, 28, S.th->accent, 255);
+    draw_text(S.f30, n, x + 28, y + 10, 0x0a0a12, 1, 0);
+    draw_text(S.f30, tr(STEP[i][0]), x + 84, y + 2, 0xffffff, 0, pw - 200);
+    draw_text(S.f22, tr(STEP[i][1]), x + 84, y + 46, 0xc9d1dc, 0, pw - 200);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Fiche du jeu (△ › Infos) : temps de jeu, sessions, taille, tags      */
+/* ------------------------------------------------------------------ */
+static App *info_app;
+static SDL_atomic_t info_gen;                    /* fiche en cours (le calcul de taille s'y rapporte) */
+static volatile long long info_bytes;
+static volatile int info_bytes_gen = -1;
+typedef struct { char path[PATH_LEN]; int gen; } SizeJob;
+
+static long long dir_size(const char *p, int depth) {
+  struct stat sb;
+  if (lstat(p, &sb)) return 0;
+  if (!S_ISDIR(sb.st_mode)) return (long long)sb.st_size;
+  if (depth > 12) return 0;
+  DIR *d = opendir(p);
+  if (!d) return 0;
+  long long t = 0;
+  struct dirent *de;
+  char sub[PATH_LEN];
+  while ((de = readdir(d))) {
+    if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+    snprintf(sub, sizeof sub, "%s/%s", p, de->d_name);
+    t += dir_size(sub, depth + 1);
+  }
+  closedir(d);
+  return t;
+}
+
+static int size_thread(void *u) {                /* taille calculee a part : l'ecran reste fluide */
+  SizeJob *j = u;
+  long long b = dir_size(j->path, 0);
+  if (SDL_AtomicGet(&info_gen) == j->gen) { info_bytes = b; info_bytes_gen = j->gen; }
+  free(j);
+  return 0;
+}
+
+static void open_info(App *a) {
+  info_app = a;
+  int g = SDL_AtomicAdd(&info_gen, 1) + 1;
+  info_bytes_gen = -1;
+  char dir[PATH_LEN];
+  app_dir(a, dir, sizeof dir);
+  if (dir[0]) {
+    SizeJob *j = malloc(sizeof *j);
+    if (j) {
+      snprintf(j->path, sizeof j->path, "%s", dir);
+      j->gen = g;
+      SDL_Thread *t = SDL_CreateThread(size_thread, "l5size", j);
+      if (t) SDL_DetachThread(t); else free(j);
+    }
+  } else info_bytes_gen = g, info_bytes = 0;
+  S.mode = MODE_INFO;
+}
+
+static void draw_info(void) {
+  App *a = info_app;
+  if (!a) return;
+  int pw = 1300, ph = 760, px = (W - pw) / 2, py = (H - ph) / 2;
+  glass_panel(px, py, pw, ph);
+  int cw = 340, ch = TH(cw), cx = px + 60, cy = py + 70;
+  if (ch > ph - 140) { ch = ph - 140; cw = BOXES ? ch * 2 / 3 : ch; }
+  SDL_Texture *t = tile_tex(a, FLOW, TH(FLOW));
+  if (t) { SDL_Rect d = { cx, cy, cw, ch }; SDL_RenderCopy(S.r, t, NULL, &d); }
+  int tx = cx + cw + 60, tw = px + pw - 60 - tx, y = py + 60;
+  draw_text(S.f48, menu_display_name(&S.menu, a), tx, y, 0xffffff, 0, tw);
+  y += 84;
+  const char *kind = KIND_LABEL[a->kind];
+  int kw = text_w(S.f22, kind);
+  fill_round(tx, y, kw + 30, 36, 18, S.th->accent, 230);
+  draw_text(S.f22, kind, tx + 15, y + 5, 0x0a0a12, 0, 0);
+  char fb[48];
+  fresh_pill(fresh_tag(&(Entry){ 0, -1, a, NULL }, fb, sizeof fb), tx + kw + 42, y, 36, 255);
+  y += 66;
+
+  Stat *st = menu_stat(&S.menu, a->id, 0);
+  char v[7][96];
+  const PayInfo *pi = pay_info(a);
+  int pay = a->kind == KIND_PAYLOAD;
+  if (pay) snprintf(v[0], 96, "%s", a->cat[0] ? a->cat : pi ? tr(pi->cat) : tr("Payload ELF"));
+  else if (st && st->playtime > 0) playtime_str(st->playtime, v[0], 96); else snprintf(v[0], 96, "—");
+  if (st && st->last) ago(st->last, v[1], 96); else snprintf(v[1], 96, "%s", tr("Jamais"));
+  snprintf(v[2], 96, "%d", st ? st->launches : 0);
+  if (info_bytes_gen != SDL_AtomicGet(&info_gen)) snprintf(v[3], 96, "%s", tr("Calcul…"));
+  else if (info_bytes <= 0) snprintf(v[3], 96, "—");
+  else if (info_bytes >= 1024LL * 1024 * 1024) snprintf(v[3], 96, tr("%.1f Go"), info_bytes / (1024.0 * 1024 * 1024));
+  else snprintf(v[3], 96, tr("%.0f Mo"), info_bytes / (1024.0 * 1024) < 1 ? 1.0 : info_bytes / (1024.0 * 1024));
+  time_t it = app_installed(a);
+  if (it) ago(it, v[4], 96); else snprintf(v[4], 96, "—");
+  v[5][0] = 0;
+  for (int f = FIL_NEW; f < FIL_COUNT; f++)
+    if (app_tag(a, f)) {
+      if (v[5][0]) strncat(v[5], "  ·  ", 95 - strlen(v[5]));
+      strncat(v[5], tr(FILTER_NAMES[f]), 95 - strlen(v[5]));
+    }
+  if (!v[5][0]) snprintf(v[5], 96, "—");
+  snprintf(v[6], 96, "%s", a->id);
+  if (pay) {
+    const char *desc = a->desc[0] ? a->desc : pi ? tr(pi->desc) : "—";
+    if (pi && pi->probe) snprintf(v[5], 96, tr("%s  ·  port %d  ·  %s"), desc, pi->port, tr(pay_active(a) ? "actif" : "inactif"));
+    else if (pi && pi->port) snprintf(v[5], 96, tr("%s  ·  port %d"), desc, pi->port);
+    else snprintf(v[5], 96, "%s", desc);
+    snprintf(v[4], 96, "%s", a->ver[0] ? a->ver : "—");
+    snprintf(v[6], 96, "%s", a->path);
+  }
+  static const char *const KEYS_G[7] = { "Temps de jeu", "Dernière session", "Lancements", "Taille", "Installé", "Tags", "Identifiant" };
+  static const char *const KEYS_P[7] = { "Catégorie", "Dernier envoi", "Envois", "Taille", "Version", "Description", "Fichier" };
+  const char *const *KEYS = pay ? KEYS_P : KEYS_G;
+  for (int i = 0; i < 7; i++) {
+    int col = i % 2, row = i / 2, x = tx + col * (tw / 2), yy = y + row * 84;
+    if (i == 5) { x = tx; yy = y + 3 * 84; }   /* tags : toute la largeur */
+    if (i == 6) { x = tx; yy = y + 4 * 84; }
+    draw_text(S.f22, KEYS[i], x, yy, 0x9aa4b5, 0, tw / 2 - 20);
+    draw_text(S.f30, v[i], x, yy + 30, i == 6 ? 0x9aa4b5 : 0xffffff, 0, i >= 5 ? tw : tw / 2 - 20);
+  }
+  draw_text(S.f22, a->kind == KIND_PAYLOAD ? "✕  Envoyer      ○  Fermer" : "✕  Jouer      ○  Fermer", tx, py + ph - 64, 0x9aa4b5, 0, 0);
+}
+
 static void open_context(void) {
   Entry *e = selected();
   S.nchoices = 0; S.csel = 0;
@@ -3013,6 +3999,7 @@ static void open_context(void) {
   } else if (e) {
     snprintf(S.ctx_title, sizeof S.ctx_title, "%s", menu_display_name(&S.menu, e->app));
     add_choice(e->app->kind == KIND_PAYLOAD ? "Envoyer" : "Jouer", ACT_LAUNCH);
+    if (e->app->kind != KIND_SYSTEM) add_choice("Infos", ACT_INFO);
     if (S.sec == SEC_HOME) {
       add_choice("Ranger dans un dossier…", ACT_TO_FOLDER);
       add_choice("Déplacer", ACT_MOVE);
@@ -3024,12 +4011,19 @@ static void open_context(void) {
       int fav = menu_is_fav(&S.menu, e->app->id);
       add_choice(fav ? "★ Retirer des favoris" : "★ Ajouter aux favoris", fav ? ACT_UNFAV : ACT_FAV);
     }
+    if (e->app->kind == KIND_PAYLOAD) {
+      if (boot_index(e->app) >= 0 || !pay_incompatible(e->app))
+        add_choice(boot_index(e->app) >= 0 ? "Ne plus envoyer au démarrage" : "Envoyer au démarrage", ACT_BOOT);
+      add_choice("Aide : payloads et démarrage", ACT_HELP_PAY);
+    }
     int hid = menu_is_hidden(&S.menu, e->app->id);
     add_choice(hid ? "Ne plus masquer" : "Masquer", hid ? ACT_SHOW : ACT_HIDE);
   } else {
     snprintf(S.ctx_title, sizeof S.ctx_title, "Options");
   }
   if (S.sec == SEC_HOME) add_choice("+ Nouveau dossier ici", ACT_NEW_FOLDER);
+  add_choice("Rechercher…", ACT_SEARCH);
+  if (S.sec == SEC_PAYLOAD) add_choice("Catalogue de payloads…", ACT_CATALOG);
   {
     char v[64];
     snprintf(v, sizeof v, tr("Affichage : %s  ›  %s"), tr(VIEW_NAMES[S.menu.view]), tr(VIEW_NAMES[(S.menu.view + 1) % VIEW_COUNT]));
@@ -3105,6 +4099,7 @@ static void set_title(const char *id, const char *title) {
 }
 
 static void set_view(int v) {
+  transition(0, 60);                             /* nouvelle vue : arrive par le bas */
   S.menu.view = ((v % VIEW_COUNT) + VIEW_COUNT) % VIEW_COUNT;
   S.scroll = (float)*cur_sel();
   S.grid_top = *cur_sel() / GRID_COLS; S.grid_scroll = (float)S.grid_top;
@@ -3147,8 +4142,34 @@ static int launcher_setting(App *a) {
   return 1;
 }
 
+/* Payload qui touche au noyau ou au systeme (kstuff, HEN, hyperviseur, heure) : un second
+   envoi alors qu'il est deja actif, ou un firmware non pris en charge, peut planter la
+   console. On demande une confirmation (✕ une seconde fois). */
+static int payload_sensitive(const App *a) {
+  if (a->kind != KIND_PAYLOAD) return 0;
+  char t[NAME_LEN + 48];
+  snprintf(t, sizeof t, "%s %s", a->title, a->cat);
+  for (char *p = t; *p; p++) *p = (char)tolower((unsigned char)*p);
+  static const char *const KEYS[] = { "kstuff", "hen", "byepervisor", "hyper", "jailbreak", "system &", "date-time", "linux" };
+  for (size_t i = 0; i < sizeof KEYS / sizeof KEYS[0]; i++) if (strstr(t, KEYS[i])) return 1;
+  return 0;
+}
+
+static App *kernel_pending;                       /* payload noyau en attente d'ajout au demarrage */
+
 static void launch(App *a) {
   if (launcher_setting(a)) return;
+  if (pay_incompatible(a)) { sfx(SFX_ERROR); toast("Incompatible avec Launcher5 : demande le mode repos"); return; }
+  if (payload_sensitive(a)) {                    /* payload noyau : jamais depuis l'interface (plantage) */
+    sfx(SFX_ERROR);
+    if (boot_index(a) >= 0) { toast("Déjà au démarrage : il partira au prochain allumage de la console"); return; }
+    kernel_pending = a;
+    S.nchoices = 0; S.csel = 0; S.quick = 0;
+    snprintf(S.ctx_title, sizeof S.ctx_title, "⚠ %s", tr("Payload noyau : seulement au démarrage"));
+    add_choice("Ajouter au démarrage", ACT_K_BOOT);
+    S.mode = MODE_CONTEXT;
+    return;
+  }
   char msg[200] = "";
   int rc = plat_launch(&S.menu, a, msg, sizeof msg);
   if (rc == 2) { S.running = 0; return; }        /* quitter vers l'accueil PS5 */
@@ -3294,6 +4315,14 @@ static void draw_launching(void) {
 static void open_quick(void) {
   S.nchoices = 0; S.csel = 0; S.quick = 1;
   snprintf(S.ctx_title, sizeof S.ctx_title, "%s", tr("Menu rapide"));
+  App *r = resume_app();
+  if (r) {
+    char lbl[96];
+    snprintf(lbl, sizeof lbl, "▶  %s : %s", tr("Reprendre"), menu_display_name(&S.menu, r));
+    add_choice(lbl, ACT_Q_RESUME);
+  }
+  add_choice("Catalogue de payloads", ACT_Q_CATALOG);
+  add_choice("Aide : payloads et démarrage", ACT_HELP_PAY);
   add_choice("Relancer le launcher", ACT_Q_RESTART);
   add_choice("Vider le cache des jaquettes", ACT_Q_CACHE);
   add_choice("Quitter vers l'accueil PS5", ACT_Q_QUIT);
@@ -3370,6 +4399,9 @@ static void quick_action(int act) {
     if (plat_send_elf(path)) toast("Chargeur ELF introuvable : envoie /data/launcher5/launcher5.elf");
     break;
   case ACT_Q_CACHE: quick_clear_cache(); break;
+  case ACT_Q_RESUME: { App *a = resume_app(); if (a) launch(a); break; }
+  case ACT_Q_CATALOG: open_catalog(); break;
+  case ACT_HELP_PAY: open_help(1); break;
   case ACT_Q_QUIT: { App *a = menu_find_app(&S.menu, "sys:home"); if (a) launch(a); break; }   /* comme dans les Parametres */
   }
 }
@@ -3435,6 +4467,15 @@ static void do_action(int act) {
   case ACT_TOGGLE_HIDDEN: S.show_hidden = !S.show_hidden; break;
   case ACT_THEME: open_theme_editor(); break;
   case ACT_VIEW: set_view(S.menu.view + 1); break;
+  case ACT_INFO: if (e && !e->is_folder) open_info(e->app); break;
+  case ACT_SEARCH: open_keyboard("Rechercher", search_q, ACT_SEARCH); break;
+  case ACT_CATALOG: open_catalog(); break;
+  case ACT_BOOT: if (e && !e->is_folder) boot_toggle(e->app); break;
+  case ACT_START_MANUAL: case ACT_START_PLUGIN: case ACT_START_AUTOLOAD: start_mode_set(act - ACT_START_MANUAL); break;
+  case ACT_FIRST_YES: start_mode_set(2 /* autoloader */); break;
+  case ACT_HELP_PAY: open_help(1); break;
+  case ACT_K_BOOT: if (kernel_pending && boot_index(kernel_pending) < 0) boot_toggle(kernel_pending); break;
+  case ACT_FIRST_NO: toast("Tu pourras l'activer dans Paramètres › Démarrage de Launcher5"); break;
   case ACT_FAV: case ACT_UNFAV:
     if (e && !e->is_folder) {
       menu_set_fav(&S.menu, e->app->id, act == ACT_FAV);
@@ -3453,6 +4494,18 @@ static void keyboard_done(int ok) {
   while (*s == ' ') s++;
   size_t l = strlen(s);
   while (l && s[l - 1] == ' ') s[--l] = 0;
+  if (S.kb_action == ACT_SEARCH) {               /* recherche validee (vide : effacee) */
+    snprintf(search_q, sizeof search_q, "%s", s);
+    *cur_sel() = 0;
+    S.scroll = 0;
+    if (*s) {
+      char msg[120];
+      int n = search_count(s);
+      snprintf(msg, sizeof msg, tr(n > 1 ? "%d résultats  ·  ○ pour effacer" : "%d résultat  ·  ○ pour effacer"), n);
+      toast(msg);
+    }
+    return;
+  }
   if (!*s) { toast("Nom vide : rien n'a été changé"); return; }
   Entry *e = selected();
   static int next = 0;
@@ -3490,7 +4543,7 @@ static void kb_backspace(void) {
 /* Entrees                                                             */
 /* ------------------------------------------------------------------ */
 enum { IN_UP, IN_DOWN, IN_LEFT, IN_RIGHT, IN_OK, IN_BACK, IN_MENU, IN_MOVE, IN_L1, IN_R1, IN_START, IN_VIEW, IN_L2, IN_R2,
-       IN_COUNT };
+       IN_SEARCH, IN_COUNT };
 
 /* ------------------------------------------------------------------ */
 /* Themes : application, editeur a la manette, musique d'ambiance       */
@@ -4409,6 +5462,8 @@ static void jump_letter(int dir) {
 }
 
 static void change_section(int dir) {
+  search_q[0] = 0;                               /* nouvelle section : fin de la recherche */
+  transition(dir * 90, 0);
   int k = sec_pos(S.sec);
   for (int i = 0; i < SEC_COUNT; i++) {
     k = (k + dir + SEC_COUNT) % SEC_COUNT;
@@ -4576,6 +5631,500 @@ static void up_start(int download) {
   if (th) SDL_DetachThread(th); else { UP.busy = 0; up_set(UP_ERROR, "Pas de fil disponible"); }
 }
 
+
+/* ------------------------------------------------------------------ */
+/* Catalogue de payloads : liste publique ps5-payloads-mirror (la meme  */
+/* que Payload Manager). Chaque fichier est verifie par son empreinte   */
+/* SHA-256 avant d'etre installe dans /data/payloads ; rien n'est       */
+/* envoye tout seul, l'envoi reste un choix (✕ dans la section).        */
+/* ------------------------------------------------------------------ */
+#define PCAT_URL "https://itsplk.github.io/ps5-payloads-mirror/payloads_v2.json"
+typedef struct { char name[64], file[96], url[400], sha[72], ver[24], cat[48], desc[160]; SDL_Texture *tex; int tried; } PCat;
+static struct {
+  PCat *it, *next; int n, next_n;
+  SDL_atomic_t ready, job_ready;                 /* resultats du fil, traites par l'ecran */
+  volatile int state;                            /* 0 rien, 1 chargement, 2 pret, 3 erreur */
+  volatile int job;                              /* 1 : telechargement en cours */
+  int job_ok, job_idx, offline, sel, top;
+  Uint32 loaded_at;
+  char err[120], job_msg[160], job_file[96];
+} PCT;
+
+static void pcat_file_name(const char *name, char *out, size_t n) {   /* nom de fichier sur : <nom>.elf */
+  size_t k = 0;
+  for (const char *p = name; *p && k + 5 < n; p++)
+    out[k++] = (isalnum((unsigned char)*p) || *p == '-' || *p == '_' || *p == '.') ? *p : '_';
+  if (!k) out[k++] = 'p';
+  snprintf(out + k, n - k, ".elf");
+}
+
+static int pcat_parse(json_t *j, PCat **out) {
+  *out = NULL;
+  int n = 0;
+  size_t i; json_t *v;
+  json_array_foreach(json_object_get(j, "payloads"), i, v) {
+    const char *nm = json_string_value(json_object_get(v, "name"));
+    const char *url = json_string_value(json_object_get(v, "url"));
+    const char *sha = json_string_value(json_object_get(v, "checksum"));
+    if (!nm || !*nm || !url || strncmp(url, "https://", 8) || !sha || strlen(sha) != 64) continue;
+    if (payload_hidden(nm)) continue;            /* inutile dans un launcher */
+    int hex = 1;
+    for (const char *p = sha; *p; p++) if (!isxdigit((unsigned char)*p)) hex = 0;
+    if (!hex) continue;
+    PCat *r = realloc(*out, sizeof **out * (n + 1));
+    if (!r) break;
+    *out = r;
+    PCat *c = &r[n++];
+    memset(c, 0, sizeof *c);
+    snprintf(c->name, sizeof c->name, "%s", nm);
+    pcat_file_name(nm, c->file, sizeof c->file);
+    snprintf(c->url, sizeof c->url, "%s", url);
+    for (int k = 0; k < 64; k++) c->sha[k] = (char)tolower((unsigned char)sha[k]);
+    const char *s;
+    if ((s = json_string_value(json_object_get(v, "version")))) snprintf(c->ver, sizeof c->ver, "%s", s);
+    if ((s = json_string_value(json_object_get(v, "category")))) snprintf(c->cat, sizeof c->cat, "%s", s);
+    if ((s = json_string_value(json_object_get(v, "description")))) snprintf(c->desc, sizeof c->desc, "%s", s);
+  }
+  return n;
+}
+
+static void pcat_save(const char *name, const unsigned char *d, size_t n) {
+  char p[PATH_LEN], t[PATH_LEN + 8];
+  snprintf(p, sizeof p, "%s/cache/%s", plat_data_dir(), name);
+  snprintf(t, sizeof t, "%s.tmp", p);
+  FILE *f = fopen(t, "wb");
+  size_t w = f ? fwrite(d, 1, n, f) : 0;
+  if (f) fclose(f);
+  if (w != n || rename(t, p)) remove(t);
+}
+
+static int pcat_fetch_thread(void *u) {
+  (void)u;
+  unsigned char *d; size_t n;
+  PCat *it = NULL;
+  int cnt = 0, offline = 0;
+  long code = plat_https_get(PCAT_URL, &d, &n, 2 << 20);
+  if (code == 200) {
+    json_t *j = json_loadb((const char *)d, n, 0, NULL);
+    cnt = pcat_parse(j, &it);
+    if (cnt) {
+      pcat_save("payloads_index.json", d, n);
+      const char *iu = json_string_value(json_object_get(j, "icons_url"));
+      char iurl[400] = "";
+      if (iu && !strncmp(iu, "https://", 8)) snprintf(iurl, sizeof iurl, "%s", iu);
+      else if (iu && *iu && *iu != '/' && !strstr(iu, "..") && !strchr(iu, ':')) {   /* relative a la liste */
+        const char *sl = strrchr(PCAT_URL, '/');
+        snprintf(iurl, sizeof iurl, "%.*s/%s", (int)(sl - PCAT_URL), PCAT_URL, iu);
+      }
+      unsigned char *id; size_t in;
+      if (iurl[0] && plat_https_get(iurl, &id, &in, 8 << 20) == 200) {
+        json_t *ij = json_loadb((const char *)id, in, 0, NULL);
+        if (json_is_object(json_object_get(ij, "icons"))) pcat_save("payloads_icons.json", id, in);
+        json_decref(ij);
+        free(id);
+      }
+    }
+    json_decref(j);
+    free(d);
+  }
+  if (!cnt) {                                    /* pas de reseau : derniere liste connue */
+    char p[PATH_LEN];
+    snprintf(p, sizeof p, "%s/cache/payloads_index.json", plat_data_dir());
+    json_t *j = json_load_file(p, 0, NULL);
+    cnt = pcat_parse(j, &it);
+    json_decref(j);
+    offline = cnt > 0;
+  }
+  PCT.next = it; PCT.next_n = cnt; PCT.offline = offline;
+  if (!cnt) snprintf(PCT.err, sizeof PCT.err, "%s", code ? "La liste des payloads est illisible" : "Pas d'accès à Internet");
+  SDL_AtomicSet(&PCT.ready, 1);
+  return 0;
+}
+
+static void pcat_fetch(void) {
+  if (PCT.state == 1) return;
+  PCT.state = 1;
+  SDL_Thread *t = SDL_CreateThread(pcat_fetch_thread, "l5catalog", NULL);
+  if (t) SDL_DetachThread(t); else { PCT.state = 3; snprintf(PCT.err, sizeof PCT.err, "Pas de fil disponible"); }
+}
+
+/* telecharge un payload dans /data/payloads, empreinte SHA-256 verifiee (0 : installe) */
+static int pcat_download(const PCat *c, const char *source, char *msg, size_t mn) {
+  unsigned char *d; size_t n;
+  int ok = 0;
+  long code = plat_https_get(c->url, &d, &n, 64 << 20);
+  if (code != 200) snprintf(msg, mn, "%s", code ? "Téléchargement refusé" : "Téléchargement interrompu");
+  else {
+    char hex[65];
+    sha256_hex(d, n, hex);
+    if (strcmp(hex, c->sha) || n < 4 || memcmp(d, "\x7f" "ELF", 4)) {
+      snprintf(msg, mn, "%s", "Empreinte incorrecte : fichier refusé");
+      plat_log("catalogue : empreinte incorrecte pour %s, fichier refuse", c->name);
+    } else {
+      char dir[PATH_LEN], dst[PATH_LEN + 100], tmp[PATH_LEN + 110], side[PATH_LEN + 110];
+      snprintf(dir, sizeof dir, "%s/data/payloads", plat_root());
+      mkdir(dir, 0755);
+      snprintf(dst, sizeof dst, "%s/%s", dir, c->file);
+      snprintf(tmp, sizeof tmp, "%s.tmp", dst);
+      snprintf(side, sizeof side, "%s.json", dst);
+      FILE *f = fopen(tmp, "wb");
+      size_t w = f ? fwrite(d, 1, n, f) : 0;
+      if (f) fclose(f);
+      if (w == n && !rename(tmp, dst)) {
+        json_t *m = json_pack("{s:s, s:s, s:s, s:s, s:s, s:s, s:s}", "name", c->name, "id", c->name, "filename", c->file,
+                              "version", c->ver, "category", c->cat, "description", c->desc, "source", source);
+        if (m) { json_dump_file(m, side, JSON_INDENT(2)); json_decref(m); }
+        ok = 1;
+        plat_log("catalogue : %s %s installe (%zu octets, empreinte verifiee)", c->name, c->ver, n);
+      } else {
+        remove(tmp);
+        snprintf(msg, mn, "%s", "Écriture impossible dans /data/payloads");
+      }
+    }
+    free(d);
+  }
+  return ok ? 0 : -1;
+}
+
+static int pcat_job_thread(void *u) {
+  PCat *c = u;
+  int ok = !pcat_download(c, "ps5-payloads-mirror", PCT.job_msg, sizeof PCT.job_msg);
+  PCT.job_ok = ok;
+  snprintf(PCT.job_file, sizeof PCT.job_file, "%s", c->file);
+  free(c);
+  SDL_AtomicSet(&PCT.job_ready, 1);
+  return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Premier lancement : console prete a jouer. Le bootstrap lance cette  */
+/* partie sans ecran (« --prepare »), avant l'interface : kstuff-lite  */
+/* et ShadowMountPlus sont telecharges (empreintes verifiees) et        */
+/* ajoutes a la liste « Au demarrage ». Le bootstrap les envoie ensuite */
+/* lui-meme, sans interface ouverte.                                    */
+/* ------------------------------------------------------------------ */
+enum { ST_KSTUFF, ST_SHADOW, ST_N };
+
+static int find_elfldr(char *out, size_t n);
+
+static int starter_current(const PCat *c) {      /* deja dans /data/payloads, meme version */
+  char p[PATH_LEN + 120];
+  snprintf(p, sizeof p, "%s/data/payloads/%s", plat_root(), c->file);
+  if (access(p, F_OK)) return 0;
+  strcat(p, ".json");
+  json_t *m = json_load_file(p, 0, NULL);
+  const char *v = json_string_value(json_object_get(m, "version"));
+  int same = v && *v && !strcmp(v, c->ver);
+  json_decref(m);
+  return same;
+}
+
+static int name_has(const char *s, const char *k) {
+  char a[NAME_LEN];
+  size_t i = 0;
+  for (; s[i] && i + 1 < sizeof a; i++) a[i] = (char)tolower((unsigned char)s[i]);
+  a[i] = 0;
+  return strstr(a, k) != NULL;
+}
+
+static void starter_status(const char *s) {
+  char p[PATH_LEN], t[PATH_LEN + 8];
+  snprintf(p, sizeof p, "%s/cache/starter_status", plat_data_dir());
+  snprintf(t, sizeof t, "%s.tmp", p);
+  FILE *f = fopen(t, "w");
+  if (f) { fprintf(f, "%s\n", s); fclose(f); rename(t, p); }
+}
+
+static int starter_prepare(void) {
+  char dir[PATH_LEN], mark[PATH_LEN];
+  snprintf(dir, sizeof dir, "%s/cache", plat_data_dir());
+  mkdir(plat_data_dir(), 0755);
+  mkdir(dir, 0755);
+  snprintf(mark, sizeof mark, "%s/starter_done", dir);
+  if (!access(mark, F_OK)) { starter_status("done"); return 0; }
+  plat_log("premier lancement : preparation de kstuff-lite et ShadowMountPlus");
+
+  PCat want[ST_N];
+  int have[ST_N] = { 0 }, got[ST_N] = { 0 };
+  memset(want, 0, sizeof want);
+  unsigned char *d; size_t n;
+  PCat *it = NULL;
+  int cnt = 0;
+  if (plat_https_get(PCAT_URL, &d, &n, 2 << 20) == 200) {
+    json_t *j = json_loadb((const char *)d, n, 0, NULL);
+    cnt = pcat_parse(j, &it);
+    if (cnt) pcat_save("payloads_index.json", d, n);
+    json_decref(j);
+    free(d);
+  }
+  if (!cnt) {                                    /* pas de reseau : derniere liste connue */
+    char p[PATH_LEN];
+    snprintf(p, sizeof p, "%s/payloads_index.json", dir);
+    json_t *j = json_load_file(p, 0, NULL);
+    cnt = pcat_parse(j, &it);
+    json_decref(j);
+  }
+  static const char *const CAT_NAMES[2] = { "kstuff-lite", "ShadowMountPlus" };
+  for (int k = 0; k < 2; k++)
+    for (int i = 0; i < cnt; i++)
+      if (!strcasecmp(it[i].name, CAT_NAMES[k])) { want[k] = it[i]; want[k].tex = NULL; have[k] = 1; break; }
+  /* sans chargeur ELF (port 9021), rien ne peut partir au demarrage : on en installe un */
+  char ldr[PATH_LEN];
+  if (find_elfldr(ldr, sizeof ldr))
+    for (int i = 0; i < cnt; i++)
+      if (!strcasecmp(it[i].name, "elfldr")) {
+        char lm[160] = "";
+        if (pcat_download(&it[i], "ps5-payloads-mirror", lm, sizeof lm)) plat_log("premier lancement : elfldr non installe (%s)", lm);
+        else plat_log("premier lancement : elfldr installe (aucun chargeur ELF sur la console)");
+        break;
+      }
+  free(it);
+
+  char msg[160];
+  for (int k = 0; k < ST_N; k++) {
+    if (!have[k]) { plat_log("premier lancement : %s introuvable (catalogue ou reseau)", CAT_NAMES[k]); continue; }
+    if (starter_current(&want[k])) { got[k] = 1; continue; }
+    msg[0] = 0;
+    got[k] = !pcat_download(&want[k], "ps5-payloads-mirror", msg, sizeof msg);
+    if (!got[k]) plat_log("premier lancement : %s non installe (%s)", want[k].name, msg);
+  }
+
+  /* liste « Au demarrage » : kstuff en premier, puis la liste actuelle, puis les monteurs */
+  char lp[PATH_LEN], tp[PATH_LEN + 8];
+  snprintf(lp, sizeof lp, "%s/autostart.json", plat_data_dir());
+  json_t *old = json_load_file(lp, 0, NULL);
+  json_t *on = json_object_get(old, "names"), *op = json_object_get(old, "paths");
+  json_t *names = json_array(), *paths = json_array();
+  int any_kstuff = 0;
+  size_t i; json_t *v;
+  json_array_foreach(on, i, v) if (json_string_value(v) && name_has(json_string_value(v), "kstuff")) any_kstuff = 1;
+  char path[PATH_LEN + 120];
+  int added = 0;
+  if (got[ST_KSTUFF] && !any_kstuff) {
+    snprintf(path, sizeof path, "%s/data/payloads/%s", plat_root(), want[ST_KSTUFF].file);
+    json_array_append_new(names, json_string(want[ST_KSTUFF].name));
+    json_array_append_new(paths, json_string(path));
+    added++;
+  }
+  if (json_is_array(on)) json_array_extend(names, on);
+  if (json_is_array(op)) json_array_extend(paths, op);
+  for (int k = ST_SHADOW; k < ST_N; k++) {
+    if (!got[k]) continue;
+    int present = 0;
+    json_array_foreach(on, i, v) if (json_string_value(v) && !strcasecmp(json_string_value(v), want[k].name)) present = 1;
+    if (present) continue;
+    snprintf(path, sizeof path, "%s/data/payloads/%s", plat_root(), want[k].file);
+    json_array_append_new(names, json_string(want[k].name));
+    json_array_append_new(paths, json_string(path));
+    added++;
+  }
+  json_t *j = json_pack("{s:o, s:o}", "names", names, "paths", paths);
+  snprintf(tp, sizeof tp, "%s.tmp", lp);
+  if (j && !json_dump_file(j, tp, JSON_INDENT(2))) rename(tp, lp);
+  json_decref(j);
+  json_decref(old);
+
+  int all = got[ST_KSTUFF] && got[ST_SHADOW];
+  char tp2[PATH_LEN];
+  snprintf(tp2, sizeof tp2, "%s/starter_tries", dir);
+  int tries = 0;
+  FILE *tf = fopen(tp2, "r");
+  if (tf) { if (fscanf(tf, "%d", &tries) != 1) tries = 0; fclose(tf); }
+  if ((got[0] || got[1]) && (tf = fopen(tp2, "w"))) { fprintf(tf, "%d\n", ++tries); fclose(tf); }   /* sans reseau : on ne compte pas */
+  if (all || tries >= 3) { FILE *m = fopen(mark, "w"); if (m) { fputs("1\n", m); fclose(m); } }
+  plat_log("premier lancement : %d/2 payloads prets, %d ajoute(s) a la liste au demarrage",
+           got[0] + got[1], added);
+  starter_status(all ? "ok" : (got[0] || got[1]) ? "partial" : "fail");
+  return 0;
+}
+
+/* resultat du premier lancement, ecrit par le bootstrap : affiche une fois */
+static void starter_note(void) {
+  char p[PATH_LEN], s[16] = "";
+  snprintf(p, sizeof p, "%s/cache/starter_note", plat_data_dir());
+  FILE *f = fopen(p, "r");
+  if (!f) return;
+  if (!fgets(s, sizeof s, f)) s[0] = 0;
+  fclose(f);
+  remove(p);
+  s[strcspn(s, "\r\n")] = 0;
+  const char *m = !strcmp(s, "sent") ? "Console prête : kstuff et ShadowMount sont lancés, et repartiront à chaque allumage"
+                : !strcmp(s, "next") ? "kstuff et ShadowMount partiront à chaque allumage de la console"
+                : !strcmp(s, "partial") ? "Préparation incomplète : nouvel essai au prochain lancement"
+                : !strcmp(s, "fail") ? "Pas d'accès à Internet : kstuff et ShadowMount seront installés au prochain lancement"
+                : NULL;
+  if (!m) return;
+  toast(m);
+  S.toast_until = SDL_GetTicks() + 9000;
+}
+
+static App *pcat_installed(const PCat *c) {      /* deja present : copie de Launcher5 d'abord, sinon d'un autre gestionnaire */
+  App *other = NULL;
+  for (int i = 0; i < S.menu.napps; i++) {
+    App *a = &S.menu.apps[i];
+    if (a->kind != KIND_PAYLOAD) continue;
+    const char *b = strrchr(a->path, '/');
+    if (!strcasecmp(a->title, c->name) || (b && !strcasecmp(b + 1, c->file))) {
+      if (pay_ours(a)) return a;
+      if (!other) other = a;
+    }
+  }
+  return other;
+}
+
+static void pcat_install(int i) {
+  if (i < 0 || i >= PCT.n) return;
+  if (PCT.job) { toast("Un téléchargement est déjà en cours"); return; }
+  PCat *c = &PCT.it[i];
+  App *a = pcat_installed(c);
+  if (a && a->ver[0] && !strcmp(a->ver, c->ver)) { toast("Déjà à jour"); return; }
+  PCat *copy = malloc(sizeof *copy);
+  if (!copy) return;
+  *copy = *c;
+  copy->tex = NULL;
+  PCT.job = 1; PCT.job_idx = i; PCT.job_msg[0] = 0;
+  SDL_Thread *t = SDL_CreateThread(pcat_job_thread, "l5install", copy);
+  if (t) SDL_DetachThread(t); else { free(copy); PCT.job = 0; toast("Pas de fil disponible"); }
+}
+
+static void pcat_free(PCat *it, int n) {
+  for (int i = 0; i < n; i++) if (it[i].tex) SDL_DestroyTexture(it[i].tex);
+  free(it);
+}
+
+/* resultats des fils, dans le fil de l'ecran */
+static void pcat_poll(void) {
+  if (SDL_AtomicGet(&PCT.ready)) {
+    SDL_AtomicSet(&PCT.ready, 0);
+    if (PCT.next_n) {
+      pcat_free(PCT.it, PCT.n);
+      PCT.it = PCT.next; PCT.n = PCT.next_n;
+      PCT.state = 2; PCT.loaded_at = SDL_GetTicks();
+      if (PCT.sel >= PCT.n) PCT.sel = PCT.n - 1;
+      payload_icons_reset();                     /* icones de la nouvelle liste */
+    } else PCT.state = 3;
+    PCT.next = NULL; PCT.next_n = 0;
+  }
+  if (SDL_AtomicGet(&PCT.job_ready)) {
+    SDL_AtomicSet(&PCT.job_ready, 0);
+    PCT.job = 0;
+    if (PCT.job_ok) {
+      scan_all(&S.menu);                         /* le nouveau payload rejoint la section */
+      char id[ID_LEN];
+      snprintf(id, sizeof id, "elf:%.35s", PCT.job_file);
+      App *a = menu_find_app(&S.menu, id);
+      if (a && PCT.job_idx < PCT.n) {            /* deja connu (mise a jour) : fiche et jaquette refaites */
+        PCat *c = &PCT.it[PCT.job_idx];
+        snprintf(a->title, sizeof a->title, "%s", c->name);
+        snprintf(a->ver, sizeof a->ver, "%s", c->ver);
+        snprintf(a->cat, sizeof a->cat, "%s", c->cat);
+        snprintf(a->desc, sizeof a->desc, "%s", c->desc);
+        payload_icon_path(c->file, c->name, a->icon, sizeof a->icon);
+        if (a->boxtex) { SDL_DestroyTexture(a->boxtex); a->boxtex = NULL; }
+        a->box_state = 0; a->box_pref = 0;
+        drop_tiles(a);
+      }
+      boot_refresh();                            /* la liste au demarrage suit la nouvelle version */
+      char msg[200];
+      snprintf(msg, sizeof msg, tr("« %s » installé  ·  empreinte vérifiée"), PCT.job_idx < PCT.n ? PCT.it[PCT.job_idx].name : "");
+      toast(msg);
+      sfx(SFX_OK);
+    } else { toast(PCT.job_msg[0] ? PCT.job_msg : "Installation impossible"); sfx(SFX_ERROR); }
+  }
+}
+
+static void open_catalog(void) {
+  S.mode = MODE_CATALOG;
+  if (PCT.state != 1 && (PCT.state != 2 || SDL_GetTicks() - PCT.loaded_at > 30 * 60 * 1000)) pcat_fetch();
+}
+
+static int pcat_rows(void) { return (H - 120 - 150 - 90) / 100; }
+
+static void catalog_input(int in) {
+  int vis = pcat_rows();
+  switch (in) {
+  case IN_UP: if (PCT.sel > 0) PCT.sel--; break;
+  case IN_DOWN: if (PCT.sel < PCT.n - 1) PCT.sel++; break;
+  case IN_L1: PCT.sel = PCT.sel > vis ? PCT.sel - vis : 0; break;
+  case IN_R1: PCT.sel = PCT.sel + vis < PCT.n ? PCT.sel + vis : PCT.n - 1; break;
+  case IN_OK: if (PCT.state == 2) pcat_install(PCT.sel); break;
+  case IN_BACK: case IN_MENU: S.mode = MODE_BROWSE; break;
+  }
+  if (PCT.sel < 0) PCT.sel = 0;
+}
+
+static void draw_catalog(void) {
+  int px = 90, py = 60, pw = W - 180, ph = H - 120;
+  glass_panel(px, py, pw, ph);
+  draw_text(S.f48, "Catalogue de payloads", px + 50, py + 34, 0xffffff, 0, pw - 100);
+  char sub[200];
+  snprintf(sub, sizeof sub, "%s%s", tr("Liste publique ps5-payloads-mirror  ·  chaque fichier est vérifié (SHA-256) avant installation"),
+           PCT.offline ? tr("  ·  hors ligne : dernière liste connue") : "");
+  draw_text(S.f22, sub, px + 52, py + 104, 0x9aa4b5, 0, pw - 100);
+  draw_text(S.f22, "✕  Installer / mettre à jour      ○  Fermer      L1 R1  Page", px + 52, py + ph - 56, 0x9aa4b5, 0, 0);
+  if (PCT.state == 1 && !PCT.n) { draw_text(S.f36, "Chargement de la liste…", W / 2, H / 2 - 20, 0xffffff, 1, 0); return; }
+  if (PCT.state == 3 && !PCT.n) { draw_text(S.f36, PCT.err, W / 2, H / 2 - 20, 0xffffff, 1, pw - 100); return; }
+  int vis = pcat_rows(), rh = 100, y0 = py + 150;
+  if (PCT.sel < PCT.top) PCT.top = PCT.sel;
+  if (PCT.sel >= PCT.top + vis) PCT.top = PCT.sel - vis + 1;
+  for (int r = 0; r < vis && PCT.top + r < PCT.n; r++) {
+    int i = PCT.top + r, y = y0 + r * rh, x = px + 40;
+    PCat *c = &PCT.it[i];
+    if (i == PCT.sel) {
+      fill_round(px + 24, y - 6, pw - 48, rh - 8, 16, S.th->accent, 45);
+      outline_round(px + 24, y - 6, pw - 48, rh - 8, 16, 2, S.th->accent, 200);
+    }
+    if (!c->tried) {                             /* icone : celle du depot, sinon symbole de la categorie */
+      c->tried = 1;
+      char p[PATH_LEN];
+      if (!payload_icon_path(c->file, c->name, p, sizeof p)) c->tex = load_tex(p);
+    }
+    if (c->tex) {
+      int tw, th;
+      SDL_QueryTexture(c->tex, NULL, NULL, &tw, &th);
+      int dh = 76, dw = tw * dh / (th ? th : 1);
+      if (dw > 120) { dw = 120; dh = th * dw / (tw ? tw : 1); }
+      SDL_Rect d = { x + (120 - dw) / 2, y + (76 - dh) / 2 + 4, dw, dh };
+      SDL_RenderCopy(S.r, c->tex, NULL, &d);
+    } else {
+      App tmp;
+      memset(&tmp, 0, sizeof tmp);
+      tmp.kind = KIND_PAYLOAD;
+      snprintf(tmp.cat, sizeof tmp.cat, "%s", c->cat);
+      uint32_t col; const char *g;
+      payload_style(&tmp, &col, &g);
+      fill_round(x + 10, y + 4, 100, 76, 14, shade(col, 0.6f), 255);
+      draw_text(S.f36, g, x + 60, y + 18, 0xffffff, 1, 0);
+    }
+    int tx = x + 150, sw = 300;
+    draw_text(S.f30, c->name, tx, y + 4, 0xffffff, 0, pw - 150 - sw - 120);
+    char line[260];
+    int bad = payload_excluded(c->name) || payload_excluded(c->url);   /* mode repos */
+    if (bad) snprintf(line, sizeof line, "⊘ %s", tr("Incompatible avec Launcher5 : demande le mode repos"));
+    else snprintf(line, sizeof line, "%s%s%s%s%s", c->ver, c->ver[0] && c->cat[0] ? "  ·  " : "", c->cat, c->desc[0] ? "  ·  " : "", c->desc);
+    draw_text(S.f22, line, tx, y + 46, bad ? 0xff6b6b : 0xc9d1dc, 0, pw - 150 - sw - 120);
+    /* etat */
+    App *a = pcat_installed(c);
+    char st[96];
+    uint32_t sc;
+    int filled;
+    if (PCT.job && PCT.job_idx == i) { snprintf(st, sizeof st, "%s", tr("Téléchargement…")); sc = 0xffc53d; filled = 0; }
+    else if (!a) { snprintf(st, sizeof st, "%s", tr("Installer")); sc = S.th->accent; filled = 1; }
+    else if (a->ver[0] && strcmp(a->ver, c->ver)) { snprintf(st, sizeof st, tr("Mise à jour  %s"), c->ver); sc = 0xffc53d; filled = 1; }
+    else if (a->ver[0]) { snprintf(st, sizeof st, tr("Installé  %s"), a->ver); sc = 0x2ecc71; filled = 0; }
+    else { snprintf(st, sizeof st, "%s", tr("Installé")); sc = 0x2ecc71; filled = 0; }
+    int stw = text_w(S.f22, st) + 40, sx = px + pw - 60 - stw;
+    if (filled) fill_round(sx, y + 18, stw, 44, 22, sc, 235);
+    else outline_round(sx, y + 18, stw, 44, 22, 2, sc, 230);
+    draw_text(S.f22, st, sx + stw / 2, y + 26, filled ? 0x0a0a12 : sc, 1, 0);
+  }
+  if (PCT.n > vis) {                             /* barre de defilement */
+    int bx = px + pw - 22, bh = vis * rh, kh = bh * vis / PCT.n, ky = y0 + (bh - kh) * PCT.top / (PCT.n - vis);
+    fill_round(bx, y0, 6, bh, 3, 0xffffff, 40);
+    fill_round(bx, ky, 6, kh, 3, S.th->accent, 220);
+  }
+}
+
 static void up_install(void) {
   char path[PATH_LEN];
   up_path(path, sizeof path, "launcher5.elf");
@@ -4663,7 +6212,12 @@ static void up_poll(void) {
 /* Menu Parametres : une vraie liste de reglages + une carte d'infos    */
 /* ------------------------------------------------------------------ */
 enum { SR_THEME, SR_VIEW, SR_COVERS, SR_ONLINE, SR_SAVER, SR_SFX, SR_SFXPACK, SR_BOOT, SR_RETURN, SR_FOLDERS, SR_HIDDEN, SR_HIDEIP,
-       SR_AUTOUPD, SR_UPDATE, SR_QUIT, SR_COUNT };
+       SR_AUTOSTART, SR_AUTOUPD, SR_UPDATE, SR_CONTROLS, SR_QUIT, SR_COUNT };
+static int autostart_state(void);
+static int as_cached;
+static int autostart_enable(char *msg, size_t mn);
+static int autostart_disable(char *msg, size_t mn);
+static void autostart_sync(void);
 #define SR_VISIBLE 8                             /* lignes affichees a la fois */
 static int set_row, set_top;
 
@@ -4748,6 +6302,9 @@ static void settings_change(int d, int activate) {
   case SR_HIDDEN: S.show_hidden = !S.show_hidden; break;
   case SR_HIDEIP: S.menu.hide_ip = !S.menu.hide_ip; S.sys_t = 0; save(); break;
   case SR_AUTOUPD: S.menu.auto_update = !S.menu.auto_update; save(); break;
+  case SR_AUTOSTART:                             /* ✕ : liste des modes, rien ne change sans choix */
+    if (activate) open_start_menu();
+    break;
   case SR_UPDATE:                                /* ✕ seulement : verifier, telecharger puis installer */
     if (!activate || UP.busy) break;
     UP.install = 1;
@@ -4755,10 +6312,397 @@ static void settings_change(int d, int activate) {
     else if (UP.state == UP_AVAILABLE) up_start(1);
     else up_start(0);
     break;
+  case SR_CONTROLS:
+    if (activate) open_help(0);
+    break;
   case SR_QUIT:
     if (activate) { App *a = menu_find_app(&S.menu, "sys:home"); if (a) launch(a); }
     break;
   }
+}
+
+
+/* ------------------------------------------------------------------ */
+/* Demarrage automatique : Launcher5 dans la chaine de ps5_autoloader   */
+/* (apres l'exploit). autoload.txt est sauvegarde une fois dans         */
+/* autoload.txt.l5bak et remis tel quel a la desactivation.             */
+/* ------------------------------------------------------------------ */
+/* Dossier de l'autoloader reellement lu au demarrage, dans l'ordre des autoloaders (Y2JB,
+   WebKit, BD-JB) : cle USB d'abord, puis /data ; dans chacun, un dossier propre a une
+   application (ps5_autoloader_PPSA01650…) avant ps5_autoloader. Le premier qui contient un
+   autoload.txt gagne ; sinon /data/ps5_autoloader. */
+static void al_find(const char *root, char *out, size_t n) {
+  char bases[9][64];
+  int nb = 0;
+  for (int u = 0; u < 8; u++) snprintf(bases[nb++], sizeof bases[0], "%s/mnt/usb%d", root, u);
+  snprintf(bases[nb++], sizeof bases[0], "%s/data", root);
+  for (int b = 0; b < nb; b++) {
+    char p[600];
+    struct stat st;
+    DIR *d = opendir(bases[b]);
+    struct dirent *e;
+    int found = 0;
+    while (d && !found && (e = readdir(d))) {     /* dossier propre a une application */
+      if (strncmp(e->d_name, "ps5_autoloader_", 15)) continue;
+      snprintf(p, sizeof p, "%s/%s/autoload.txt", bases[b], e->d_name);
+      if (!stat(p, &st)) { snprintf(out, n, "%s/%s", bases[b], e->d_name); found = 1; }
+    }
+    if (d) closedir(d);
+    if (found) return;
+    snprintf(p, sizeof p, "%s/ps5_autoloader/autoload.txt", bases[b]);
+    if (!stat(p, &st)) { snprintf(out, n, "%s/ps5_autoloader", bases[b]); return; }
+  }
+  snprintf(out, n, "%s/data/ps5_autoloader", root);
+}
+
+static void al_path(char *o, size_t n, const char *f) {
+  char dir[512];
+  al_find(plat_root(), dir, sizeof dir);
+  snprintf(o, n, "%s%s%s", dir, f ? "/" : "", f ? f : "");
+}
+
+static int is_elf_file(const char *p) {
+  FILE *f = fopen(p, "rb");
+  unsigned char m[4] = { 0 };
+  size_t r = f ? fread(m, 1, 4, f) : 0;
+  if (f) fclose(f);
+  return r == 4 && !memcmp(m, "\x7f" "ELF", 4);
+}
+
+static int copy_file(const char *src, const char *dst) {   /* via un fichier temporaire : jamais a moitie ecrit */
+  char tmp[PATH_LEN + 8];
+  snprintf(tmp, sizeof tmp, "%s.tmp", dst);
+  FILE *in = fopen(src, "rb"), *out = in ? fopen(tmp, "wb") : NULL;
+  int ok = in && out;
+  char buf[65536];
+  size_t k;
+  while (ok && (k = fread(buf, 1, sizeof buf, in)) > 0) ok = fwrite(buf, 1, k, out) == k;
+  if (in) fclose(in);
+  if (out && fclose(out)) ok = 0;
+  ok = ok && !rename(tmp, dst);
+  if (!ok) remove(tmp);
+  return ok ? 0 : -1;
+}
+
+static int line_is(const char *l, const char *word) {     /* ligne egale a « word » (espaces ignores) */
+  while (*l == ' ' || *l == '\t') l++;
+  size_t n = strlen(word);
+  if (strncasecmp(l, word, n)) return 0;
+  l += n;
+  while (*l == ' ' || *l == '\t' || *l == '\r' || *l == '\n') l++;
+  return !*l;
+}
+
+/* Plugin OnionHEN : si OnionHEN est sur la console, Launcher5 s'installe dans ses plugins
+   (lance au demarrage, visible dans sa Toolbox) au lieu de toucher a autoload.txt. */
+static int onion_present(void) {
+  char p[PATH_LEN];
+  struct stat st;
+  snprintf(p, sizeof p, "%s/data/OnionHEN", plat_root());
+  return !stat(p, &st) && S_ISDIR(st.st_mode);
+}
+static void onion_plugin_path(char *o, size_t n) { snprintf(o, n, "%s/data/OnionHEN/plugins/LNCH00005.elf", plat_root()); }
+static int onion_plugin_installed(void) { char p[PATH_LEN]; onion_plugin_path(p, sizeof p); return !access(p, F_OK); }
+
+static int al_has_launcher(void) {                /* autoload.txt lance deja Launcher5 */
+  char p[PATH_LEN], l[512];
+  al_path(p, sizeof p, "autoload.txt");
+  FILE *f = fopen(p, "r");
+  int on = 0;
+  while (f && fgets(l, sizeof l, f)) if (line_is(l, "launcher5.elf")) on = 1;
+  if (f) fclose(f);
+  return on;
+}
+
+static int onion_enable(char *msg, size_t mn) {
+  char me[PATH_LEN], dir[PATH_LEN], dst[PATH_LEN];
+  snprintf(me, sizeof me, "%s/launcher5.elf", plat_data_dir());
+  if (!is_elf_file(me)) { snprintf(msg, mn, "%s", tr("launcher5.elf introuvable dans /data/launcher5")); return -1; }
+  snprintf(dir, sizeof dir, "%s/data/OnionHEN/plugins", plat_root());
+  mkdir(dir, 0755);
+  onion_plugin_path(dst, sizeof dst);
+  if (copy_file(me, dst)) { snprintf(msg, mn, "%s", tr("Copie impossible dans /data/OnionHEN/plugins")); return -1; }
+  plat_log("demarrage automatique : plugin OnionHEN installe (%s)", dst);
+  snprintf(msg, mn, "%s", tr("Launcher5 installé comme plugin OnionHEN : il démarrera avec le jailbreak"));
+  return 0;
+}
+
+/* -1 : pas de ps5_autoloader sur la console ; 0 : desactive ; 1 : Launcher5 y demarre */
+static int as_cached = -2;                       /* etat relu au plus toutes les 3 s (-2 : a relire) */
+static int autostart_state(void) {
+  static Uint32 at;
+  int cached = as_cached;
+  if (cached != -2 && SDL_GetTicks() - at < 3000) return cached;
+  at = SDL_GetTicks();
+  if (onion_plugin_installed()) return as_cached = 1;
+  char p[PATH_LEN];
+  al_path(p, sizeof p, "autoload.txt");
+  FILE *f = fopen(p, "r");
+  if (!f) return as_cached = onion_present() ? 0 : -1;
+  char l[512];
+  int on = 0;
+  while (fgets(l, sizeof l, f)) if (line_is(l, "launcher5.elf")) on = 1;
+  fclose(f);
+  return as_cached = on;
+}
+
+/* chargeur ELF officiel deja present sur la console (celui de l'utilisateur d'abord) */
+static int find_elfldr(char *out, size_t n) {
+  const char *cand[] = { "/data/ps5_autoloader/elfldr.elf", "/data/pldmgr/payloads/local/elfldr/elfldr-ps5.elf",
+                         "/data/payloads/elfldr.elf", "/data/payloads/elfldr-ps5.elf" };
+  for (size_t i = 0; i < sizeof cand / sizeof cand[0]; i++) {
+    snprintf(out, n, "%s%s", plat_root(), cand[i]);
+    if (is_elf_file(out)) return 0;
+  }
+  char dir[PATH_LEN];
+  snprintf(dir, sizeof dir, "%s/data/pldmgr/payloads/repo", plat_root());
+  DIR *d = opendir(dir);
+  struct dirent *e;
+  while (d && (e = readdir(d))) {
+    if (strncasecmp(e->d_name, "elfldr@", 7)) continue;
+    char sub[PATH_LEN + 80];
+    snprintf(sub, sizeof sub, "%s/%s", dir, e->d_name);
+    DIR *s = opendir(sub);
+    struct dirent *f;
+    while (s && (f = readdir(s))) {
+      size_t l = strlen(f->d_name);
+      if (l > 4 && !strcasecmp(f->d_name + l - 4, ".elf")) {
+        snprintf(out, n, "%s/%s", sub, f->d_name);
+        if (is_elf_file(out)) { closedir(s); closedir(d); return 0; }
+      }
+    }
+    if (s) closedir(s);
+  }
+  if (d) closedir(d);
+  return -1;
+}
+
+static int autostart_enable(char *msg, size_t mn) {
+  char alp[PATH_LEN];
+  al_path(alp, sizeof alp, "autoload.txt");
+  if (access(alp, F_OK) && onion_present()) return onion_enable(msg, mn);   /* pas d'autoloader : plugin */
+  char al[PATH_LEN], bak[PATH_LEN], me[PATH_LEN], dst[PATH_LEN], ldr[PATH_LEN], eld[PATH_LEN];
+  al_path(al, sizeof al, "autoload.txt");
+  al_path(bak, sizeof bak, "autoload.txt.l5bak");
+  snprintf(me, sizeof me, "%s/launcher5.elf", plat_data_dir());
+  if (!is_elf_file(me)) { snprintf(msg, mn, "%s", tr("launcher5.elf introuvable dans /data/launcher5")); return -1; }
+  int have_ldr = !find_elfldr(ldr, sizeof ldr);
+  FILE *f = fopen(al, "r");
+  if (!f) {                                      /* pas encore d'autoload.txt : on le cree */
+    char dir[PATH_LEN];
+    struct stat ds;
+    al_path(dir, sizeof dir, NULL);
+    if (stat(dir, &ds) || !S_ISDIR(ds.st_mode)) { snprintf(msg, mn, "%s", tr("ps5_autoloader introuvable sur la console")); return -1; }
+  }
+  /* nouvelle liste : commentaires gardes, Payload Manager retire, elfldr d'abord, Launcher5 a la fin */
+  char *keep = NULL, l[512];
+  size_t kl = 0;
+  int has_ldr = 0;
+  while (f && fgets(l, sizeof l, f)) {
+    const char *t = l;
+    while (*t == ' ' || *t == '\t') t++;
+    int payload = *t && *t != '#' && *t != '\r' && *t != '\n' && *t != '!';
+    char low[512];
+    size_t k = 0;
+    for (; t[k] && k + 1 < sizeof low; k++) low[k] = (char)tolower((unsigned char)t[k]);
+    low[k] = 0;
+    if (payload && (strstr(low, "pldmgr") || line_is(l, "launcher5.elf"))) continue;
+    if (payload && line_is(l, "elfldr.elf")) { has_ldr = 1; continue; }
+    size_t ll = strlen(l);
+    char *r = realloc(keep, kl + ll + 2);
+    if (!r) { free(keep); fclose(f); return -1; }
+    keep = r;
+    memcpy(keep + kl, l, ll);
+    kl += ll;
+    if (ll && l[ll - 1] != '\n') keep[kl++] = '\n';
+  }
+  int existed = f != NULL;
+  if (f) fclose(f);
+  (void)has_ldr;
+  if (existed && access(bak, F_OK) && copy_file(al, bak)) { free(keep); snprintf(msg, mn, "%s", tr("Sauvegarde de autoload.txt impossible")); return -1; }
+  al_path(eld, sizeof eld, "elfldr.elf");
+  al_path(dst, sizeof dst, "launcher5.elf");
+  if ((have_ldr && strcmp(ldr, eld) && copy_file(ldr, eld)) || copy_file(me, dst)) {
+    free(keep); snprintf(msg, mn, "%s", tr("Copie impossible dans ps5_autoloader")); return -1;
+  }
+  char tmp[PATH_LEN + 8];
+  snprintf(tmp, sizeof tmp, "%s.tmp", al);
+  FILE *o = fopen(tmp, "w");
+  int ok = o != NULL;
+  if (ok) {
+    /* commentaires de tete, puis la chaine : elfldr, autres payloads gardes, Launcher5 */
+    size_t i = 0;
+    while (i < kl) {                             /* lignes de commentaire / vides du debut */
+      size_t e = i;
+      while (e < kl && keep[e] != '\n') e++;
+      const char *t = keep + i;
+      while (t < keep + e && (*t == ' ' || *t == '\t')) t++;
+      if (t < keep + e && *t != '#' && *t != '\r') break;
+      fwrite(keep + i, 1, e - i + (e < kl), o);
+      i = e + (e < kl);
+    }
+    if (have_ldr) fputs("elfldr.elf\n", o);
+    if (i < kl) fwrite(keep + i, 1, kl - i, o);
+    fputs(have_ldr ? "!3000\nlauncher5.elf\n" : "launcher5.elf\n", o);   /* elfldr doit avoir ouvert le port 9021 */
+    ok = !fclose(o) && !rename(tmp, al);
+  }
+  free(keep);
+  if (!ok) { remove(tmp); snprintf(msg, mn, "%s", tr("Écriture de autoload.txt impossible")); return -1; }
+  plat_log("demarrage automatique active (elfldr : %s, sauvegarde : %s)", have_ldr ? ldr : "aucun", existed ? bak : "aucune");
+  if (onion_plugin_installed()) {                /* un seul demarrage : le plugin OnionHEN est retire */
+    char pl[PATH_LEN];
+    onion_plugin_path(pl, sizeof pl);
+    remove(pl);
+  }
+  if (!have_ldr) snprintf(msg, mn, "%s", tr("Launcher5 démarrera avec le jailbreak  ·  installe elfldr depuis le catalogue pour envoyer des payloads"));
+  else snprintf(msg, mn, "%s", tr(existed ? "Launcher5 démarrera avec le jailbreak  ·  ancien autoload.txt sauvegardé" : "Launcher5 démarrera avec le jailbreak"));
+  return 0;
+}
+
+static int autostart_disable(char *msg, size_t mn) {
+  if (onion_plugin_installed()) {
+    char pl[PATH_LEN];
+    onion_plugin_path(pl, sizeof pl);
+    if (remove(pl)) { snprintf(msg, mn, "%s", tr("Suppression du plugin impossible")); return -1; }
+    plat_log("demarrage automatique : plugin OnionHEN retire");
+    snprintf(msg, mn, "%s", tr("Démarrage automatique désactivé  ·  plugin OnionHEN retiré"));
+    if (!al_has_launcher()) return 0;
+  }
+  char al[PATH_LEN], bak[PATH_LEN], dst[PATH_LEN];
+  al_path(al, sizeof al, "autoload.txt");
+  al_path(bak, sizeof bak, "autoload.txt.l5bak");
+  al_path(dst, sizeof dst, "launcher5.elf");
+  if (!access(bak, F_OK)) {                      /* l'ancien fichier, tel quel */
+    if (copy_file(bak, al)) { snprintf(msg, mn, "%s", tr("Écriture de autoload.txt impossible")); return -1; }
+    remove(bak);
+  } else {                                       /* pas de sauvegarde : on retire juste Launcher5 */
+    FILE *f = fopen(al, "r");
+    char tmp[PATH_LEN + 8], l[512];
+    snprintf(tmp, sizeof tmp, "%s.tmp", al);
+    FILE *o = f ? fopen(tmp, "w") : NULL;
+    while (f && o && fgets(l, sizeof l, f)) if (!line_is(l, "launcher5.elf")) fputs(l, o);
+    if (f) fclose(f);
+    if (!o || fclose(o) || rename(tmp, al)) { remove(tmp); snprintf(msg, mn, "%s", tr("Écriture de autoload.txt impossible")); return -1; }
+  }
+  remove(dst);
+  plat_log("demarrage automatique desactive : autoload.txt remis");
+  snprintf(msg, mn, "%s", tr("Démarrage automatique désactivé  ·  autoload.txt d'origine remis"));
+  return 0;
+}
+
+
+/* --- Mode de demarrage : un choix explicite (jamais une bascule a chaque appui) --- */
+enum { SM_MANUAL, SM_PLUGIN, SM_AUTOLOAD };
+static int start_mode(void) {
+  char al[PATH_LEN];
+  al_path(al, sizeof al, "autoload.txt");
+  if (!access(al, F_OK) && al_has_launcher()) return SM_AUTOLOAD;
+  if (onion_plugin_installed()) return SM_PLUGIN;
+  return SM_MANUAL;
+}
+static int start_mode_available(int m) {
+  char al[PATH_LEN];
+  al_path(al, sizeof al, "autoload.txt");
+  return m == SM_MANUAL || (m == SM_PLUGIN && onion_present()) || (m == SM_AUTOLOAD && !access(al, F_OK));
+}
+static const char *START_MODE_NAMES[3] = { "Manuel", "Plugin OnionHEN", "Autoloader" };
+
+static void start_mode_set(int m) {
+  char msg[200] = "";
+  int cur = start_mode(), rc = 0;
+  if (m == cur) { toast("Déjà dans ce mode"); return; }
+  if (cur != SM_MANUAL) rc = autostart_disable(msg, sizeof msg);   /* on revient d'abord a l'etat d'origine */
+  if (!rc && m == SM_PLUGIN) rc = onion_enable(msg, sizeof msg);
+  if (!rc && m == SM_AUTOLOAD) rc = autostart_enable(msg, sizeof msg);
+  if (!rc && m == SM_MANUAL) snprintf(msg, sizeof msg, "%s", tr("Démarrage manuel : la chaîne d'origine est remise"));
+  as_cached = -2;
+  if (rc) sfx(SFX_ERROR);
+  toast(msg);
+}
+
+/* Premier lancement : Launcher5 s'inscrit dans ps5_autoloader. Sans autoload.txt (ou vide), tout
+   seul ; si une autre chaine y est deja (Payload Manager…), on demande une seule fois. */
+static int al_has_payloads(void) {
+  char p[PATH_LEN], l[512];
+  al_path(p, sizeof p, "autoload.txt");
+  FILE *f = fopen(p, "r");
+  int n = 0;
+  while (f && fgets(l, sizeof l, f)) {
+    const char *t = l;
+    while (*t == ' ' || *t == '\t') t++;
+    if (!*t || *t == '#' || *t == '\r' || *t == '\n' || *t == '!') continue;
+    char low[512];
+    size_t k = 0;
+    for (; t[k] && k + 1 < sizeof low; k++) low[k] = (char)tolower((unsigned char)t[k]);
+    low[k] = 0;
+    if (strstr(low, "pldmgr")) n++;
+  }
+  if (f) fclose(f);
+  return n;                                      /* Payload Manager : seul payload retire de la chaine */
+}
+
+static void first_run_autoload(void) {
+  char mark[PATH_LEN], dir[PATH_LEN];
+  snprintf(mark, sizeof mark, "%s/cache/autoload_setup", plat_data_dir());
+  if (!access(mark, F_OK)) return;
+  FILE *m = fopen(mark, "w");
+  if (m) { fputs("1\n", m); fclose(m); }
+  al_path(dir, sizeof dir, NULL);
+  struct stat st;
+  if (start_mode() != SM_MANUAL) return;         /* deja dans la chaine */
+  if ((stat(dir, &st) || !S_ISDIR(st.st_mode)) && !onion_present()) {
+    char data[PATH_LEN];                         /* ni autoloader ni OnionHEN : on prepare l'autoloader */
+    snprintf(data, sizeof data, "%s/data", plat_root());
+    mkdir(data, 0755);
+    mkdir(dir, 0755);
+    plat_log("premier lancement : dossier ps5_autoloader cree");
+  }
+  if (!al_has_payloads()) {                      /* lignes gardees, ancien fichier sauvegarde : inscription directe */
+    char msg[200];
+    if (autostart_enable(msg, sizeof msg)) sfx(SFX_ERROR);
+    plat_log("premier lancement : %s", msg);
+    as_cached = -2;
+    toast(msg);
+    return;
+  }
+  S.nchoices = 0; S.csel = 0; S.quick = 0;
+  snprintf(S.ctx_title, sizeof S.ctx_title, "%s", tr("Démarrage automatique ?"));
+  add_choice("Oui, remplacer (sauvegardé)", ACT_FIRST_YES);
+  add_choice("Non, garder ma chaîne", ACT_FIRST_NO);
+  S.mode = MODE_CONTEXT;
+}
+
+static void open_start_menu(void) {
+  static const char *const DESC[3] = { "Manuel · remet ton autoload d'origine", "Plugin OnionHEN", "Autoloader (sans Payload Manager)" };
+  S.nchoices = 0; S.csel = 0; S.quick = 0;
+  snprintf(S.ctx_title, sizeof S.ctx_title, "%s", tr("Démarrage de Launcher5"));
+  int cur = start_mode();
+  for (int m = 0; m < 3; m++) {
+    if (!start_mode_available(m)) continue;
+    char l[120];
+    snprintf(l, sizeof l, "%s%s", m == cur ? "✓  " : "     ", tr(DESC[m]));
+    if (m == cur) S.csel = S.nchoices;
+    add_choice(l, ACT_START_MANUAL + m);
+  }
+  S.mode = MODE_CONTEXT;
+}
+
+/* copie dans ps5_autoloader rafraichie apres une mise a jour de Launcher5 */
+static void autostart_sync(void) {
+  if (autostart_state() != 1) return;
+  char me[PATH_LEN], dst[PATH_LEN];
+  snprintf(me, sizeof me, "%s/launcher5.elf", plat_data_dir());
+  struct stat a, b;
+  if (stat(me, &a) || !is_elf_file(me)) return;
+  if (onion_plugin_installed()) {                /* plugin OnionHEN */
+    onion_plugin_path(dst, sizeof dst);
+    if (stat(dst, &b) || b.st_size != a.st_size || b.st_mtime < a.st_mtime)
+      if (!copy_file(me, dst)) plat_log("demarrage automatique : plugin OnionHEN mis a jour");
+  }
+  if (!al_has_launcher()) return;
+  al_path(dst, sizeof dst, "launcher5.elf");
+  if (!stat(dst, &b) && b.st_size == a.st_size && b.st_mtime >= a.st_mtime) return;
+  if (!copy_file(me, dst)) plat_log("demarrage automatique : copie de Launcher5 mise a jour");
 }
 
 /* renvoie 1 si la touche est prise par le menu */
@@ -4795,6 +6739,7 @@ static void settings_value(int r, char *v, size_t n, int *toggle) {
   case SR_HIDEIP: *toggle = S.menu.hide_ip; break;
   case SR_ONLINE: *toggle = S.menu.covers_online; break;
   case SR_AUTOUPD: *toggle = S.menu.auto_update; break;
+  case SR_AUTOSTART: snprintf(v, n, "%s", tr(START_MODE_NAMES[start_mode()])); break;
   case SR_UPDATE:
     switch (UP.state) {
     case UP_CHECKING: snprintf(v, n, "%s", tr("Vérification…")); break;
@@ -4928,11 +6873,11 @@ static void draw_view_preview(int cx, int cy, int cw, int ch) {
 }
 
 static void draw_settings(void) {
-  static const char *ICON[SR_COUNT] = { "◐", "▦", "▯", "⬇", "☾", "♪", "♫", "★", "↺", "▤", "◌", "⊘", "◷", "↻", "⌂" };
+  static const char *ICON[SR_COUNT] = { "◐", "▦", "▯", "⬇", "☾", "♪", "♫", "★", "↺", "▤", "◌", "⊘", "⚡", "◷", "↻", "✚", "⌂" };
   static const char *LABEL[SR_COUNT] = {
     "Thème", "Affichage des jeux", "Jaquettes", "Jaquettes officielles", "Économiseur d'écran", "Sons d'interface", "Style des sons", "Son de démarrage",
-    "Retour automatique", "Section Mes dossiers", "Éléments masqués", "Masquer l'IP", "Mises à jour automatiques", "Mettre à jour",
-    "Quitter vers l'accueil PS5",
+    "Retour automatique", "Section Mes dossiers", "Éléments masqués", "Masquer l'IP", "Démarrage de Launcher5", "Mises à jour automatiques", "Mettre à jour",
+    "Commandes de la manette", "Quitter vers l'accueil PS5",
   };
   static const char *HELP[SR_COUNT] = {
     "◀ ▶ change de thème  ·  ✕ ouvre le Studio Thème",
@@ -4947,8 +6892,10 @@ static void draw_settings(void) {
     "Affiche la section où tu ranges tes jeux dans tes dossiers",
     "Montre ou cache les jeux que tu as masqués",
     "Pour tes captures et tes lives",
+    "✕ pour choisir : manuel, plugin OnionHEN ou autoloader",
     "Vérifie une fois par jour sur GitHub",
     "✕ vérifie, télécharge et installe la dernière version",
+    "✕ affiche la manette et les raccourcis du launcher",
     "Ferme le launcher et revient à l'accueil de la PS5",
   };
   /* liste des reglages (defile si elle depasse l'ecran) */
@@ -5051,10 +6998,12 @@ static void handle(int in) {
 }
 
 static void handle_inner(int in) {
+  if (boot_job && in == IN_BACK) { boot_cancel = 1; return; }   /* ○ : annule les payloads au demarrage */
   if (S.mode == MODE_BROWSE && S.sec == SEC_SYS) {     /* menu Parametres */
     if (settings_input(in)) return;
     if (in == IN_MENU || in == IN_START || in == IN_MOVE) return;
   }
+  if (S.mode == MODE_CATALOG) { catalog_input(in); return; }   /* avant la navigation normale */
   if (S.mode == MODE_THEME) { theme_editor_input(in); return; }
   if (S.mode == MODE_KEYBOARD) {
     switch (in) {
@@ -5108,6 +7057,12 @@ static void handle_inner(int in) {
     } else if (in == IN_BACK) S.mode = MODE_BROWSE;
     return;
   }
+  if (S.mode == MODE_HELP) { if (in == IN_BACK || in == IN_OK || in == IN_MENU) S.mode = MODE_BROWSE; return; }
+  if (S.mode == MODE_INFO) {
+    if (in == IN_OK && info_app) { S.mode = MODE_BROWSE; launch(info_app); }
+    else if (in == IN_BACK || in == IN_MENU) S.mode = MODE_BROWSE;
+    return;
+  }
   if (S.mode == MODE_COLOR) {
     Entry *e = selected();
     if (in == IN_OK && e && e->is_folder) { e->node->color = PALETTE[S.color_sel]; save(); }
@@ -5121,10 +7076,25 @@ static void handle_inner(int in) {
     if (e->is_folder) do_action(ACT_OPEN);
     else launch(e->app);
     break;
-  case IN_BACK: if (S.sec == SEC_HOME && S.depth) { S.depth--; S.scroll = (float)S.sel[S.depth]; } break;
+  case IN_BACK:
+    if (search_q[0]) { search_q[0] = 0; *cur_sel() = 0; S.scroll = 0; toast("Recherche effacée"); break; }
+    if (S.sec == SEC_HOME && S.depth) { S.depth--; S.scroll = (float)S.sel[S.depth]; }
+    break;
+  case IN_SEARCH: if (S.sec != SEC_SYS) open_keyboard("Rechercher", search_q, ACT_SEARCH); break;
   case IN_MENU: S.quick = 0; open_context(); break;
   case IN_START: open_quick(); break;
-  case IN_MOVE: if (e && S.sec == SEC_HOME) do_action(ACT_MOVE); break;
+  case IN_MOVE:
+    if (S.sec == SEC_HOME) { if (e) do_action(ACT_MOVE); break; }
+    if (S.sec == SEC_SYS) break;
+    filter_now = (filter_now + 1) % FIL_COUNT;   /* □ : filtre suivant */
+    *cur_sel() = 0;
+    S.scroll = 0;
+    {
+      char msg[96];
+      snprintf(msg, sizeof msg, tr("Filtre : %s"), tr(FILTER_NAMES[filter_now]));
+      toast(msg);
+    }
+    break;
   case IN_L1: change_section(-1); break;
   case IN_R1: change_section(1); break;
   case IN_VIEW: set_view(S.menu.view + 1); break;
@@ -5148,6 +7118,7 @@ static int key_to_input(SDL_Keycode k) {
   case SDLK_v: case SDLK_F2: return IN_VIEW;
   case SDLK_HOME: return IN_L2;
   case SDLK_END: return IN_R2;
+  case SDLK_f: case SDLK_F3: return IN_SEARCH;
   }
   return -1;
 }
@@ -5165,6 +7136,7 @@ static int button_to_input(int b) {
   case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: return IN_L1;
   case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: return IN_R1;
   case SDL_CONTROLLER_BUTTON_START: return IN_START;
+  case SDL_CONTROLLER_BUTTON_LEFTSTICK: case SDL_CONTROLLER_BUTTON_RIGHTSTICK: return IN_SEARCH;
   case SDL_CONTROLLER_BUTTON_TOUCHPAD: case SDL_CONTROLLER_BUTTON_BACK: return IN_VIEW;
   }
   return -1;
@@ -5271,7 +7243,7 @@ static int video_open(void) {
   return 0;
 }
 
-static void video_close(void) {
+__attribute__((unused)) static void video_close(void) {   /* plus utilise : l'arriere-plan ferme l'interface par le systeme */
   /* detruire le moteur de rendu libere toutes ses textures : on oublie les pointeurs */
   for (int i = 0; i < S.menu.napps; i++) {
     App *a = &S.menu.apps[i];
@@ -5300,7 +7272,36 @@ static void import_sessions(void) {
   if (n > 0) { plat_log("temps de jeu : %d partie(s) ajoutee(s)", n); save(); }
 }
 
+/* liste des jeux reecrite par le bootstrap (jeu installe, FPKG, dump monte par
+   ShadowMount ou Kraken) : les nouveaux arrivent sans relancer le launcher */
+static long long apps_sig;
+static void apps_path(char *p, size_t n) { snprintf(p, n, "%s/apps.json", plat_data_dir()); }
+
+static void check_new_games(void) {
+  char p[PATH_LEN];
+  apps_path(p, sizeof p);
+  long long sig = file_sig(p);
+  if (!sig || sig == apps_sig || S.mode != MODE_BROWSE || S.launching) return;
+  apps_sig = sig;
+  int before = S.menu.napps;
+  scan_all(&S.menu);
+  int added = 0;
+  const char *name = NULL;
+  for (int i = before; i < S.menu.napps; i++)
+    if (S.menu.apps[i].kind == KIND_PS5 || S.menu.apps[i].kind == KIND_PS4) { added++; name = S.menu.apps[i].title; }
+  if (S.menu.napps == before) return;
+  menu_merge_new_apps(&S.menu);
+  plat_log("liste des jeux : %d application(s) ajoutee(s)", S.menu.napps - before);
+  if (!added) return;
+  char msg[200];
+  if (added == 1) snprintf(msg, sizeof msg, tr("« %s » ajouté"), name);
+  else snprintf(msg, sizeof msg, tr("%d nouveaux jeux ajoutés"), added);
+  toast(msg);
+  sfx(SFX_OK);
+}
+
 static void check_external_changes(void) {
+  check_new_games();
   import_sessions();
   box_check_custom();
   long long sig = file_sig(S.menu_path);
@@ -5350,7 +7351,7 @@ static void check_external_changes(void) {
 }
 
 int main(int argc, char **argv) {
-  (void)argc; (void)argv;
+  if (argc > 1 && argv[1] && !strcmp(argv[1], "--prepare")) return starter_prepare();   /* sans ecran */
   if (plat_init()) return 1;
   i18n_init(plat_sys_lang());   /* langue de la console */
   SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
@@ -5382,6 +7383,7 @@ int main(int argc, char **argv) {
   }
 
   scan_all(&S.menu);
+  { char ap[PATH_LEN]; apps_path(ap, sizeof ap); apps_sig = file_sig(ap); }
   snprintf(S.menu_path, sizeof S.menu_path, "%s/menu.json", plat_data_dir());
   S.menu.saver = 5;                     /* economiseur apres 5 min par defaut */
   S.menu.boxes = 1;                     /* jaquettes boites par defaut */
@@ -5427,9 +7429,17 @@ int main(int argc, char **argv) {
   int saver_secs = getenv("L5_SAVER") ? atoi(getenv("L5_SAVER")) : 0;   /* test : economiseur plus rapide */
   Uint64 last = SDL_GetPerformanceCounter();
   up_boot();
+  autostart_sync();                              /* copie a jour dans ps5_autoloader */
+  /* les payloads au demarrage sont envoyes par le bootstrap, avant l'ouverture de l'interface ;
+     on lui ecrit ici les fichiers a jour (un payload mis a jour change de fichier) */
+  boot_refresh();
+  first_run_autoload();                          /* premier lancement : inscription dans l'autoloader */
+  starter_note();
   while (S.running) {
     box_poll();
     up_poll();
+    pcat_poll();
+    boot_poll();
     Uint64 now = SDL_GetPerformanceCounter();
     S.dt = (float)(now - last) / SDL_GetPerformanceFrequency();
     if (S.dt > 0.1f) S.dt = 0.1f;
@@ -5437,14 +7447,23 @@ int main(int argc, char **argv) {
     /* menu PS ouvert ou launcher en arriere-plan : on laisse la main au systeme */
     int overlaid = 0;
     plat_poll_system(&overlaid);
+    static int in_bg, closing;
+    static Uint32 bg_since;
     if (overlaid == 1) {
-      /* la PS5 affiche son propre ecran (profil, parametres…) : on lui rend
-         l'affichage sans fermer le launcher */
+      /* la PS5 affiche son propre ecran (profil, parametres, accueil) : l'application
+         relais ne sait pas lui ceder l'ecran (ecran noir). Apres une demi-seconde en
+         arriere-plan, on se fait fermer proprement par le systeme ; la tuile Launcher5
+         rouvre le launcher. */
       music_pause(1);
-      if (S.r) { plat_log("arriere-plan : affichage libere"); video_close(); }
+      if (!in_bg) { plat_log("arriere-plan : dessin suspendu"); in_bg = 1; bg_since = SDL_GetTicks(); }
+      if (!closing && SDL_GetTicks() - bg_since > 500) {
+        save();
+        if (!plat_close_ui()) { closing = 1; plat_log("arriere-plan : fermeture par le systeme, la tuile rouvrira le launcher"); }
+      }
       SDL_Delay(50); SDL_Event ev; while (SDL_PollEvent(&ev)) {}
       continue;
     }
+    if (in_bg) { plat_log("retour au premier plan : dessin repris"); in_bg = 0; }
     if (!S.r) {
       plat_log("retour au premier plan : affichage repris");
       if (video_open()) { plat_log("reprise de l'affichage impossible"); break; }
@@ -5463,7 +7482,7 @@ int main(int argc, char **argv) {
       char *tok = cursor ? strsep(&cursor, ",") : NULL;
       if (tok) {
         static const char *names[IN_COUNT] = { "U", "D", "L", "R", "OK", "BACK", "MENU", "MOVE", "L1", "R1", "START", "VIEW",
-                                               "L2", "R2" };
+                                               "L2", "R2", "SEARCH" };
         if (!strncmp(tok, "TXT:", 4)) kb_type(tok + 4);
         else for (int i = 0; i < IN_COUNT; i++) if (!strcmp(tok, names[i])) handle(i);
       } else if (++wait > 8) {

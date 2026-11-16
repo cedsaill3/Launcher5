@@ -14,6 +14,7 @@
  *     relance l'interface quand le jeu est ferme (retour automatique).
  */
 #include <ctype.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -24,6 +25,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
+#include <sys/sysctl.h>
 #include <netinet/in.h>
 #include <time.h>
 #include <unistd.h>
@@ -68,6 +70,17 @@ INCBIN(wall7, "assets/fonds/launcher5-07.jpg")
 /* images de boitiers PS5 / PS4 (style « Images ») */
 INCBIN(case_ps5, "assets/boitiers/ps5.png")
 INCBIN(case_ps4, "assets/boitiers/ps4.png")
+
+/* Plugin OnionHEN : description lue dans la section « .onion_plugin » (128 octets).
+   Pose dans /data/OnionHEN/plugins/, le launcher est lance par OnionHEN au demarrage
+   et apparait dans la page Plugins de sa Toolbox. Sans effet pour les autres chargeurs. */
+struct onion_plugin_desc {
+  uint32_t struct_size, abi_version, capabilities, flags;   /* flags : 2 = reste en marche */
+  char id[32], version[16], name[64];
+};
+_Static_assert(sizeof(struct onion_plugin_desc) == 128, "description OnionHEN : 128 octets");
+__attribute__((section(".onion_plugin"), used, aligned(8)))
+static const struct onion_plugin_desc ONION_PLUGIN = { 128, 1, 0, 2, "LNCH00005", L5_PLUGIN_VERSION, "Launcher5" };
 
 typedef struct app_launch_ctx {
   uint32_t structsize;
@@ -189,11 +202,33 @@ static int install_app(const char *title_id, const char *dir) {
   return sceAppInstUtilAppInstallAll(0);
 }
 
+/* copie de la base des applications, avec son journal (WAL) s'il y en a un : un jeu tout
+   juste installe ou monte peut n'etre encore que dans le journal */
+static int copy_appinfo(void) {
+  struct stat st;
+  remove(DB_COPY "-wal");
+  remove(DB_COPY "-shm");
+  if (copy_file(APPINFO_DB, DB_COPY)) return -1;
+  if (!stat(APPINFO_DB "-wal", &st) && st.st_size > 0 && copy_file(APPINFO_DB "-wal", DB_COPY "-wal"))
+    remove(DB_COPY "-wal");
+  return 0;
+}
+
+/* signature de la base : change quand une application est installee, montee ou supprimee */
+static long long appinfo_sig(void) {
+  struct stat a, w;
+  long long s = 0;
+  if (!stat(APPINFO_DB, &a)) s = (long long)a.st_mtime * 1000003LL + (long long)a.st_size;
+  if (!stat(APPINFO_DB "-wal", &w)) s = s * 31 + (long long)w.st_mtime * 1000003LL + (long long)w.st_size;
+  return s;
+}
+static long long catalog_sig;
+
 /* La tuile est-elle enregistree dans la base des applications ? 1 oui, 0 non, -1 on ne sait pas */
 static int relay_registered(void) {
-  if (copy_file(APPINFO_DB, DB_COPY)) return -1;
+  if (copy_appinfo()) return -1;
   sqlite3 *db;
-  if (sqlite3_open_v2(DB_COPY, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) { sqlite3_close(db); return -1; }
+  if (sqlite3_open_v2(DB_COPY, &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) { sqlite3_close(db); return -1; }
   sqlite3_stmt *st;
   int found = -1;
   if (sqlite3_prepare_v2(db, "select 1 from tbl_appinfo where titleId = '" RELAY_ID "' limit 1", -1, &st, NULL) == SQLITE_OK) {
@@ -269,10 +304,24 @@ static void json_str(FILE *f, const char *s) {
   fputc('"', f);
 }
 
+static int same_file(const char *a, const char *b) {
+  FILE *x = fopen(a, "rb"), *y = fopen(b, "rb");
+  int same = x && y;
+  while (same) {
+    int c = fgetc(x), d = fgetc(y);
+    if (c != d) same = 0;
+    if (c == EOF || d == EOF) break;
+  }
+  if (x) fclose(x);
+  if (y) fclose(y);
+  return same;
+}
+
 static int export_catalog(void) {
-  if (copy_file(APPINFO_DB, DB_COPY)) { logf("copie de appinfo.db impossible"); return -1; }
+  catalog_sig = appinfo_sig();
+  if (copy_appinfo()) { logf("copie de appinfo.db impossible"); return -1; }
   sqlite3 *db;
-  if (sqlite3_open_v2(DB_COPY, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) { logf("ouverture appinfo.db impossible"); return -1; }
+  if (sqlite3_open_v2(DB_COPY, &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) { logf("ouverture appinfo.db impossible"); return -1; }
   sqlite3_stmt *st;
   const char *q = "select titleId, key, val from tbl_appinfo where key in "
                   "('TITLE',?1,'CONTENT_ID','APP_TYPE','CATEGORY_TYPE','CATEGORY','_ps_platform')";
@@ -323,6 +372,7 @@ static int export_catalog(void) {
   }
   fprintf(f, "\n]\n");
   fclose(f);
+  if (same_file(CATALOG_PATH ".tmp", CATALOG_PATH)) { remove(CATALOG_PATH ".tmp"); return 0; }
   rename(CATALOG_PATH ".tmp", CATALOG_PATH);
   logf("catalogue : %d applications", count);
   return 0;
@@ -349,7 +399,7 @@ static int launch_title(const char *title_id) {
 /* Lance un ELF comme un vrai payload (processus a part, comme le fait l'elfldr du
    port 9021), avec l'elfldr integre. « --spawned » dit a la nouvelle version
    qu'elle a ete lancee correctement. */
-static int spawn_payload(const char *path) {
+static pid_t spawn_elf(const char *path, const char *arg) {
   FILE *f = fopen(path, "rb");
   if (!f) return -1;
   fseek(f, 0, SEEK_END);
@@ -359,13 +409,15 @@ static int spawn_payload(const char *path) {
   size_t got = buf ? fread(buf, 1, (size_t)n, f) : 0;
   fclose(f);
   if (!buf || got != (size_t)n) { free(buf); return -1; }
-  char *av[] = { (char *)path, (char *)"--spawned", NULL };
+  char *av[] = { (char *)path, (char *)arg, NULL };
   char *ev[] = { NULL };
   pid_t p = elfldr_spawn(DATA_DIR, -1, buf, av, ev);
   free(buf);
-  logf("payload lance : %s (pid %d)", path, p);
-  return p < 0 ? -1 : 0;
+  logf("payload lance : %s %s (pid %d)", path, arg, p);
+  return p < 0 ? -1 : p;
 }
+
+static int spawn_payload(const char *path) { return spawn_elf(path, "--spawned") < 0 ? -1 : 0; }
 
 /* envoie un ELF au chargeur de la console (port 9021) */
 static int send_to_loader(const char *path) {
@@ -412,13 +464,394 @@ static int read_request(char *type, char *value, char *cwd, size_t n) {
 
 static int alive(pid_t pid) { return pid > 0 && (kill(pid, 0) == 0 || errno != ESRCH); }
 
+/* Le Lecteur de disques reste ouvert, dans un etat instable, apres un exploit qui passe
+   par le lecteur multimedia. Tant qu'il est la, un payload qui touche au noyau (kstuff)
+   peut faire planter la console : on le ferme proprement avant tout le reste
+   (suspension, arret du processus, puis fermeture par le systeme). */
+#define DISC_PLAYER_ID "NPXS40140"
+int sceLncUtilSuspendApp(uint32_t app_id);
+
+static pid_t pid_by_name(const char *name) {      /* liste des processus du noyau */
+  int mib[4] = { 1 /* CTL_KERN */, 14 /* KERN_PROC */, 8 /* KERN_PROC_PROC */, 0 };
+  size_t len = 0;
+  pid_t found = -1;
+  for (int tries = 0; tries < 4; tries++) {
+    if (sysctl(mib, 4, NULL, &len, NULL, 0)) return -1;
+    len += len / 2 + 65536;                      /* la liste peut grandir entre les deux appels */
+    unsigned char *buf = malloc(len);
+    if (!buf) return -1;
+    if (sysctl(mib, 4, buf, &len, NULL, 0)) { free(buf); continue; }
+    for (unsigned char *p = buf; p + 460 < buf + len;) {
+      int size = *(int *)p;
+      if (size <= 0) break;
+      if (!strcmp((const char *)p + 447, name)) found = *(pid_t *)(p + 72);
+      p += size;
+    }
+    free(buf);
+    break;
+  }
+  return found;
+}
+
+static void close_disc_player(void) {
+  int app = sceSystemServiceGetAppIdOfRunningBigApp();
+  char tid[16] = "";
+  if (app <= 0 || sceSystemServiceGetAppTitleId(app, tid) || strcmp(tid, DISC_PLAYER_ID)) return;
+  logf("lecteur de disques ouvert (exploit) : fermeture avant tout le reste");
+  logf("lecteur de disques : suspension (%d)", sceLncUtilSuspendApp((uint32_t)app));
+  sleep(2);                                       /* l'accueil se stabilise */
+  pid_t p = pid_by_name("SceDiscPlayer");
+  if (p > 0) {
+    logf("lecteur de disques : arret du processus %d (%d)", p, kill(p, SIGKILL));
+    sleep(1);
+  }
+  if (sceSystemServiceGetAppIdOfRunningBigApp() == app)
+    logf("lecteur de disques : fermeture par le systeme (%d)", sceSystemServiceKillApp(app, -1, 0, 0));
+  else logf("lecteur de disques : ferme");
+}
+
+/* ------------------------------------------------------------------ */
+/* Envoi sur : les payloads qui touchent au noyau (kstuff, HEN, hyper-  */
+/* viseur…) partent d'ici, sans application detournee au premier plan   */
+/* (comme avec un gestionnaire de payloads en arriere-plan).            */
+/* ------------------------------------------------------------------ */
+static int safe_send(const char *path, int settle) {
+  const char *name = strrchr(path, '/');
+  name = name ? name + 1 : path;
+  /* le chargeur ELF peut mettre quelques secondes a ecouter : on reessaie l'envoi lui-meme
+     (jamais de connexion vide, que le chargeur prendrait pour un payload) */
+  int rc = -1;
+  for (int i = 0; i < 40 && rc; i++) {
+    rc = send_to_loader(path);
+    if (rc) usleep(500 * 1000);
+  }
+  char msg[200];
+  snprintf(msg, sizeof msg, tr(rc ? "Launcher5 : %s n'a pas pu être envoyé" : "Launcher5 : %s envoyé"), name);
+  notify(msg);
+  logf("envoi sur : %s %s", path, rc ? "en echec" : "envoye");
+  if (!rc) sleep(settle);                        /* le payload s'installe avant la suite */
+  return rc;
+}
+
+/* Liste « Au demarrage » (autostart.json, ecrite par l'interface) : une fois par allumage,
+   seulement si Launcher5 fait partie de la chaine de demarrage. */
+static int find_payload(const char *dir, const char *want, size_t wl, int depth, char *out, size_t n) {
+  DIR *d = opendir(dir);
+  if (!d) return -1;
+  struct dirent *e;
+  int found = -1;
+  while (found && (e = readdir(d))) {
+    if (e->d_name[0] == '.') continue;
+    char p[768];
+    snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+    struct stat st;
+    if (stat(p, &st)) continue;
+    if (S_ISDIR(st.st_mode)) { if (depth > 0) found = find_payload(p, want, wl, depth - 1, out, n); continue; }
+    /* l'interface garde les 35 premiers caracteres du nom : prefixe si le nom est coupe */
+    if ((wl < 35 && !strcmp(e->d_name, want)) || (wl >= 35 && !strncmp(e->d_name, want, wl))) {
+      snprintf(out, n, "%s", p);
+      found = 0;
+    }
+  }
+  closedir(d);
+  return found;
+}
+
+/* kstuff deja actif ? Le test de kstuff lui-meme : l'appel noyau 0xffffffff00000027, passe
+   par la passerelle de getpid (libkernel), repond 0 seulement si kstuff est charge.
+   1 : charge, 0 : absent, -1 : test impossible. */
+void *l5_kek_gate;
+__asm__(".text\n.globl l5_kekcall\nl5_kekcall:\n  mov 8(%rsp), %rax\n  jmp *l5_kek_gate(%rip)\n");
+uint64_t l5_kekcall(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uint64_t f, uint64_t nr);
+
+static int kstuff_test(void) {
+  intptr_t g = kernel_dynlib_dlsym(-1, 0x1, "getpid");
+  if (!g) g = kernel_dynlib_dlsym(-1, 0x2001, "getpid");
+  if (!g) return -1;
+  l5_kek_gate = (void *)(g + 7);
+  return l5_kekcall(0, 0, 0, 0, 0, 0, 0xffffffff00000027ULL) == 0;
+}
+
+static int kstuff_loaded(void) {
+  int on = kstuff_test();
+  logf("kstuff : %s", on > 0 ? "deja actif" : on ? "test impossible" : "pas encore charge");
+  return on;
+}
+
+/* apres l'envoi de kstuff : on attend qu'il reponde (15 s au plus) au lieu d'un delai fixe */
+static void kstuff_wait(void) {
+  sleep(2);                                      /* on le laisse s'installer avant de lui parler */
+  for (int i = 4; i < 30; i++) {
+    int on = kstuff_test();
+    if (on > 0) { logf("kstuff : pret en %d.%d s", i / 2, i % 2 ? 5 : 0); sleep(1); return; }
+    if (on < 0) break;
+    usleep(500 * 1000);
+  }
+  logf("kstuff : pas de reponse, delai fixe");
+  sleep(5);
+}
+
+/* Dossier de l'autoloader reellement lu au demarrage, dans l'ordre des autoloaders (Y2JB,
+   WebKit, BD-JB) : cle USB d'abord, puis /data ; dans chacun, un dossier propre a une
+   application (ps5_autoloader_PPSA01650…) avant ps5_autoloader. Le premier qui contient un
+   autoload.txt gagne ; sinon /data/ps5_autoloader. */
+static void al_find(const char *root, char *out, size_t n) {
+  char bases[9][64];
+  int nb = 0;
+  for (int u = 0; u < 8; u++) snprintf(bases[nb++], sizeof bases[0], "%s/mnt/usb%d", root, u);
+  snprintf(bases[nb++], sizeof bases[0], "%s/data", root);
+  for (int b = 0; b < nb; b++) {
+    char p[600];
+    struct stat st;
+    DIR *d = opendir(bases[b]);
+    struct dirent *e;
+    int found = 0;
+    while (d && !found && (e = readdir(d))) {     /* dossier propre a une application */
+      if (strncmp(e->d_name, "ps5_autoloader_", 15)) continue;
+      snprintf(p, sizeof p, "%s/%s/autoload.txt", bases[b], e->d_name);
+      if (!stat(p, &st)) { snprintf(out, n, "%s/%s", bases[b], e->d_name); found = 1; }
+    }
+    if (d) closedir(d);
+    if (found) return;
+    snprintf(p, sizeof p, "%s/ps5_autoloader/autoload.txt", bases[b]);
+    if (!stat(p, &st)) { snprintf(out, n, "%s/ps5_autoloader", bases[b]); return; }
+  }
+  snprintf(out, n, "%s/data/ps5_autoloader", root);
+}
+
+static FILE *open_autoload(void) {
+  char dir[512], p[600];
+  al_find("", dir, sizeof dir);
+  snprintf(p, sizeof p, "%s/autoload.txt", dir);
+  return fopen(p, "r");
+}
+
+static int in_boot_chain(void) {
+  struct stat st;
+  if (!stat("/data/OnionHEN/plugins/LNCH00005.elf", &st)) return 1;
+  FILE *f = open_autoload();
+  char l[512];
+  int on = 0;
+  while (f && fgets(l, sizeof l, f)) {
+    char *t = l;
+    while (*t == ' ' || *t == '\t') t++;
+    if (!strncmp(t, "launcher5.elf", 13) && (t[13] == 0 || t[13] == '\r' || t[13] == '\n' || t[13] == ' ')) on = 1;
+  }
+  if (f) fclose(f);
+  return on;
+}
+
+/* nom de famille d'un payload : les lettres du debut du nom de fichier, en minuscules
+   (« ShadowMountPlus_1.7.elf » -> shadowmountplus, « kstuff-lite.elf » -> kstuff) */
+static void payload_key(const char *path, char *k, size_t n) {
+  const char *b = strrchr(path, '/');
+  b = b ? b + 1 : path;
+  while (*b == ' ' || *b == '\t') b++;
+  size_t i = 0;
+  for (; isalpha((unsigned char)b[i]) && i + 1 < n; i++) k[i] = (char)tolower((unsigned char)b[i]);
+  k[i] = 0;
+}
+
+/* deja lance par autoload.txt (les payloads de l'utilisateur gardes avant Launcher5) ? */
+/* meme payload sous un autre nom (shadowmount / shadowmountplus, ftpsrv / ftpsrvdrakmor),
+   ou meme role : un seul monteur de jeux a la fois (ShadowMount, Kraken) */
+static int same_family(const char *a, const char *b) {
+  static const char *const MOUNTERS[] = { "shadowmount", "kraken" };
+  int ma = 0, mb = 0;
+  for (size_t i = 0; i < sizeof MOUNTERS / sizeof MOUNTERS[0]; i++) {
+    size_t l = strlen(MOUNTERS[i]);
+    if (!strncmp(a, MOUNTERS[i], l)) ma = 1;
+    if (!strncmp(b, MOUNTERS[i], l)) mb = 1;
+  }
+  if (ma && mb) return 1;
+  size_t la = strlen(a), lb = strlen(b), m = la < lb ? la : lb;
+  return m >= 4 && !strncmp(a, b, m);
+}
+
+static int in_autoload(const char *key) {
+  FILE *f = open_autoload();
+  if (!f) return 0;
+  char l[512], k[64];
+  int found = 0;
+  while (!found && fgets(l, sizeof l, f)) {
+    const char *t = l;
+    while (*t == ' ' || *t == '\t') t++;
+    if (!*t || *t == '#' || *t == '!' || *t == '\r' || *t == '\n') continue;
+    payload_key(t, k, sizeof k);
+    found = k[0] && same_family(k, key);
+  }
+  fclose(f);
+  return found;
+}
+
+/* Payloads exclus : exploits de l'hyperviseur qui demandent le mode repos (byepervisor,
+   HyperHEN, chargeur Linux). Ils n'ont rien a faire dans un launcher, ni au demarrage. */
+static int payload_excluded(const char *name) {
+  static const char *const K[] = { "byepervisor", "hyperhen", "linuxloader", "ps5linux" };
+  char n[256];
+  size_t k = 0;
+  for (const char *p = name ? name : ""; *p && k + 1 < sizeof n; p++)
+    if (isalnum((unsigned char)*p)) n[k++] = (char)tolower((unsigned char)*p);
+  n[k] = 0;
+  for (size_t i = 0; i < sizeof K / sizeof K[0]; i++) if (strstr(n, K[i])) return 1;
+  return 0;
+}
+
+/* un payload de la liste a ne pas envoyer : incompatible, ou deja la (OnionHEN, autoload.txt, kstuff actif) */
+static int boot_skip(const char *path, int onion, int *ks) {
+  char low[768], key[64];
+  size_t k = 0;
+  for (; path[k] && k + 1 < sizeof low; k++) low[k] = (char)tolower((unsigned char)path[k]);
+  low[k] = 0;
+  const char *base = strrchr(path, '/');
+  if (payload_excluded(base ? base + 1 : path)) { logf("demarrage : %s demande le mode repos, jamais envoye", path); return 1; }
+  if (onion && strstr(low, "onion")) { logf("demarrage : OnionHEN tourne deja, pas renvoye"); return 1; }
+  payload_key(path, key, sizeof key);
+  if (key[0] && in_autoload(key)) { logf("demarrage : %s deja lance par autoload.txt, pas renvoye", path); return 1; }
+  if (strstr(low, "kstuff")) {                   /* jamais deux kstuff (la console plante) */
+    if (*ks == -2) *ks = kstuff_loaded();
+    if (*ks > 0) { logf("demarrage : kstuff deja actif, %s pas renvoye", path); return 1; }
+  }
+  return 0;
+}
+
+/* envoi d'un payload de la liste : kstuff, on attend qu'il soit pret ; un HEN (noyau, sans
+   test de fin) garde le delai long ; les autres (monteurs, serveurs) tournent en arriere-plan */
+static void boot_send(const char *path) {
+  char low[768];
+  size_t k = 0;
+  for (; path[k] && k + 1 < sizeof low; k++) low[k] = (char)tolower((unsigned char)path[k]);
+  low[k] = 0;
+  const char *b = strrchr(low, '/');
+  b = b ? b + 1 : low;
+  int is_kstuff = strstr(b, "kstuff") != NULL, is_hen = strstr(b, "hen") != NULL;
+  if (safe_send(path, is_kstuff ? 0 : is_hen ? 10 : 2)) return;
+  if (is_kstuff) kstuff_wait();
+}
+
+/* Une fois par allumage. Lance par la chaine de demarrage : la liste part. Premier lancement
+   ou lancement a la main : seulement si kstuff n'est pas encore charge (sinon l'utilisateur
+   a deja sa propre chaine, on n'y touche pas). Renvoie le nombre envoye. */
+static int boot_list(int first) {
+  const char *marker = "/system_tmp/launcher5_boot_list";
+  struct stat st;
+  int strict = first || !in_boot_chain();
+  int ks = strict ? kstuff_loaded() : -2;        /* etat de kstuff, teste au besoin */
+  if (!stat(marker, &st)) { logf("demarrage : liste deja envoyee depuis l'allumage"); return 0; }
+  FILE *f = fopen(DATA_DIR "/autostart.json", "r");
+  if (!f) return 0;
+  char json[8192];
+  size_t n = fread(json, 1, sizeof json - 1, f);
+  fclose(f);
+  json[n] = 0;
+  if (strict && ks != 0) {
+    logf("%s : kstuff %s, liste non envoyee", first ? "premier lancement" : "lance a la main", ks > 0 ? "deja actif" : "non verifiable");
+    return 0;
+  }
+  FILE *m = fopen(marker, "w");                  /* une fois par allumage, meme si un envoi plante */
+  if (!m) { logf("demarrage : marqueur impossible dans /system_tmp, liste non envoyee"); return 0; }
+  fputs("done\n", m);
+  fclose(m);
+  int onion = !stat("/system_tmp/onionhen", &st);
+  int sent = 0;
+  /* fichiers ecrits par l'interface (« paths ») : la version a jour de chaque payload */
+  char *paths = strstr(json, "\"paths\"");
+  if (paths) {
+    char *end = strchr(paths, ']');
+    for (char *p = strstr(paths, "\"/data/"); p && (!end || p < end); p = strstr(p + 1, "\"/data/")) {
+      char path[768];
+      size_t k = 0;
+      for (char *q = p + 1; *q && *q != '"' && k + 1 < sizeof path; q++) path[k++] = *q;
+      path[k] = 0;
+      if (stat(path, &st)) { logf("demarrage : %s introuvable", path); continue; }
+      if (boot_skip(path, onion, &ks)) continue;
+      if (!sent++) logf("demarrage : envoi de la liste avant l'interface");
+      boot_send(path);
+    }
+    return sent;
+  }
+  for (char *p = strstr(json, "\"elf:"); p; p = strstr(p + 1, "\"elf:")) {
+    char want[64];
+    size_t k = 0;
+    for (char *q = p + 5; *q && *q != '"' && k + 1 < sizeof want; q++) want[k++] = *q;
+    want[k] = 0;
+    if (!k) continue;
+    static const char *const DIRS[][2] = { { "/data/payloads", "1" }, { "/data/pldmgr/payloads", "3" },
+                                           { "/data/etaHEN/payloads", "1" }, { "/data/ps5_autoloader", "0" } };
+    char path[768];
+    int ok = -1;
+    for (size_t d = 0; d < 4 && ok; d++) ok = find_payload(DIRS[d][0], want, k, DIRS[d][1][0] - '0', path, sizeof path);
+    if (ok) { logf("demarrage : %s introuvable", want); continue; }
+    if (boot_skip(path, onion, &ks)) continue;
+    if (!sent++) logf("demarrage : envoi de la liste avant l'interface");
+    boot_send(path);
+  }
+  return sent;
+}
+
+/* Premier lancement : l'interface, lancee sans ecran (« --prepare »), telecharge kstuff-lite,
+   ShadowMountPlus et prepare la liste « Au demarrage ». 1 : liste prete. */
+#define STARTER_DONE DATA_DIR "/cache/starter_done"
+#define STARTER_STATUS DATA_DIR "/cache/starter_status"
+#define STARTER_NOTE DATA_DIR "/cache/starter_note"
+static pid_t spawn_elf(const char *path, const char *arg);
+
+static int read_word(const char *path, char *out, size_t n) {
+  FILE *f = fopen(path, "r");
+  out[0] = 0;
+  if (!f) return -1;
+  if (!fgets(out, (int)n, f)) out[0] = 0;
+  fclose(f);
+  out[strcspn(out, "\r\n")] = 0;
+  return 0;
+}
+
+static void write_word(const char *path, const char *w) {
+  FILE *f = fopen(path, "w");
+  if (f) { fprintf(f, "%s\n", w); fclose(f); }
+}
+
+static int starter_setup(char *status, size_t sn) {
+  struct stat st;
+  status[0] = 0;
+  if (!stat(STARTER_DONE, &st)) return 0;
+  notify("Launcher5 : préparation de la console (kstuff, ShadowMount)…");
+  remove(STARTER_STATUS);
+  pid_t p = spawn_elf(UI_PATH, "--prepare");
+  if (p < 0) { logf("premier lancement : preparation impossible"); return 0; }
+  for (int i = 0; i < 1800 && stat(STARTER_STATUS, &st); i++) usleep(100 * 1000);   /* 3 min max */
+  read_word(STARTER_STATUS, status, sn);
+  remove(STARTER_STATUS);
+  logf("premier lancement : preparation %s", status[0] ? status : "sans reponse");
+  if (!status[0] && alive(p)) kill(p, SIGKILL);
+  return !strcmp(status, "ok") || !strcmp(status, "partial");
+}
+
+static time_t t_start;                           /* mesure du temps d'ouverture */
+static int after_update;                          /* lance par une mise a jour (tuile peut-etre encore ouverte) */
+
 static pid_t start_ui(void) {
   export_catalog();                      /* a jour a chaque ouverture */
   remove(REQUEST_PATH);
   char *argv[] = { (char *)UI_PATH, NULL };
   char *envp[] = { NULL };
-  pid_t ui = hbldr_launch(DATA_DIR, UI_PATH, -1, argv, envp);
-  logf("interface lancee (pid %d)", ui);
+  pid_t ui = -1;
+  for (int tries = 0; tries < 4; tries++) {
+    ui = hbldr_launch(DATA_DIR, UI_PATH, -1, argv, envp);
+    if (ui >= 0) break;
+    /* echec : souvent la tuile Launcher5 restee ouverte apres un plantage. On ne ferme
+       que celle-la (jamais un jeu), puis on reessaie. */
+    int app = sceSystemServiceGetAppIdOfRunningBigApp();
+    char tid[16] = "";
+    if (app > 0 && !sceSystemServiceGetAppTitleId(app, tid) && !strcmp(tid, RELAY_ID)) {
+      logf("tuile Launcher5 bloquee : fermeture (%d)", sceSystemServiceKillApp(app, -1, 0, 0));
+    } else if (app > 0) {
+      logf("interface : une autre application est ouverte (%s), on ne la ferme pas", tid[0] ? tid : "?");
+      break;
+    }
+    sleep(2);
+  }
+  logf("interface lancee (pid %d, %ld s apres le lancement)", ui, (long)(time(NULL) - t_start));
   return ui;
 }
 
@@ -439,6 +872,7 @@ static void single_instance(void) {
 
 int main(int argc, char **argv) {
   mkdir(DATA_DIR, 0755);
+  t_start = time(NULL);
   logf("--- demarrage --- Launcher5 v" L5_VERSION " par " L5_AUTHOR);
   {
     int lang = 1;
@@ -453,6 +887,7 @@ int main(int argc, char **argv) {
      tout de suite : ces versions renvoient alors le fichier au chargeur ELF. */
   {
     int spawned = argc > 1 && argv[1] && !strcmp(argv[1], "--spawned");
+    after_update = spawned;
     /* l'ancienne methode passait le chemin du fichier en argument ; le chargeur ELF, non */
     int in_tile = !spawned && argc > 0 && argv[0] && !strcmp(argv[0], DATA_DIR "/launcher5.elf");
     logf("lancement : %d argument(s), %s", argc, argc > 0 && argv[0] ? argv[0] : "-");
@@ -460,6 +895,19 @@ int main(int argc, char **argv) {
       logf("demarre dans la tuile : on laisse l'ancienne version relancer correctement");
       return EXIT_SUCCESS;
     }
+    /* Lance par la chaine de demarrage (plugin OnionHEN, autoloader) ou a la main (envoi au
+       chargeur ELF : « payload.elf », mise a jour : --spawned) ? Seule la chaine de
+       demarrage autorise l'envoi de la liste « Au demarrage » (sinon : double kstuff). */
+    const char *a0 = argc > 0 && argv[0] ? argv[0] : "";
+    const char *base = strrchr(a0, '/');
+    base = base ? base + 1 : a0;
+    int chain = !spawned && *base && strcmp(base, "payload.elf");
+    mkdir(DATA_DIR "/cache", 0755);
+    if (chain) {
+      FILE *cf = fopen(DATA_DIR "/cache/boot_chain", "w");
+      if (cf) { fprintf(cf, "%s\n", base); fclose(cf); }
+    } else remove(DATA_DIR "/cache/boot_chain");
+    logf("lance %s", chain ? "par la chaine de demarrage" : "a la main");
   }
   single_instance();
   if (install_relay_app()) { notify("Launcher5 : impossible d'installer l'application relais"); return EXIT_FAILURE; }
@@ -469,6 +917,19 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
+  close_disc_player();                           /* avant l'interface et les payloads au demarrage */
+  char status[16];
+  int first = starter_setup(status, sizeof status);   /* premier lancement : console prete a jouer */
+  /* juste apres une mise a jour, la tuile de l'ancienne version peut etre encore ouverte : un
+     payload noyau envoye maintenant ferait planter la console. La liste attend l'allumage. */
+  int sent = 0;
+  if (after_update) logf("mise a jour : la liste partira au prochain allumage");
+  else sent = boot_list(first);                  /* payloads au demarrage, sans interface ouverte */
+  if (status[0] && strcmp(status, "done")) {
+    if (!strcmp(status, "fail") || !status[0]) write_word(STARTER_NOTE, "fail");
+    else if (sent > 0) write_word(STARTER_NOTE, strcmp(status, "ok") ? "partial" : "sent");
+    else write_word(STARTER_NOTE, strcmp(status, "ok") ? "partial" : "next");
+  }
   pid_t ui = start_ui();
   if (ui < 0) { notify("Launcher5 : impossible de lancer l'interface"); return EXIT_FAILURE; }
 
@@ -476,8 +937,12 @@ int main(int argc, char **argv) {
   struct stat st;
   for (;;) {
     /* 1) l'interface est ouverte : on attend une demande */
-    int launched = 0;
+    int launched = 0, tick = 0;
     while (ui > 0 && alive(ui)) {
+      if (++tick % 30 == 0 && appinfo_sig() != catalog_sig) {   /* toutes les 3 s */
+        logf("base des applications modifiee : liste des jeux mise a jour");
+        export_catalog();
+      }
       if (!stat(REQUEST_PATH, &st) && !read_request(type, value, cwd, sizeof type)) {
         logf("demande : %s %s", type, value);
         if (!strcmp(type, "close")) {
