@@ -158,7 +158,7 @@ enum {
   ACT_LAUNCH, ACT_OPEN, ACT_MOVE, ACT_TO_FOLDER, ACT_OUT_OF_FOLDER, ACT_RENAME, ACT_HIDE,
   ACT_SHOW, ACT_COLOR, ACT_DELETE_FOLDER, ACT_NEW_FOLDER, ACT_TOGGLE_HIDDEN, ACT_RESET_NAME, ACT_THEME, ACT_SAVE_THEME,
   ACT_VIEW, ACT_FAV, ACT_UNFAV, ACT_INFO, ACT_SEARCH, ACT_CATALOG, ACT_BOOT,
-  ACT_START_MANUAL, ACT_START_PLUGIN, ACT_START_AUTOLOAD, ACT_FIRST_YES, ACT_FIRST_NO, ACT_K_BOOT, ACT_K_SEND, ACT_HELP_PAY,
+  ACT_START_MANUAL, ACT_START_PLUGIN, ACT_START_AUTOLOAD, ACT_FIRST_YES, ACT_FIRST_NO, ACT_RELINK_YES, ACT_RELINK_NO, ACT_K_BOOT, ACT_K_SEND, ACT_HELP_PAY,
   /* menu rapide (touche OPTIONS) */
   ACT_Q_RESTART, ACT_Q_CACHE, ACT_Q_QUIT, ACT_Q_RESUME, ACT_Q_CATALOG,
 };
@@ -2681,11 +2681,14 @@ static void draw_catalog(void);
 static void open_start_menu(void);
 static void first_run_autoload(void);
 static void start_mode_set(int m);
+static void autoload_mark(int on);
+static void autoload_lost_check(void);
 static void open_catalog(void);
 static void theme_saved_as(const char *name);
 
 static void draw_list_panel(const char *title, int n, const char *(*label)(int), int sel, uint32_t (*swatch)(int)) {
   int pw = 760, ph = 120 + n * 66;
+  if (text_w(S.f36, title) + 88 > pw) pw = text_w(S.f36, title) + 88;   /* le titre aussi */
   for (int i = 0; i < n; i++) {                  /* plus large si un choix ne tient pas */
     int need = text_w(S.f30, label(i)) + 130 + (swatch ? 54 : 0);
     if (need > pw) pw = need;
@@ -4473,6 +4476,8 @@ static void do_action(int act) {
   case ACT_BOOT: if (e && !e->is_folder) boot_toggle(e->app); break;
   case ACT_START_MANUAL: case ACT_START_PLUGIN: case ACT_START_AUTOLOAD: start_mode_set(act - ACT_START_MANUAL); break;
   case ACT_FIRST_YES: start_mode_set(2 /* autoloader */); break;
+  case ACT_RELINK_YES: start_mode_set(2 /* autoloader */); break;
+  case ACT_RELINK_NO: autoload_mark(0); toast("Tu pourras le remettre dans Paramètres › Démarrage de Launcher5"); break;
   case ACT_HELP_PAY: open_help(1); break;
   case ACT_K_BOOT: if (kernel_pending && boot_index(kernel_pending) < 0) boot_toggle(kernel_pending); break;
   case ACT_FIRST_NO: toast("Tu pourras l'activer dans Paramètres › Démarrage de Launcher5"); break;
@@ -6580,6 +6585,15 @@ static int autostart_enable(char *msg, size_t mn) {
   }
   int existed = f != NULL;
   if (f) fclose(f);
+  /* pauses (!ms) et lignes vides laissees en fin de fichier : on remet la notre seule */
+  while (kl > 0) {
+    size_t st = kl - 1;
+    while (st > 0 && keep[st - 1] != '\n') st--;
+    const char *t = keep + st;
+    while (t < keep + kl && (*t == ' ' || *t == '\t')) t++;
+    if (t < keep + kl && *t != '!' && *t != '\r' && *t != '\n') break;
+    kl = st;
+  }
   (void)has_ldr;
   if (existed && access(bak, F_OK) && copy_file(al, bak)) { free(keep); snprintf(msg, mn, "%s", tr("Sauvegarde de autoload.txt impossible")); return -1; }
   al_path(eld, sizeof eld, "elfldr.elf");
@@ -6669,6 +6683,35 @@ static int start_mode_available(int m) {
 }
 static const char *START_MODE_NAMES[3] = { "Manuel", "Plugin OnionHEN", "Autoloader" };
 
+/* Launcher5 en mode autoloader : on note quel autoload.txt le lance. Si un autre outil
+   (Payload Manager…) le reecrit sans Launcher5, on le dit une fois a l'ouverture. */
+static void autoload_mark(int on) {
+  char mk[PATH_LEN], al[PATH_LEN];
+  snprintf(mk, sizeof mk, "%s/cache/autoload_on", plat_data_dir());
+  if (!on) { remove(mk); return; }
+  al_path(al, sizeof al, "autoload.txt");
+  FILE *f = fopen(mk, "w");
+  if (f) { fprintf(f, "%s\n", al); fclose(f); }
+}
+
+static void autoload_lost_check(void) {
+  char mk[PATH_LEN], was[PATH_LEN] = "", al[PATH_LEN];
+  snprintf(mk, sizeof mk, "%s/cache/autoload_on", plat_data_dir());
+  int mode = start_mode();
+  FILE *f = fopen(mk, "r");
+  if (f) { if (!fgets(was, sizeof was, f)) was[0] = 0; fclose(f); was[strcspn(was, "\r\n")] = 0; }
+  if (mode == SM_AUTOLOAD) { autoload_mark(1); return; }
+  if (!was[0] || S.mode != MODE_BROWSE) return;
+  al_path(al, sizeof al, "autoload.txt");
+  if (strcmp(was, al) || access(al, F_OK)) return;   /* cle USB retiree… : rien a dire */
+  plat_log("autoload.txt modifie par un autre outil : Launcher5 n'y est plus");
+  S.nchoices = 0; S.csel = 0; S.quick = 0;
+  snprintf(S.ctx_title, sizeof S.ctx_title, "%s", tr("Launcher5 n'est plus lancé au démarrage"));
+  add_choice("Le remettre (autoload.txt sauvegardé)", ACT_RELINK_YES);
+  add_choice("Non, ne plus demander", ACT_RELINK_NO);
+  S.mode = MODE_CONTEXT;
+}
+
 static void start_mode_set(int m) {
   char msg[200] = "";
   int cur = start_mode(), rc = 0;
@@ -6677,6 +6720,7 @@ static void start_mode_set(int m) {
   if (!rc && m == SM_PLUGIN) rc = onion_enable(msg, sizeof msg);
   if (!rc && m == SM_AUTOLOAD) rc = autostart_enable(msg, sizeof msg);
   if (!rc && m == SM_MANUAL) snprintf(msg, sizeof msg, "%s", tr("Démarrage manuel : la chaîne d'origine est remise"));
+  if (!rc) autoload_mark(m == SM_AUTOLOAD);      /* choix de l'utilisateur : on suit */
   as_cached = -2;
   if (rc) sfx(SFX_ERROR);
   toast(msg);
@@ -7497,6 +7541,7 @@ int main(int argc, char **argv) {
   boot_refresh();
   first_run_autoload();                          /* premier lancement : inscription dans l'autoloader */
   starter_note();
+  autoload_lost_check();                         /* Launcher5 retire de autoload.txt par un autre outil ? */
   while (S.running) {
     box_poll();
     up_poll();

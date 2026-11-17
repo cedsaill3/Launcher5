@@ -2,7 +2,7 @@
 
 # Launcher5 — game loader pour PS5
 
-**par cedsaill** · v2.5.6 · [English below](#english)
+**par cedsaill** · v2.5.7 · [English below](#english)
 
 **Tu lances Launcher5, tu joues.** Tout est automatique : au premier lancement, il installe
 kstuff et ShadowMount et s'ajoute au démarrage de la console. À chaque allumage, tout est
