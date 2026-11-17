@@ -2,7 +2,7 @@
 
 # Launcher5 — game loader pour PS5
 
-**par cedsaill** · v2.5.7 · [English below](#english)
+**par cedsaill** · v2.5.8 · [English below](#english)
 
 **Tu lances Launcher5, tu joues.** Tout est automatique : au premier lancement, il installe
 kstuff et ShadowMount et s'ajoute au démarrage de la console. À chaque allumage, tout est
@@ -27,6 +27,8 @@ prêt et le launcher s'ouvre sur tes jeux.
 ## Fonctions
 - **Automatique** : kstuff et ShadowMount installés et lancés à chaque allumage, `autoload.txt`
   créé ou complété (l'ancien est sauvegardé), jeux prêts à l'ouverture
+- **État de la console** (Paramètres) : kstuff, ShadowMount et démarrage vérifiés d'un coup d'œil,
+  **✕ Tout réparer** remet tout en place
 - **3 affichages** au pavé tactile : Cover Flow, Grille, Carrousel
 - **Jaquettes officielles** des jeux PS5, téléchargées toutes seules depuis la
   [base Launcher5](https://github.com/cedsaill3/Launcher5-covers) (marche même quand Sony est bloqué par DNS) ;
@@ -123,7 +125,8 @@ follows the console language (French, English, Spanish, German, Italian, Portugu
 **Install:** download `launcher5.elf` from [Releases](../../releases) and send
 `launcher5.elf` to your ELF loader (port 9021). A *Launcher5* tile is added to the PS5 home screen.
 That's it: you can play. Your previous `autoload.txt` is kept and backed up
-(*Settings › Launcher5 startup › Manual* restores it).
+(*Settings › Launcher5 startup › Manual* restores it). If something is missing,
+*Settings › Console status › ✕ Fix everything* sets it all up again.
 
 **Updates:** the launcher checks GitHub once a day; *Settings › Update* downloads the new version,
 verifies its SHA-256 and installs it. It is saved on the console as `/data/launcher5/launcher5.elf`:

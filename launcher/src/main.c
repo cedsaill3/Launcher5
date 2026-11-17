@@ -2676,6 +2676,10 @@ static void draw_gx(Entry *e);
 static void draw_quick_info(void);
 static void draw_info(void);
 static void draw_help(void);
+static void draw_status(int px, int py, int pw, int ph);
+static void status_refresh(void);
+static void status_repair(void);
+static void status_poll(void);
 static void open_help(int kind);
 static void draw_catalog(void);
 static void open_start_menu(void);
@@ -3820,6 +3824,7 @@ static void draw_help(void) {
   int px = 90, py = 60, pw = W - 180, ph = H - 120;
   glass_panel(px, py, pw, ph);
   draw_text(S.f22, "○  Fermer", px + 52, py + ph - 56, 0x9aa4b5, 0, 0);
+  if (help_kind == 2) { draw_status(px, py, pw, ph); return; }
   if (help_kind == 1)
     draw_text(S.f22, "Retrouve cette aide : △ sur un payload, ou OPTIONS", px + pw - 52, py + ph - 56, 0x9aa4b5, 2, 0);
   if (help_kind == 0) {
@@ -5852,10 +5857,11 @@ static int starter_local(const char *name, const char *prefix, PCat *c) {
   al_path(al, sizeof al, NULL);
   struct { const char *d; int depth; } D[] = { { "/data/pldmgr/payloads", 3 }, { "/data/etaHEN/payloads", 1 },
                                                { "/data/payloads", 1 }, { NULL, 0 } };
-  for (int i = 0; i < 4 && !src[0]; i++) {
-    if (D[i].d) snprintf(dir, sizeof dir, "%s%s", plat_root(), D[i].d);
+  for (int i = 0; i < 4 + 8 && !src[0]; i++) {
+    if (i >= 4) snprintf(dir, sizeof dir, "%s/mnt/usb%d", plat_root(), i - 4);   /* cle USB */
+    else if (D[i].d) snprintf(dir, sizeof dir, "%s%s", plat_root(), D[i].d);
     else snprintf(dir, sizeof dir, "%s", al);
-    if (local_find(dir, prefix, i == 2 ? c->file : NULL, D[i].depth, src, sizeof src)) src[0] = 0;   /* pas soi-meme */
+    if (local_find(dir, prefix, i == 2 ? c->file : NULL, i >= 4 ? 2 : D[i].depth, src, sizeof src)) src[0] = 0;   /* pas soi-meme */
   }
   if (!src[0]) return -1;
   char dst[PATH_LEN + 120], side[PATH_LEN + 130];
@@ -6278,7 +6284,7 @@ static void up_poll(void) {
 /* ------------------------------------------------------------------ */
 /* Menu Parametres : une vraie liste de reglages + une carte d'infos    */
 /* ------------------------------------------------------------------ */
-enum { SR_THEME, SR_VIEW, SR_COVERS, SR_ONLINE, SR_SAVER, SR_SFX, SR_SFXPACK, SR_BOOT, SR_RETURN, SR_FOLDERS, SR_HIDDEN, SR_HIDEIP,
+enum { SR_STATUS, SR_THEME, SR_VIEW, SR_COVERS, SR_ONLINE, SR_SAVER, SR_SFX, SR_SFXPACK, SR_BOOT, SR_RETURN, SR_FOLDERS, SR_HIDDEN, SR_HIDEIP,
        SR_AUTOSTART, SR_AUTOUPD, SR_UPDATE, SR_CONTROLS, SR_QUIT, SR_COUNT };
 static int autostart_state(void);
 static int as_cached;
@@ -6381,6 +6387,9 @@ static void settings_change(int d, int activate) {
     break;
   case SR_CONTROLS:
     if (activate) open_help(0);
+    break;
+  case SR_STATUS:
+    if (activate) { status_refresh(); open_help(2); }
     break;
   case SR_QUIT:
     if (activate) { App *a = menu_find_app(&S.menu, "sys:home"); if (a) launch(a); }
@@ -6812,6 +6821,131 @@ static void autostart_sync(void) {
 }
 
 /* renvoie 1 si la touche est prise par le menu */
+/* ------------------------------------------------------------------ */
+/* Etat de la console (Parametres) : ce qui tourne, ce qui manque, et  */
+/* « Tout reparer » qui refait l'installation du premier lancement.    */
+/* ------------------------------------------------------------------ */
+enum { ST_OK, ST_WARN, ST_BAD };
+static struct { int lvl; char what[64], detail[200]; } STL[6];
+static int nstl;
+static SDL_atomic_t repair_done;
+static volatile int repairing;
+
+static int proc_running(const char *procs, const char *prefix) {
+  for (const char *l = procs; *l;) {
+    const char *e = strchr(l, '\n');
+    size_t len = e ? (size_t)(e - l) : strlen(l);
+    char low[24];
+    size_t k = 0;
+    for (; k < len && k + 1 < sizeof low; k++) low[k] = (char)tolower((unsigned char)l[k]);
+    low[k] = 0;
+    if (!strncmp(low, prefix, strlen(prefix))) return 1;
+    if (!e) break;
+    l = e + 1;
+  }
+  return 0;
+}
+
+static void st_add(int lvl, const char *what, const char *detail) {
+  if (nstl >= 6) return;
+  STL[nstl].lvl = lvl;
+  snprintf(STL[nstl].what, sizeof STL[nstl].what, "%s", tr(what));
+  snprintf(STL[nstl].detail, sizeof STL[nstl].detail, "%s", tr(detail));
+  nstl++;
+}
+
+static void status_refresh(void) {
+  static char procs[24576];
+  nstl = 0;
+  if (plat_procs(procs, sizeof procs)) procs[0] = 0;
+  if (nboot < 0) boot_load();
+  int in_ks = 0, in_sm = 0;
+  for (int i = 0; i < nboot; i++) {
+    if (name_has(BOOTL[i], "kstuff")) in_ks = 1;
+    if (name_has(BOOTL[i], "shadowmount") || name_has(BOOTL[i], "kraken")) in_sm = 1;
+  }
+  int ks = proc_running(procs, "kstuff") || proc_running(procs, "etahen");
+  int sm = proc_running(procs, "shadowmount") || port_open(8097);
+  st_add(ks ? ST_OK : in_ks ? ST_WARN : ST_BAD, "kstuff (jeux et FPKG)",
+         ks ? "Actif" : in_ks ? "Pas lancé : il partira au prochain allumage de la console" : "Absent : ✕ Tout réparer");
+  st_add(sm ? ST_OK : in_sm ? ST_WARN : ST_BAD, "Monteur de jeux (ShadowMount)",
+         sm ? "Actif" : in_sm ? "Pas lancé : il partira au prochain allumage de la console" : "Absent : ✕ Tout réparer");
+  st_add(in_ks && in_sm ? ST_OK : ST_BAD, "Liste au démarrage",
+         in_ks && in_sm ? "kstuff et ShadowMount partent à chaque allumage" : "Incomplète : ✕ Tout réparer");
+  int mode = start_mode();
+  st_add(mode != SM_MANUAL ? ST_OK : ST_BAD, "Démarrage avec le jailbreak",
+         mode == SM_AUTOLOAD ? "Autoloader : Launcher5 démarre tout seul" : mode == SM_PLUGIN ? "Plugin OnionHEN : Launcher5 démarre tout seul"
+                             : "Manuel : ✕ Tout réparer pour démarrer tout seul");
+  char ldr[PATH_LEN];
+  int has_ldr = !find_elfldr(ldr, sizeof ldr);
+  st_add(has_ldr ? ST_OK : ST_WARN, "Chargeur ELF (elfldr)",
+         has_ldr ? "Présent" : "Absent : ✕ Tout réparer pour l'installer");
+}
+
+static int repair_thread(void *u) {
+  (void)u;
+  char p[PATH_LEN];
+  snprintf(p, sizeof p, "%s/cache/starter_done", plat_data_dir());
+  remove(p);
+  snprintf(p, sizeof p, "%s/cache/starter_tries", plat_data_dir());
+  remove(p);
+  starter_prepare();                             /* payloads, elfldr, liste au demarrage */
+  SDL_AtomicSet(&repair_done, 1);
+  return 0;
+}
+
+static void status_repair(void) {
+  if (repairing) return;
+  repairing = 1;
+  plat_log("etat de la console : reparation demandee");
+  SDL_Thread *t = SDL_CreateThread(repair_thread, "l5repair", NULL);
+  if (t) SDL_DetachThread(t); else repairing = 0;
+}
+
+/* fin de la reparation, dans le fil de l'ecran */
+static void status_poll(void) {
+  if (!SDL_AtomicGet(&repair_done)) return;
+  SDL_AtomicSet(&repair_done, 0);
+  repairing = 0;
+  scan_all(&S.menu);                             /* payloads installes */
+  nboot = -1;
+  boot_refresh();
+  if (start_mode() == SM_MANUAL) {               /* demarrage automatique, comme au premier lancement */
+    char dir[PATH_LEN];
+    struct stat st;
+    al_path(dir, sizeof dir, NULL);
+    if ((stat(dir, &st) || !S_ISDIR(st.st_mode)) && !onion_present()) {
+      char data[PATH_LEN];
+      snprintf(data, sizeof data, "%s/data", plat_root());
+      mkdir(data, 0755);
+      mkdir(dir, 0755);
+    }
+    char msg[200];
+    if (!autostart_enable(msg, sizeof msg)) autoload_mark(1);
+    as_cached = -2;
+  }
+  status_refresh();
+  int bad = 0;
+  for (int i = 0; i < nstl; i++) if (STL[i].lvl == ST_BAD && i > 0) bad = 1;   /* kstuff seul : redemarrage */
+  if (!STL[0].lvl && !bad) toast("Tout est en place");
+  else if (!bad) toast("Réparé : redémarre la console pour lancer kstuff et ShadowMount");
+  else toast("Réparation incomplète (Internet ?) : réessaie plus tard");
+  sfx(bad ? SFX_ERROR : SFX_OK);
+}
+
+static void draw_status(int px, int py, int pw, int ph) {
+  draw_text(S.f48, "État de la console", px + 50, py + 34, 0xffffff, 0, pw - 100);
+  for (int i = 0; i < nstl; i++) {
+    int y = py + 140 + i * 112, x = px + 60;
+    uint32_t c = STL[i].lvl == ST_OK ? 0x2ecc71 : STL[i].lvl == ST_WARN ? 0xf5a623 : 0xe74c3c;
+    fill_round(x, y + 8, 34, 34, 17, c, 255);
+    draw_text(S.f30, STL[i].what, x + 60, y, 0xffffff, 0, pw - 200);
+    draw_text(S.f22, STL[i].detail, x + 60, y + 44, 0xc9d1dc, 0, pw - 200);
+  }
+  draw_text(S.f22, repairing ? "Réparation en cours…" : "✕  Tout réparer", px + pw - 52, py + ph - 56,
+            repairing ? 0xf5a623 : 0xffffff, 2, 0);
+}
+
 static int settings_input(int in) {
   switch (in) {
   case IN_UP: if (set_row > 0) set_row--; return 1;
@@ -6979,13 +7113,14 @@ static void draw_view_preview(int cx, int cy, int cw, int ch) {
 }
 
 static void draw_settings(void) {
-  static const char *ICON[SR_COUNT] = { "◐", "▦", "▯", "⬇", "☾", "♪", "♫", "★", "↺", "▤", "◌", "⊘", "⚡", "◷", "↻", "✚", "⌂" };
+  static const char *ICON[SR_COUNT] = { "✓", "◐", "▦", "▯", "⬇", "☾", "♪", "♫", "★", "↺", "▤", "◌", "⊘", "⚡", "◷", "↻", "✚", "⌂" };
   static const char *LABEL[SR_COUNT] = {
-    "Thème", "Affichage des jeux", "Jaquettes", "Jaquettes officielles", "Économiseur d'écran", "Sons d'interface", "Style des sons", "Son de démarrage",
+    "État de la console", "Thème", "Affichage des jeux", "Jaquettes", "Jaquettes officielles", "Économiseur d'écran", "Sons d'interface", "Style des sons", "Son de démarrage",
     "Retour automatique", "Section Mes dossiers", "Éléments masqués", "Masquer l'IP", "Démarrage de Launcher5", "Mises à jour automatiques", "Mettre à jour",
     "Commandes de la manette", "Quitter vers l'accueil PS5",
   };
   static const char *HELP[SR_COUNT] = {
+    "✕ vérifie kstuff, ShadowMount, le démarrage  ·  et répare tout",
     "◀ ▶ change de thème  ·  ✕ ouvre le Studio Thème",
     "Cover Flow, Grille ou Carrousel  ·  aperçu à droite",
     "Boîtes verticales ou icônes carrées",
@@ -7163,7 +7298,11 @@ static void handle_inner(int in) {
     } else if (in == IN_BACK) S.mode = MODE_BROWSE;
     return;
   }
-  if (S.mode == MODE_HELP) { if (in == IN_BACK || in == IN_OK || in == IN_MENU) S.mode = MODE_BROWSE; return; }
+  if (S.mode == MODE_HELP) {
+    if (help_kind == 2 && in == IN_OK) { status_repair(); return; }   /* Etat de la console : reparer */
+    if (in == IN_BACK || in == IN_OK || in == IN_MENU) S.mode = MODE_BROWSE;
+    return;
+  }
   if (S.mode == MODE_INFO) {
     if (in == IN_OK && info_app) { S.mode = MODE_BROWSE; launch(info_app); }
     else if (in == IN_BACK || in == IN_MENU) S.mode = MODE_BROWSE;
@@ -7546,6 +7685,7 @@ int main(int argc, char **argv) {
     box_poll();
     up_poll();
     pcat_poll();
+    status_poll();
     boot_poll();
     Uint64 now = SDL_GetPerformanceCounter();
     S.dt = (float)(now - last) / SDL_GetPerformanceFrequency();
