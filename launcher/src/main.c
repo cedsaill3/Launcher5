@@ -5806,6 +5806,64 @@ static int pcat_job_thread(void *u) {
 enum { ST_KSTUFF, ST_SHADOW, ST_N };
 
 static int find_elfldr(char *out, size_t n);
+static int is_elf_file(const char *p);
+static int copy_file(const char *src, const char *dst);
+static void al_path(char *o, size_t n, const char *f);
+
+/* copie deja presente sur la console (Payload Manager, etaHEN, /data/payloads, autoloader),
+   quand le telechargement est impossible (console sans Internet) */
+static int local_find(const char *dir, const char *prefix, const char *skip, int depth, char *out, size_t n) {
+  DIR *d = opendir(dir);
+  if (!d) return -1;
+  struct dirent *e;
+  int found = -1;
+  while (found && (e = readdir(d))) {
+    if (e->d_name[0] == '.') continue;
+    char p[PATH_LEN + 260];
+    snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+    struct stat st;
+    if (stat(p, &st)) continue;
+    if (S_ISDIR(st.st_mode)) { if (depth > 0) found = local_find(p, prefix, skip, depth - 1, out, n); continue; }
+    char low[256];
+    size_t k = 0;
+    for (; e->d_name[k] && k + 1 < sizeof low; k++) low[k] = (char)tolower((unsigned char)e->d_name[k]);
+    low[k] = 0;
+    if (strncmp(low, prefix, strlen(prefix)) || k < 5 || strcmp(low + k - 4, ".elf")) continue;
+    if (skip && !strcasecmp(e->d_name, skip)) continue;
+    if (!is_elf_file(p)) continue;
+    snprintf(out, n, "%s", p);
+    found = 0;
+  }
+  closedir(d);
+  return found;
+}
+
+/* installe la copie locale comme si elle venait du catalogue (meme nom, meme chemin) */
+static int starter_local(const char *name, const char *prefix, PCat *c) {
+  char src[PATH_LEN + 260] = "", dir[PATH_LEN], al[PATH_LEN];
+  memset(c, 0, sizeof *c);
+  snprintf(c->name, sizeof c->name, "%s", name);
+  pcat_file_name(name, c->file, sizeof c->file);
+  al_path(al, sizeof al, NULL);
+  struct { const char *d; int depth; } D[] = { { "/data/pldmgr/payloads", 3 }, { "/data/etaHEN/payloads", 1 },
+                                               { "/data/payloads", 1 }, { NULL, 0 } };
+  for (int i = 0; i < 4 && !src[0]; i++) {
+    if (D[i].d) snprintf(dir, sizeof dir, "%s%s", plat_root(), D[i].d);
+    else snprintf(dir, sizeof dir, "%s", al);
+    if (local_find(dir, prefix, i == 2 ? c->file : NULL, D[i].depth, src, sizeof src)) src[0] = 0;   /* pas soi-meme */
+  }
+  if (!src[0]) return -1;
+  char dst[PATH_LEN + 120], side[PATH_LEN + 130];
+  snprintf(dir, sizeof dir, "%s/data/payloads", plat_root());
+  mkdir(dir, 0755);
+  snprintf(dst, sizeof dst, "%s/%s", dir, c->file);
+  if (copy_file(src, dst)) return -1;
+  snprintf(side, sizeof side, "%s.json", dst);
+  json_t *m = json_pack("{s:s, s:s, s:s, s:s}", "name", name, "id", name, "filename", c->file, "source", "local");
+  if (m) { json_dump_file(m, side, JSON_INDENT(2)); json_decref(m); }
+  plat_log("premier lancement : %s pris sur la console (%s)", name, src);
+  return 0;
+}
 
 static int starter_current(const PCat *c) {      /* deja dans /data/payloads, meme version */
   char p[PATH_LEN + 120];
@@ -5888,6 +5946,10 @@ static int starter_prepare(void) {
     got[k] = !pcat_download(&want[k], "ps5-payloads-mirror", msg, sizeof msg);
     if (!got[k]) plat_log("premier lancement : %s non installe (%s)", want[k].name, msg);
   }
+  /* sans Internet : les copies deja sur la console */
+  static const char *const PREFIX[2] = { "kstuff", "shadowmount" };
+  for (int k = 0; k < ST_N; k++)
+    if (!got[k] && !starter_local(CAT_NAMES[k], PREFIX[k], &want[k])) got[k] = 1;
 
   /* liste « Au demarrage » : kstuff en premier, puis la liste actuelle, puis les monteurs */
   char lp[PATH_LEN], tp[PATH_LEN + 8];
