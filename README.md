@@ -34,18 +34,23 @@ prêt et le launcher s'ouvre sur tes jeux.
   [base Launcher5](https://github.com/cedsaill3/Launcher5-covers) (marche même quand Sony est bloqué par DNS) ;
   boîtiers PS5 / PS4 pour les autres jeux, homebrews en rouge, ou ta jaquette dans `jaquettes/` ;
   tes propres images de boîtier dans `boitiers/` (`ps5.png`, `ps4.png`, zone de la jaquette transparente)
-- Sections : Jeux PS5, Jeux PS4, Médias, Homebrews, Émulateurs, Payloads, Récents, Mes dossiers
+- Sections : Jeux PS5, Jeux PS4, Médias, Homebrews, Émulateurs, Payloads, Récents, Mes dossiers, Xplorer
+- **Xplorer** : parcourir les stockages (interne, USB, disque étendu), copier, déplacer, supprimer
+  des jeux et des fichiers entre eux, voir le contenu d'un fichier ; le système reste protégé
 - **Section Payloads** : catalogue avec mises à jour, liste « Au démarrage », payloads actifs
   affichés en haut à droite, payloads noyau envoyés seulement au démarrage et jamais deux fois
 - Les jeux installés ou montés (PKG, FPKG) apparaissent tout seuls, même launcher ouvert
-- **Studio Thème** à la manette : 24 thèmes dont **Loader GX** (interface claire façon USB Loader GX) et **Rebug** (interface façon XMB), 7 fonds d'écran, couleurs, effets animés, particules,
-  style de boîtier, musique d'ambiance
+- **Studio Thème** à la manette : 24 thèmes dont **Loader GX** (interface claire façon USB Loader GX) et **Rebug** (interface façon XMB), 8 fonds d'écran, fond animé, couleurs, effets animés,
+  particules, style de boîtier, musique d'ambiance (une musique fournie)
 - Sons d'interface (5 styles) et sons de démarrage
-- **Menu rapide** (OPTIONS) : catalogue de payloads, aide, relancer, vider le cache des jaquettes
+- **Menu rapide** (OPTIONS) : catalogue de payloads, aide, relancer, vider le cache des jaquettes,
+  fermer le launcher
 - **Mise à jour automatique** depuis GitHub
 - Dossiers, favoris, noms perso, jeux masqués, temps de jeu, économiseur d'écran, masquer l'IP
 - Français, anglais, espagnol, allemand, italien, portugais selon la langue de la console
-- Tuile **Launcher5** sur l'accueil de la PS5, 60 images/s
+- Tuile **Launcher5** sur l'accueil de la PS5, affichage par la carte graphique (4K, 60 images/s),
+  images/s et résolution affichées en haut à droite
+- **Désinstallation** depuis les Paramètres
 
 ## Installation
 **Nouvelle installation**
@@ -93,7 +98,7 @@ La nouvelle version est enregistrée sur la console :
 | ✕ | jouer / ouvrir |
 | △ | options (dossiers, renommer, masquer, thème…) |
 | □ | déplacer |
-| OPTIONS | menu rapide (catalogue de payloads, aide, relancer, vider le cache des jaquettes) |
+| OPTIONS | menu rapide (catalogue de payloads, aide, relancer, vider le cache des jaquettes, fermer le launcher) |
 | ○ | retour |
 
 ## Personnaliser
@@ -112,6 +117,8 @@ Le launcher recharge tout seul un menu, un thème ou une jaquette modifiés.
 ## Compiler
 - PS5 : SDK [ps5-payload-dev](https://github.com/ps5-payload-dev/sdk), dans Ubuntu (WSL) :
   `cd launcher && make` → `launcher/build/launcher5.elf`
+- Affichage par la carte graphique : d'abord `bash gpu/build.sh` (voir l'en-tête du script pour les
+  outils nécessaires), puis `make` ; sans cette étape, le launcher utilise l'affichage classique.
 
 ## Licence
 Launcher5 © 2026 cedsaill. Les chargeurs ELF (`launcher/gpl/`) et la méthode
@@ -130,7 +137,8 @@ et restent la propriété de leurs auteurs.
 **Launcher5** is a game loader for jailbroken PS5 consoles, by **cedsaill**.
 **Launch it and play:** on first launch it installs kstuff and ShadowMount and adds itself to the
 console startup. At every boot everything is ready and the launcher opens on your games.
-Official covers, Cover Flow, grid, carousel, animated themes, sounds, folders, music. The interface
+Official covers, Cover Flow, grid, carousel, animated themes, sounds, folders, music, a file explorer
+(Xplorer: copy, move and delete games and files between storages), GPU rendering in 4K at 60 fps. The interface
 follows the console language (French, English, Spanish, German, Italian, Portuguese).
 
 **Install:** download `launcher5.elf` from [Releases](../../releases) and send
