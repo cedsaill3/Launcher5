@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <strings.h>
 #include <sys/stat.h>
 #include <jansson.h>
@@ -63,6 +64,16 @@ static int read_param_json(const char *path, char *title, size_t n, int *media) 
 }
 
 /* Nom du jeu dans param.sfo (PS4) : format binaire « PSF » */
+static int read_param_sfo(const char *path, char *title, size_t n);
+/* nom du jeu contenu dans un dossier (PS5 : param.json, PS4 : param.sfo) */
+int scan_folder_title(const char *dir, char *title, size_t n) {
+  char p[1200];
+  snprintf(p, sizeof p, "%s/sce_sys/param.json", dir);
+  if (!access(p, F_OK)) return read_param_json(p, title, n, NULL);
+  snprintf(p, sizeof p, "%s/sce_sys/param.sfo", dir);
+  if (!access(p, F_OK)) return read_param_sfo(p, title, n);
+  return -1;
+}
 static int read_param_sfo(const char *path, char *title, size_t n) {
   FILE *f = fopen(path, "rb");
   if (!f) return -1;

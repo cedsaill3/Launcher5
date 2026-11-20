@@ -240,6 +240,10 @@ static void local_ip(char *ip, size_t n) {
 
 static long long free_mb_of(const char *path) {
   struct statvfs v;
+#ifdef L5_GPU    /* indisponible dans une application (plante) */
+  (void)v; (void)path;
+  return -1;
+#endif
   if (statvfs(path, &v)) return -1;
   return (long long)v.f_bavail * (long long)v.f_frsize / (1024 * 1024);
 }
@@ -272,7 +276,9 @@ void plat_sysinfo(char *ip, size_t iplen, long long *free_mb, int *temp_c) {
   local_ip(ip, iplen);
   *free_mb = free_mb_of("/user");
   int t = -1;
+#ifndef L5_GPU   /* fonction reservee aux payloads : absente d'une application */
   if (sceKernelGetCpuTemperature(&t) < 0) t = -1;
+#endif
   *temp_c = t;
 }
 
@@ -515,6 +521,8 @@ int plat_restart_ui(void) { return write_request("restart", "launcher", NULL); }
 
 /* l'interface est fermee proprement par le systeme ; la tuile Launcher5 la rouvre */
 int plat_close_ui(void) { return write_request("close", "background", NULL); }
+int plat_stop_launcher(void) { return write_request("stop", "launcher", NULL); }
+int plat_uninstall(int all) { return write_request("uninstall", all ? "tout" : "garder", NULL); }
 
 
 /* Nouvelle version : le bootstrap la lance lui-meme (chargeur integre), sinon par le port 9021.

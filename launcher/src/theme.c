@@ -22,8 +22,9 @@
 
 static const Theme BUILTIN[] = {
   { .name = "Launcher5", .accent = 0xff4d1a, .accent2 = 0x00a33a, .top = 0x100503, .bottom = 0x2e0b05, .bg_mode = BG_IMAGE,
-    .wallpaper = "launcher5-03.jpg", .art = 60, .glow = 100, .particles = PART_NONE, .pstyle = PSTYLE_SPARKS, .fall = 0,
-    .corners = CORNER_SOFT, .clock = CLOCK_24, .volume = 60, .fx = FX_WARP, .auto_color = 1, .sfx = 50, .case_style = CASE_PHOTO },
+    .wallpaper = "launcher5-crane.jpg", .art = 60, .glow = 100, .particles = PART_NONE, .pstyle = PSTYLE_SPARKS, .fall = 0,
+    .corners = CORNER_SOFT, .clock = CLOCK_24, .volume = 60, .fx = FX_WARP, .auto_color = 1, .sfx = 50, .case_style = CASE_PHOTO,
+    .music = "phonk-menu.mp3" },
   /* facon loader GX : noir et anthracite, bleu ciel, boitiers blancs */
   { .name = "Loader GX", .accent = 0x2fb5ea, .accent2 = 0xc4c9d1, .top = 0x000000, .bottom = 0x1d1f24, .bg_mode = BG_GRADIENT,
     .art = 0, .glow = 55, .particles = PART_NONE, .pstyle = PSTYLE_DOTS, .fall = 0, .corners = CORNER_ROUND,
@@ -66,7 +67,7 @@ static const char *PART_KEYS[] = { "aucune", "peu", "beaucoup" };
 static const char *PSTYLE_KEYS[] = { "points", "etincelles", "flocons" };
 static const char *CORNER_KEYS[] = { "droits", "arrondis", "tres_arrondis" };
 static const char *CLOCK_KEYS[] = { "24h", "12h", "masquee" };
-static const char *FX_KEYS[] = { "aucun", "grille", "hyperespace", "pluie" };
+static const char *FX_KEYS[] = { "aucun", "grille", "hyperespace", "pluie", "braises", "aurore", "bokeh", "rayons" };
 static const char *LAYOUT_KEYS[] = { "launcher5", "gx", "xmb" };
 static const char *CASE_KEYS[] = { "bleu", "noir", "blanc", "cristal", "steelbook", "couleur", "images", "aucun" };
 
@@ -130,6 +131,8 @@ int theme_load(const char *path, Theme *t) {
   d.sfx = num_of(json_object_get(j, "sons"), 60, 0, 100);
   d.case_style = key_index(json_object_get(j, "boitier"), CASE_KEYS, CASE_COUNT, CASE_PHOTO);
   d.layout = key_index(json_object_get(j, "interface"), LAYOUT_KEYS, LAYOUT_COUNT, LAYOUT_L5);
+  d.fx_speed = num_of(json_object_get(j, "vitesse_effet"), 50, 10, 100);
+  d.bg_anim = json_is_true(json_object_get(j, "fond_anime"));
   json_decref(j);
   *t = d;
   return 0;
@@ -162,6 +165,8 @@ int theme_save(const char *path, const Theme *t) {
   json_object_set_new(j, "couleur_auto", json_boolean(t->auto_color));
   json_object_set_new(j, "sons", json_integer(t->sfx));
   json_object_set_new(j, "interface", json_string(LAYOUT_KEYS[t->layout >= 0 && t->layout < LAYOUT_COUNT ? t->layout : 0]));
+  json_object_set_new(j, "vitesse_effet", json_integer(t->fx_speed ? t->fx_speed : 50));
+  json_object_set_new(j, "fond_anime", json_boolean(t->bg_anim));
   json_object_set_new(j, "boitier", json_string(CASE_KEYS[t->case_style >= 0 && t->case_style < CASE_COUNT ? t->case_style : 0]));
   char tmp[600];
   snprintf(tmp, sizeof tmp, "%s.tmp", path);

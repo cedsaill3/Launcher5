@@ -26,6 +26,8 @@ long plat_https_get(const char *url, unsigned char **data, size_t *len, size_t m
 /* envoie un ELF au chargeur de la console (port 9021) : 0 si envoye */
 int plat_send_elf(const char *path);
 int plat_restart_ui(void);               /* relance l'interface (0 : demande envoyee) */
+int plat_uninstall(int all);              /* desinstallation par le bootstrap (0 : demande envoyee) */
+int plat_stop_launcher(void);             /* arret complet : interface et bootstrap (0 : demande envoyee) */
 int plat_close_ui(void);                 /* fermeture par le systeme, rouverte par la tuile (0 : demande envoyee) */
 int plat_procs(char *out, size_t n);      /* noms des processus, un par ligne */
 void plat_sysinfo(char *ip, size_t iplen, long long *free_mb, int *temp_c);               /* code de langue du systeme PS5 (2 = francais, 1 = anglais…) */
@@ -37,6 +39,7 @@ int plat_launch(Menu *m, App *a, char *msg, size_t msglen);
 
 /* Recherche du contenu (commun aux deux plateformes) */
 void scan_all(Menu *m);
+int scan_folder_title(const char *dir, char *title, size_t n);
 int payload_excluded(const char *name);
 int payload_hidden(const char *name);     /* outils de developpement… : masques */   /* byepervisor, HyperHEN… : jamais affiches ni lances */
 int payload_icon_path(const char *file, const char *id, char *out, size_t n);   /* icone d'un payload connu */

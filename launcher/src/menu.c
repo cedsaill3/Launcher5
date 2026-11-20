@@ -223,7 +223,7 @@ void menu_reset(Menu *m) {
   free(m->stats); m->stats = NULL; m->nstats = 0;
   free(m->favs); m->favs = NULL; m->nfavs = 0;
   m->saver = 5;
-  m->sfx_pack = 0; m->boot_snd = 0; m->hide_ip = 0; m->boxes = 1; m->covers_online = 1; m->auto_update = 1;
+  m->sfx_pack = 0; m->boot_snd = 0; m->hide_ip = 0; m->scroll_style = 0; m->flow_loop = 1; m->boxes = 1; m->covers_online = 1; m->auto_update = 1;
   m->show_folders = 0;
   m->view = VIEW_FLOW;
   m->theme[0] = 0;
@@ -302,6 +302,8 @@ int menu_load(Menu *m, const char *path) {
   m->boot_snd = (int)json_integer_value(json_object_get(j, "boot_sound"));
   if (m->boot_snd < 0 || m->boot_snd >= BOOT_SOUNDS) m->boot_snd = 0;
   m->hide_ip = json_is_true(json_object_get(j, "hide_ip"));
+  { json_t *v = json_object_get(j, "scroll_style"); if (json_is_integer(v)) m->scroll_style = (int)json_integer_value(v) & 3; }
+  { json_t *v = json_object_get(j, "flow_loop"); if (json_is_boolean(v)) m->flow_loop = json_is_true(v); }
   json_t *bx = json_object_get(j, "boxes");
   m->boxes = bx ? json_is_true(bx) : 1;
   json_t *co = json_object_get(j, "covers_online");
@@ -364,6 +366,8 @@ int menu_save(Menu *m, const char *path) {
   json_object_set_new(j, "sfx_pack", json_integer(m->sfx_pack));
   json_object_set_new(j, "boot_sound", json_integer(m->boot_snd));
   json_object_set_new(j, "hide_ip", json_boolean(m->hide_ip));
+  json_object_set_new(j, "scroll_style", json_integer(m->scroll_style));
+  json_object_set_new(j, "flow_loop", json_boolean(m->flow_loop));
   json_object_set_new(j, "boxes", json_boolean(m->boxes));
   json_object_set_new(j, "covers_online", json_boolean(m->covers_online));
   json_object_set_new(j, "auto_update", json_boolean(m->auto_update));

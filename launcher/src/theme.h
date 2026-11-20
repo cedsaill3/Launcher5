@@ -18,7 +18,7 @@ enum { PART_NONE, PART_FEW, PART_MANY, PART_COUNT };         /* quantite de part
 enum { PSTYLE_DOTS, PSTYLE_SPARKS, PSTYLE_SNOW, PSTYLE_COUNT };
 enum { CORNER_SQUARE, CORNER_ROUND, CORNER_SOFT, CORNER_COUNT };
 enum { CLOCK_24, CLOCK_12, CLOCK_HIDDEN, CLOCK_COUNT };
-enum { FX_NONE, FX_GRID, FX_WARP, FX_RAIN, FX_COUNT };       /* effet anime du fond */
+enum { FX_NONE, FX_GRID, FX_WARP, FX_RAIN, FX_EMBERS, FX_AURORA, FX_BOKEH, FX_RAYS, FX_COUNT };   /* effet anime du fond */
 enum { LAYOUT_L5, LAYOUT_GX, LAYOUT_XMB, LAYOUT_COUNT };                  /* interface de l'ecran des jeux */
 enum { CASE_BLUE, CASE_BLACK, CASE_WHITE, CASE_CRYSTAL, CASE_STEEL, CASE_THEME, CASE_PHOTO, CASE_NONE, CASE_COUNT };   /* boitier des jeux */
 
@@ -42,6 +42,8 @@ typedef struct Theme {
   int sfx;                        /* volume des sons d'interface, 0 = muets */
   int case_style;                 /* CASE_* : boitier autour des jaquettes */
   int layout;                     /* LAYOUT_* : interface Launcher5 ou facon loader GX */
+  int fx_speed;                   /* vitesse de l'effet anime, 10..100 (0 : 50 par defaut) */
+  int bg_anim;                    /* 1 : image de fond qui zoome et glisse lentement (carte graphique) */
 } Theme;
 
 int theme_builtin_count(void);

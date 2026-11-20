@@ -89,6 +89,8 @@ typedef struct Menu {
   int sfx_pack;                       /* style des sons d'interface (0..SFX_PACKS-1) */
   int boot_snd;                       /* son de demarrage (0..BOOT_SOUNDS-1, le dernier = aucun) */
   int hide_ip;                        /* ne pas afficher l'adresse IP a l'ecran */
+  int scroll_style;                   /* defilement des jaquettes : 0 normal, 1 doux, 2 rapide, 3 elastique */
+  int flow_loop;                      /* Cover Flow infini : le dernier jeu est suivi du premier */
   int boxes;                          /* jaquettes boites verticales (sinon icones carrees) */
   int covers_online;                  /* jaquettes officielles telechargees (base Launcher5) */
   int auto_update;                    /* verifier les mises a jour une fois par jour */

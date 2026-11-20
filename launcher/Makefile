@@ -24,6 +24,10 @@ UI_LIBS := $(HB)/lib/libSDL2main.a $(HB)/lib/libSDL2_mixer.a $(HB)/lib/libvorbis
 UI_SRCS := src/main.c src/menu.c src/scan.c src/theme.c src/i18n.c src/platform_ps5.c src/font_data.c src/sha256.c
 GPL_SRCS := gpl/pt.c gpl/elfldr.c gpl/hbldr.c gpl/fs_readfile.c
 
+# interface GPU (application native) : integree si elle a ete compilee dans build/gpu
+GPU_FILES := $(wildcard build/gpu/eboot.bin build/gpu/sce_module/libc.prx build/gpu/sce_sys/param.json)
+GPU_FLAGS := $(if $(GPU_FILES),-DL5_HAVE_GPU)
+
 all: build/launcher5.elf
 
 build:
@@ -33,8 +37,8 @@ build/launcher5-ui.elf: $(UI_SRCS) src/menu.h src/platform.h src/theme.h src/i18
 	$(CC) $(CFLAGS) -o $@ $(UI_SRCS) $(UI_LIBS)
 	$(STRIP) --strip-debug $@
 
-build/launcher5.elf: src/bootstrap.c src/i18n.c src/i18n.h src/version.h $(GPL_SRCS) build/launcher5-ui.elf assets/relay/param.json assets/relay/icon0.png $(wildcard assets/fonds/*.jpg) $(wildcard assets/boitiers/*.png)
-	$(CC) $(CFLAGS) -o $@ src/bootstrap.c src/i18n.c $(GPL_SRCS) $(HB)/lib/libsqlite3.a -lkernel_sys -lSceSystemService -lSceUserService -lSceAppInstUtil -lpthread
+build/launcher5.elf: src/bootstrap.c src/i18n.c src/i18n.h src/version.h $(GPL_SRCS) build/launcher5-ui.elf assets/relay/param.json assets/relay/icon0.png $(wildcard assets/fonds/*.jpg) $(wildcard assets/boitiers/*.png) $(wildcard assets/musique/*.mp3) $(GPU_FILES)
+	$(CC) $(CFLAGS) $(GPU_FLAGS) -o $@ src/bootstrap.c src/i18n.c $(GPL_SRCS) $(HB)/lib/libsqlite3.a -lkernel_sys -lSceSystemService -lSceUserService -lSceAppInstUtil -lpthread
 	$(STRIP) --strip-debug $@
 
 clean:

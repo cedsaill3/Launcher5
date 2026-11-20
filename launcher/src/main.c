@@ -15,6 +15,12 @@
 #include <strings.h>
 #include <time.h>
 #include <dirent.h>
+#include <unistd.h>
+#ifdef L5_GPU
+/* application native : l'appel systeme _exit est interdit, on sort comme une application */
+__attribute__((noreturn)) void l5_app_exit(int status);
+#define _exit l5_app_exit
+#endif
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
 #include <SDL2/SDL_ttf.h>
@@ -30,6 +36,9 @@
 #include <SDL2/SDL_mixer.h>
 #endif
 #include <sys/stat.h>
+#ifdef __linux__
+#include <sys/sysmacros.h>                                   /* major / minor (version PC) */
+#endif
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -59,11 +68,13 @@ extern const unsigned int font_regular_len, font_bold_len;
 #define H 1080
 /* Tailles des jaquettes (largeur) : boites verticales ou icones carrees */
 #define BOXES (S.menu.boxes)
+/* boitiers en images : la selection se voit a la taille, sans cadre blanc par-dessus */
+#define PHOTO_BOX (BOXES && S.base && S.base->case_style == CASE_PHOTO)
 #define TH(w) (BOXES ? (w) * 3 / 2 : (w))          /* hauteur d'une jaquette de largeur w (2:3) */
 #define TILE (BOXES ? 172 : 230)
 #define TILE_SEL (BOXES ? 224 : 300)
 #define FLOW (BOXES ? 300 : 400)                   /* jaquette centrale du cover flow */
-#define FLOW_SIDE (BOXES ? 224 : 300)              /* jaquettes laterales */
+#define FLOW_SIDE (BOXES ? 200 : 300)              /* jaquettes laterales */
 #define FLOW_CY 440       /* centre vertical du cover flow */
 #define GRID_COLS (BOXES ? 7 : 6)
 #define GRID_CELL (BOXES ? 156 : 210)
@@ -119,14 +130,14 @@ static const char *PALETTE_NAMES[] = {
 /* ------------------------------------------------------------------ */
 /* Sections                                                            */
 /* ------------------------------------------------------------------ */
-enum { SEC_HOME, SEC_FAV, SEC_PS5, SEC_PS4, SEC_MEDIA, SEC_HB, SEC_EMU, SEC_PAYLOAD, SEC_TOP, SEC_RECENT, SEC_SYS, SEC_COUNT };
+enum { SEC_HOME, SEC_FAV, SEC_PS5, SEC_PS4, SEC_MEDIA, SEC_HB, SEC_EMU, SEC_PAYLOAD, SEC_TOP, SEC_RECENT, SEC_XPL, SEC_SYS, SEC_COUNT };
 static const char *SEC_NAMES[SEC_COUNT] = {
   "Mes dossiers", "Favoris", "Jeux PS5", "Jeux PS4", "Médias", "Homebrews", "Émulateurs", "Payloads", "Plus joués",
-  "Récents", "Paramètres"
+  "Récents", "Xplorer", "Paramètres"
 };
 /* ordre d'affichage des sections (« Mes dossiers » apres les emulateurs) */
 static const int SEC_ORDER[SEC_COUNT] = { SEC_FAV, SEC_PS5, SEC_PS4, SEC_MEDIA, SEC_HB, SEC_EMU, SEC_HOME, SEC_PAYLOAD,
-                                          SEC_TOP, SEC_RECENT, SEC_SYS };
+                                          SEC_TOP, SEC_RECENT, SEC_XPL, SEC_SYS };
 static int sec_pos(int s) { int i = 0; while (i < SEC_COUNT - 1 && SEC_ORDER[i] != s) i++; return i; }
 /* sections triees par nom : saut par lettre (L2 / R2) */
 #define SEC_SORTED_BY_NAME(s) ((s) != SEC_HOME && (s) != SEC_RECENT && (s) != SEC_TOP)
@@ -152,22 +163,26 @@ static int sec_match(int sec, const App *a) {
 /* ------------------------------------------------------------------ */
 enum { MODE_BROWSE, MODE_CONTEXT, MODE_MOVE, MODE_KEYBOARD, MODE_PICKFOLDER, MODE_COLOR, MODE_THEME, MODE_INFO, MODE_CATALOG, MODE_HELP };
 /* lignes de l'editeur de theme */
-enum { R_PRESET, R_LAYOUT, R_AUTO, R_ACCENT, R_ACCENT2, R_TOP, R_BOTTOM, R_BG, R_WALL, R_ART, R_FX, R_GLOW, R_PART, R_PSTYLE,
+enum { R_PRESET, R_LAYOUT, R_AUTO, R_ACCENT, R_ACCENT2, R_TOP, R_BOTTOM, R_BG, R_WALL, R_BGANIM, R_ART, R_FX, R_FXSPEED, R_GLOW, R_PART, R_PSTYLE,
        R_FALL, R_CASE, R_CORNERS, R_CLOCK, R_SFX, R_MUSIC, R_VOLUME, R_SAVE, R_DELETE, R_COUNT };
 enum {
   ACT_LAUNCH, ACT_OPEN, ACT_MOVE, ACT_TO_FOLDER, ACT_OUT_OF_FOLDER, ACT_RENAME, ACT_HIDE,
   ACT_SHOW, ACT_COLOR, ACT_DELETE_FOLDER, ACT_NEW_FOLDER, ACT_TOGGLE_HIDDEN, ACT_RESET_NAME, ACT_THEME, ACT_SAVE_THEME,
   ACT_VIEW, ACT_FAV, ACT_UNFAV, ACT_INFO, ACT_SEARCH, ACT_CATALOG, ACT_BOOT,
-  ACT_START_MANUAL, ACT_START_PLUGIN, ACT_START_AUTOLOAD, ACT_FIRST_YES, ACT_FIRST_NO, ACT_RELINK_YES, ACT_RELINK_NO, ACT_K_BOOT, ACT_K_SEND, ACT_HELP_PAY,
+  ACT_START_MANUAL, ACT_START_PLUGIN, ACT_START_AUTOLOAD, ACT_FIRST_YES, ACT_FIRST_NO, ACT_RELINK_YES, ACT_RELINK_NO, ACT_UNINST_KEEP, ACT_UNINST_ALL, ACT_K_BOOT, ACT_K_SEND, ACT_HELP_PAY,
   /* menu rapide (touche OPTIONS) */
-  ACT_Q_RESTART, ACT_Q_CACHE, ACT_Q_QUIT, ACT_Q_RESUME, ACT_Q_CATALOG,
+  ACT_Q_RESTART, ACT_Q_CACHE, ACT_Q_QUIT, ACT_Q_STOP, ACT_Q_RESUME, ACT_Q_CATALOG,
 };
 
 typedef struct { int is_folder; int index; App *app; Node *node; } Entry;
-#define GXMODE (S.base && S.base->layout == LAYOUT_GX && S.sec != SEC_SYS)   /* ecran des jeux facon loader GX */
-#define XMBMODE (S.base && S.base->layout == LAYOUT_XMB && S.sec != SEC_SYS) /* ecran des jeux facon XMB */
+#define GXMODE (S.base && S.base->layout == LAYOUT_GX && S.sec != SEC_SYS && S.sec != SEC_XPL)   /* ecran des jeux facon loader GX */
+#define XMBMODE (S.base && S.base->layout == LAYOUT_XMB && S.sec != SEC_SYS && S.sec != SEC_XPL) /* ecran des jeux facon XMB */
 typedef struct { char label[96]; int action; } Choice;
 typedef struct { Node *folder; char label[128]; } FolderChoice;
+static void draw_xplorer(void);                  /* Launcher5 Xplorer */
+static const char *xpl_hint(void);
+static void xpl_input(int in);
+static void xpl_tick(void);
 
 static struct {
   SDL_Window *win;
@@ -237,6 +252,7 @@ static struct {
   float dt;                           /* duree de la derniere image, en secondes */
 
   struct { float x, y, s, v; } part[70];
+  float part_fx[70]; int part_a[70];             /* particules (carte graphique) : position et eclat de l'image */
 
   /* V2 */
   struct { float x, y, z, px, py; } star[160];      /* hyperespace */
@@ -245,6 +261,7 @@ static struct {
   float grid_phase;
   Uint32 last_input;                                /* economiseur d'ecran */
   int saver_on, saver_idx, saver_prev; Uint32 saver_t;
+  int no_bootstrap;                              /* tuile ouverte sans le launcher demarre : ecran d'aide */
   Uint32 boot_t0; int boot_done;                    /* intro au demarrage */
   char letter[8]; Uint32 letter_until;              /* saut par lettre */
   char sysline[160]; Uint32 sys_t;                  /* IP, espace libre, temperature */
@@ -256,6 +273,17 @@ static struct {
 /* ------------------------------------------------------------------ */
 typedef struct { char key[200]; TTF_Font *font; uint32_t color; SDL_Texture *tex; int w, h; Uint32 used; } TextCache;
 static TextCache tcache[400];
+
+/* Ecran 4K (sortie plus grande que les 1920x1080 du dessin) : chaque texte est rendu avec
+   une police deux fois plus grande puis affiche a sa taille normale, donc net a l'ecran.
+   Les mesures (largeurs, hauteurs) restent celles des polices normales. */
+static struct { TTF_Font *lo, *hi; } HIFONT[8];
+static int hidpi;
+static TTF_Font *font_hi(TTF_Font *f) {
+  if (!hidpi) return NULL;
+  for (int i = 0; i < 8; i++) if (HIFONT[i].lo == f) return HIFONT[i].hi;
+  return NULL;
+}
 
 static SDL_Texture *text_tex(TTF_Font *f, const char *s, uint32_t color, int *w, int *h) {
   if (!s || !*s) return NULL;
@@ -271,10 +299,12 @@ static SDL_Texture *text_tex(TTF_Font *f, const char *s, uint32_t color, int *w,
     if (slot->tex) SDL_DestroyTexture(slot->tex);
     slot->tex = NULL;
     SDL_Color col = { (color >> 16) & 255, (color >> 8) & 255, color & 255, 255 };
-    SDL_Surface *surf = TTF_RenderUTF8_Blended(f, s, col);
+    TTF_Font *hf = font_hi(f);
+    SDL_Surface *surf = TTF_RenderUTF8_Blended(hf ? hf : f, s, col);
     if (!surf) return NULL;
     slot->tex = SDL_CreateTextureFromSurface(S.r, surf);
-    slot->w = surf->w; slot->h = surf->h;
+    if (hf) { slot->w = (surf->w + 1) / 2; slot->h = (surf->h + 1) / 2; }
+    else { slot->w = surf->w; slot->h = surf->h; }
     SDL_FreeSurface(surf);
     snprintf(slot->key, sizeof slot->key, "%s", s);
     slot->font = f; slot->color = color;
@@ -321,6 +351,33 @@ static int draw_text_a(TTF_Font *f, const char *s, int x, int y, uint32_t color,
 static int draw_text(TTF_Font *f, const char *s, int x, int y, uint32_t c, int align, int maxw) {
   return draw_text_a(f, s, x, y, c, align, maxw, 255);
 }
+/* Detecteur de blocage : chaque etape de la boucle principale note ou elle en est ; un
+   fil a part verifie que la boucle avance et, sinon, ecrit l'etape dans le journal. */
+volatile const char *l5_where = "demarrage";
+static volatile Uint32 loop_ticks;
+#define WHERE(s) (l5_where = (s))
+static int watchdog(void *u) {
+  (void)u;
+  Uint32 last = loop_ticks, since = SDL_GetTicks();
+  int told = 0;
+  for (;;) {
+    SDL_Delay(500);
+    Uint32 now = SDL_GetTicks();
+    if (loop_ticks != last) {
+      if (told) plat_log("blocage termine apres %u s (%s)", (now - since) / 1000, (const char *)l5_where);
+      last = loop_ticks; since = now; told = 0;
+    } else if (!told && now - since > 5000) {
+      plat_log("blocage : la boucle ne tourne plus depuis 5 s, etape : %s", (const char *)l5_where);
+      told = 1;
+    } else if (told == 1 && now - since > 30000) {
+      plat_log("blocage : toujours bloque apres 30 s, etape : %s", (const char *)l5_where);
+      told = 2;
+    }
+  }
+  return 0;
+}
+static void present(void) { WHERE("affichage de l'image (GPU)"); SDL_RenderPresent(S.r); WHERE("apres affichage"); }
+
 /* lissage independant de la fluidite : k = part parcourue en 1/60 s */
 static float ease(float k) { return 1.0f - powf(1.0f - k, S.dt * 60.0f); }
 
@@ -443,6 +500,10 @@ static void glow(int cx, int cy, int radius, uint32_t color, int alpha) {
   SDL_Rect d = { cx - radius, cy - radius, radius * 2, radius * 2 };
   SDL_RenderCopy(S.r, S.glow, NULL, &d);
 }
+
+static void soft_line(float x0, float y0, float x1, float y1, float w, uint32_t c, int a0, int a1);
+static void soft_dot(float x, float y, float r, uint32_t c, int a);
+static int flow_looping(void);
 
 /* ------------------------------------------------------------------ */
 /* Contenu des sections                                                */
@@ -598,7 +659,7 @@ static int pay_shadowed(const App *a) {
 }
 
 static void build_entries(void) {
-  if (search_q[0] && S.sec != SEC_SYS) {         /* resultats de la recherche, toutes sections confondues */
+  if (search_q[0] && S.sec != SEC_SYS && S.sec != SEC_XPL) {   /* resultats de la recherche, toutes sections confondues */
     S.nentries = 0;
     for (int i = 0; i < S.menu.napps; i++) {
       App *a = &S.menu.apps[i];
@@ -655,6 +716,7 @@ static void update_sections(void) {
     if (st && st->playtime) S.sec_has[SEC_TOP] = 1;
     if (menu_is_fav(&S.menu, a->id)) S.sec_has[SEC_FAV] = 1;
   }
+  S.sec_has[SEC_XPL] = 1;                        /* Launcher5 Xplorer : toujours la */
 }
 
 static int *cur_sel(void) { return S.sec == SEC_HOME ? &S.sel[S.depth] : &S.sec_sel[S.sec]; }
@@ -1118,19 +1180,25 @@ static void box_title(App *a, int w, int h) {
 static uint32_t mix_color(uint32_t c, uint32_t t, float k);
 /* contenu d'une jaquette boite (w x h) dans la cible de rendu courante :
    un boitier en plastique bleu, la jaquette dedans, bandeau PS5 / PS4 en haut */
-/* Boitiers en images : /data/launcher5/boitiers/ps5.png, ps4.png, autre.png (PNG dont la zone
+/* Boitiers en images : /data/launcher5/boitiers/ps5.png, ps4.png, homebrew.png, autre.png (PNG dont la zone
    de la jaquette est transparente). La fenetre est reperee toute seule dans l'image. */
-static struct { SDL_Texture *t; float x, y, w, h; uint32_t edge; int tried; } CASEIMG[3];
+static struct { SDL_Texture *t, *sp; float x, y, w, h; uint32_t edge; int tried; } CASEIMG[5];
 
 static void case_img_forget(void) {
-  for (int i = 0; i < 3; i++) { if (CASEIMG[i].t) SDL_DestroyTexture(CASEIMG[i].t); memset(&CASEIMG[i], 0, sizeof CASEIMG[i]); }
+  for (int i = 0; i < 5; i++) {
+    if (CASEIMG[i].t) SDL_DestroyTexture(CASEIMG[i].t);
+    if (CASEIMG[i].sp) SDL_DestroyTexture(CASEIMG[i].sp);
+    memset(&CASEIMG[i], 0, sizeof CASEIMG[i]);
+  }
 }
 
 static int case_img(App *a) {                    /* numero de l'image du boitier, -1 si aucune */
-  int k = a->kind == KIND_PS5 ? 0 : a->kind == KIND_PS4 ? 1 : a->kind == KIND_HOMEBREW ? -1 : 2;
-  if (k < 0) return -1;
+  /* homebrews : homebrew.png ; payloads : payload.png, sinon celui des homebrews ;
+     sans image, le boitier dessine (rouge pour les homebrews) */
+  int k = a->kind == KIND_PS5 ? 0 : a->kind == KIND_PS4 ? 1 : a->kind == KIND_HOMEBREW ? 3 : a->kind == KIND_PAYLOAD ? 4 : 2;
+  for (;;) {
   if (!CASEIMG[k].tried) {
-    static const char *const NAMES[3] = { "ps5", "ps4", "autre" };
+    static const char *const NAMES[5] = { "ps5", "ps4", "autre", "homebrew", "payload" };
     CASEIMG[k].tried = 1;
     char path[PATH_LEN];
     SDL_Surface *s = NULL;
@@ -1153,10 +1221,20 @@ static int case_img(App *a) {                    /* numero de l'image du boitier
         CASEIMG[k].t = SDL_CreateTextureFromSurface(S.r, s);
         if (CASEIMG[k].t) SDL_SetTextureBlendMode(CASEIMG[k].t, SDL_BLENDMODE_BLEND);
         plat_log("boitier en image : %s (fenetre %d,%d %dx%d)", path, l, t, r - l + 1, b - t + 1);
+        /* tranche en image (ps5_tranche.png…) : vue de profil dans le Cover Flow */
+        snprintf(path, sizeof path, "%s/boitiers/%s_tranche.png", plat_data_dir(), NAMES[k]);
+        SDL_Surface *ts = IMG_Load(path);
+        if (ts) {
+          CASEIMG[k].sp = SDL_CreateTextureFromSurface(S.r, ts);
+          SDL_FreeSurface(ts);
+        }
       } else plat_log("boitier en image : %s sans zone transparente au centre", path);
       #undef AL
       SDL_FreeSurface(s);
     }
+  }
+  if (k == 4 && !CASEIMG[4].t) { k = 3; continue; }   /* payloads : boitier des homebrews */
+  break;
   }
   return CASEIMG[k].t ? k : -1;
 }
@@ -1323,6 +1401,17 @@ static SDL_Texture *tile_tex(App *a, int w, int h) {
   void **slot = w == TILE ? &a->tex_s : w == TILE_SEL ? &a->tex_l : w == FLOW ? &a->tex_xl : NULL;
   if (!slot) return NULL;                    /* seules ces tailles sont mises en cache */
   if (*slot) return *slot;
+  /* au plus 2 nouvelles jaquettes preparees par image (lecture, decodage, dessin du boitier) :
+     une section qui s'ouvre se remplit en quelques images au lieu de figer l'ecran.
+     Le jeu selectionne passe toujours tout de suite. */
+  static Uint32 bframe;
+  static int built;
+  if (bframe != S.frame) { bframe = S.frame; built = 0; }
+  if (built >= 2) {
+    Entry *se = selected();
+    if (!se || se->is_folder || se->app != a) return NULL;
+  }
+  built++;
   SDL_Texture *big = BOXES && w != FLOW ? tile_tex(a, FLOW, TH(FLOW)) : NULL;   /* petites boites : reduites */
   SDL_Texture *t = SDL_CreateTexture(S.r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, w, h);
   if (!t) return NULL;
@@ -1410,6 +1499,18 @@ static void draw_particles(int lite) {
     int x = (int)S.part[i].x, y = (int)S.part[i].y, sz = (int)S.part[i].s;
     uint32_t c = i % 3 ? S.th->accent : S.th->accent2;
     int a = (int)(70 + 60 * sinf(t * 2 + i));
+    if (!lite) {                                 /* carte graphique : points lumineux doux */
+      float fx = S.part[i].x, fy = S.part[i].y;
+      if (S.th->pstyle == PSTYLE_SNOW) fx += 14 * sinf(t * 0.8f + i * 1.7f);
+      S.part_fx[i] = fx; S.part_a[i] = a;        /* halos dessines ensuite, en un seul lot */
+      if (S.th->pstyle == PSTYLE_SPARKS) {
+        SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_ADD);
+        soft_line(fx - sz * 3, fy, fx + sz * 3, fy, 1.6f, c, a + 40, a + 40);
+        soft_line(fx, fy - sz * 3, fx, fy + sz * 3, 1.6f, c, a + 40, a + 40);
+        SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_BLEND);
+      }
+      continue;
+    }
     switch (S.th->pstyle) {
     case PSTYLE_SPARKS: {
       set_color(c, a + 40 > 255 ? 255 : a + 40);
@@ -1432,6 +1533,10 @@ static void draw_particles(int lite) {
     }
     }
   }
+  if (!lite)                                     /* halos de toutes les particules : un seul lot */
+    for (int i = 0; i < n; i++)
+      soft_dot(S.part_fx[i], S.part[i].y, S.part[i].s * (S.th->pstyle == PSTYLE_SNOW ? 1.1f : 0.7f),
+               i % 3 ? S.th->accent : S.th->accent2, S.part_a[i] + 60);
 }
 
 /* Image de fond perso (dossier fonds/), chargee une fois */
@@ -1457,6 +1562,7 @@ static SDL_Texture *wallpaper(void) {
    fois dans une texture, puis simplement recopie a chaque image. */
 static int bg_w = W;                            /* largeur du fond dessine (plus large en cache : parallaxe) */
 static void draw_background(Entry *e) {
+  WHERE("dessin : fond");
   if (!S.lite) { draw_background_full(e, 1); return; }
   /* l'illustration du jeu ne compte que si le theme l'affiche */
   App *key_app = (e && !e->is_folder && S.th->bg_mode == BG_ART && S.th->art > 0) ? e->app : NULL;
@@ -1512,12 +1618,28 @@ static void draw_background_full(Entry *e, int animated) {
     if ((long)iw * H > (long)ih * W) { src.w = (int)((long)ih * W / H); src.x = (iw - src.w) / 2; }
     else { src.h = (int)((long)iw * H / W); src.y = (ih - src.h) / 2; }
     SDL_SetTextureAlphaMod(wall, 255);
+    if (S.th->bg_anim && !S.lite && animated) {  /* fond anime : zoom et glissement tres lents */
+      float tt = SDL_GetTicks() / 1000.0f, z = 1.08f + 0.05f * sinf(tt * 0.045f);
+      SDL_FRect sr = { src.x + src.w * (1 - 1 / z) * (0.5f + 0.45f * sinf(tt * 0.031f)),
+                       src.y + src.h * (1 - 1 / z) * (0.5f + 0.45f * cosf(tt * 0.027f)), src.w / z, src.h / z };
+      /* partie visible en virgule : on agrandit et decale l'image entiere a l'ecran
+         (position au sous-pixel) au lieu d'un cadrage arrondi au pixel qui avance par sauts */
+      float kx = (float)bg_w / sr.w, ky = (float)H / sr.h;
+      SDL_FRect d = { -(sr.x - src.x) * kx, -(sr.y - src.y) * ky, src.w * kx, src.h * ky };
+      SDL_RenderCopyF(S.r, wall, &src, &d);
+    } else
     SDL_RenderCopy(S.r, wall, &src, NULL);
   }
 
   /* illustration du jeu selectionne, floutee, en fondu */
   int art = S.th->bg_mode == BG_ART ? S.th->art * 255 / 100 : 0;
-  SDL_Texture *want = (e && !e->is_folder && art) ? blurred(e->app) : NULL;
+  App *wa = (e && !e->is_folder && art) ? e->app : NULL;
+  SDL_Texture *want;
+  if (animated) {                                /* defilement : l'image n'est preparee qu'une fois la selection posee */
+    static App *pend; static Uint32 since;
+    if (wa != pend) { pend = wa; since = SDL_GetTicks(); }
+    want = !wa ? NULL : (wa->bgtex || SDL_GetTicks() - since > 220) ? blurred(wa) : S.bg_cur;
+  } else want = wa ? blurred(wa) : NULL;
   if (want != S.bg_cur) { S.bg_prev = S.bg_cur; S.bg_cur = want; S.bg_fade = animated ? 0 : 1; }
   S.bg_fade += (1 - S.bg_fade) * ease(0.12f);
   SDL_Rect full = { -40, -40, bg_w + 80, H + 80 };
@@ -1561,10 +1683,56 @@ static void draw_background_full(Entry *e, int animated) {
 /* ------------------------------------------------------------------ */
 /* Effets de fond animes (V2)                                          */
 /* ------------------------------------------------------------------ */
+/* Carte graphique : ligne lissee facon neon (bords qui s'estompent), en coordonnees
+   1920x1080 mais dessinee a la resolution de l'ecran (4K) */
+static void soft_line(float x0, float y0, float x1, float y1, float w, uint32_t c, int a0, int a1) {
+  float dx = x1 - x0, dy = y1 - y0, l = sqrtf(dx * dx + dy * dy);
+  if (l < 0.01f) return;
+  float nx = -dy / l * w / 2, ny = dx / l * w / 2;
+  SDL_Vertex v[6];
+  float px[6] = { x0 + nx, x0, x0 - nx, x1 + nx, x1, x1 - nx }, py[6] = { y0 + ny, y0, y0 - ny, y1 + ny, y1, y1 - ny };
+  for (int i = 0; i < 6; i++) {
+    v[i].position.x = px[i]; v[i].position.y = py[i];
+    v[i].color.r = (c >> 16) & 255; v[i].color.g = (c >> 8) & 255; v[i].color.b = c & 255;
+    int a = i < 3 ? a0 : a1;
+    v[i].color.a = (Uint8)(i % 3 == 1 ? (a > 255 ? 255 : a) : 0);
+    v[i].tex_coord.x = v[i].tex_coord.y = 0;
+  }
+  static const int idx[12] = { 0, 1, 4, 0, 4, 3, 1, 2, 5, 1, 5, 4 };
+  SDL_RenderGeometry(S.r, NULL, v, 6, idx, 12);
+}
+static void neon_line(float x0, float y0, float x1, float y1, uint32_t c, int a) {
+  SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_ADD);
+  soft_line(x0, y0, x1, y1, 9, c, a / 3, a / 3);       /* halo */
+  soft_line(x0, y0, x1, y1, 2.2f, c, a, a);            /* coeur */
+  SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_BLEND);
+}
+/* point lumineux : coeur net + halo doux (texture de halo agrandie) */
+static void soft_dot(float x, float y, float r, uint32_t c, int a) {
+  if (a > 255) a = 255;
+  if (a <= 0) return;
+  SDL_SetTextureColorMod(S.glow, (c >> 16) & 255, (c >> 8) & 255, c & 255);
+  SDL_SetTextureAlphaMod(S.glow, (Uint8)a);
+  SDL_FRect d = { x - r * 4, y - r * 4, r * 8, r * 8 };
+  SDL_RenderCopyF(S.r, S.glow, NULL, &d);
+  SDL_SetTextureColorMod(S.glow, 255, 255, 255);
+  SDL_FRect k = { x - r, y - r, r * 2, r * 2 };
+  SDL_RenderCopyF(S.r, S.glow, NULL, &k);
+}
 static void fx_grid(void) {                      /* grille synthwave qui avance vers toi */
   int hz = 600, vx = W / 2;
   S.grid_phase += S.dt * 0.6f;
   if (S.grid_phase > 1) S.grid_phase -= 1;
+  if (!S.lite) {                                 /* carte graphique : lignes neon lissees */
+    glow(vx, hz, 900, S.th->accent, ga(60));     /* lueur sur l'horizon */
+    neon_line(0, hz, W, hz, S.th->accent, 200);
+    for (int k = 0; k < 22; k++) {
+      float t = (k + S.grid_phase) / 22, y = hz + (H - hz) * t * t;
+      neon_line(0, y, W, y, S.th->accent, (int)(25 + 150 * t));
+    }
+    for (int i = -14; i <= 14; i++) neon_line(vx + i * 30.0f, hz, vx + i * 260.0f, H, S.th->accent, 70);
+    return;
+  }
   set_color(S.th->accent, 120);
   SDL_RenderDrawLine(S.r, 0, hz, W, hz);
   int n = S.lite ? 12 : 18;
@@ -1591,7 +1759,18 @@ static void fx_warp(void) {                      /* hyperespace : etoiles qui fi
     if (S.star[i].z <= 0.02f) continue;
     float sx = W / 2 + S.star[i].x / S.star[i].z * W * 0.5f, sy = H / 2 + S.star[i].y / S.star[i].z * H * 0.5f;
     if (sx < 0 || sx > W || sy < 0 || sy > H) { S.star[i].z = 0; continue; }
-    if (S.star[i].px >= 0) {
+    if (S.star[i].px >= 0 && !S.lite) {          /* carte graphique : trainee lissee, tete brillante */
+      int a = (int)(255 * (1.15f - S.star[i].z));
+      if (a > 255) a = 255;
+      uint32_t c = i % 3 ? 0xdfe8ff : S.th->accent;
+      float tx = sx - (sx - W / 2) * 0.09f, ty = sy - (sy - H / 2) * 0.09f;
+      float wd = 1.2f + 3.0f * (1 - S.star[i].z);
+      SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_ADD);
+      soft_line(tx, ty, sx, sy, wd * 3, c, 0, a / 3);
+      soft_line(tx, ty, sx, sy, wd, c, 0, a);
+      SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_BLEND);
+      if (S.star[i].z < 0.45f) soft_dot(sx, sy, wd * 0.8f, c, a / 2);
+    } else if (S.star[i].px >= 0) {
       int a = (int)(255 * (1.15f - S.star[i].z));
       if (a > 255) a = 255;
       set_color(i % 3 ? 0xffffff : S.th->accent, a);
@@ -1606,17 +1785,77 @@ static void fx_warp(void) {                      /* hyperespace : etoiles qui fi
 
 static void fx_rain(void) {                      /* pluie de code */
   static const char CH[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-  if (!S.glyph[0]) {
+  if (S.lite && !S.glyph[0]) {
     for (int i = 0; i < 36; i++) {
       char s[2] = { CH[i], 0 };
       SDL_Color w = { 255, 255, 255, 255 };
-      SDL_Surface *g = TTF_RenderUTF8_Blended(S.f22, s, w);
+      TTF_Font *hf = font_hi(S.f22);           /* ecran 4K : lettres en double resolution */
+      SDL_Surface *g = TTF_RenderUTF8_Blended(hf ? hf : S.f22, s, w);
       if (!g) return;
       S.glyph[i] = SDL_CreateTextureFromSurface(S.r, g);
       SDL_FreeSurface(g);
       if (!S.glyph[i]) return;
       SDL_SetTextureBlendMode(S.glyph[i], SDL_BLENDMODE_BLEND);
     }
+  }
+  if (!S.lite) {                                 /* carte graphique : 3 profondeurs, tete lumineuse */
+    /* toutes les lettres dans une seule texture : le GPU recoit un seul lot au lieu
+       d'un envoi par lettre (sur PS5, chaque envoi coute cher) */
+    static SDL_Texture *atlas;
+    static SDL_Rect gr[36];
+    if (!atlas) {
+      TTF_Font *hf = font_hi(S.f22);
+      TTF_Font *f = hf ? hf : S.f22;
+      SDL_Surface *g[36];
+      int aw = 0, ah = 0;
+      for (int i = 0; i < 36; i++) {
+        char t2[2] = { CH[i], 0 };
+        SDL_Color wc = { 255, 255, 255, 255 };
+        g[i] = TTF_RenderUTF8_Blended(f, t2, wc);
+        if (g[i]) { gr[i] = (SDL_Rect){ aw, 0, g[i]->w, g[i]->h }; aw += g[i]->w + 2; if (g[i]->h > ah) ah = g[i]->h; }
+      }
+      SDL_Surface *as = aw && ah ? SDL_CreateRGBSurfaceWithFormat(0, aw, ah, 32, SDL_PIXELFORMAT_ARGB8888) : NULL;
+      for (int i = 0; i < 36; i++) if (g[i]) {
+        if (as) { SDL_SetSurfaceBlendMode(g[i], SDL_BLENDMODE_NONE); SDL_BlitSurface(g[i], NULL, as, &gr[i]); }
+        SDL_FreeSurface(g[i]);
+      }
+      if (as) { atlas = SDL_CreateTextureFromSurface(S.r, as); SDL_FreeSurface(as); }
+      if (!atlas) return;
+      SDL_SetTextureBlendMode(atlas, SDL_BLENDMODE_BLEND);
+    }
+    static struct { float x, y, r; int a; } heads[64];
+    int nh = 0;
+    float gsc = font_hi(S.f22) ? 0.5f : 1.0f;
+    int cols = 64, cw = W / 48;
+    for (int c = 0; c < cols; c++) {
+      float depth = 0.55f + 0.45f * ((c * 37) % 3) / 2.0f;   /* 0,55 au fond .. 1 devant */
+      float gh = 26 * depth;
+      if (S.drop[c].v <= 0) { S.drop[c].v = 3 + rand() % 6; S.drop[c].y = -(rand() % H); S.drop[c].len = 8 + rand() % 16; S.drop[c].seed = rand(); }
+      S.drop[c].y += S.drop[c].v * depth * S.dt * 60;
+      if (S.drop[c].y - S.drop[c].len * gh > H) S.drop[c].v = 0;
+      int head = (int)(S.drop[c].y / gh);
+      float x = (float)((c * 131) % (W / cw)) * cw + cw / 2.0f + (c % 2) * cw * 0.5f;
+      for (int k = 0; k < S.drop[c].len; k++) {
+        int row = head - k;
+        float y = row * gh;
+        if (y < -gh || y > H) continue;
+        void *t = NULL;
+        uint32_t col = k == 0 ? 0xffffff : k < 3 ? mix_color(0xffffff, S.th->accent, 0.6f) : S.th->accent;
+        float fall = 1.0f - (float)k / S.drop[c].len;
+        int al = (int)((k == 0 ? 235 : 150 * fall * fall) * depth);
+        if (y < 150) al = al * (y < 0 ? 0 : (int)y) / 150 / 3;
+        if (k == 0 && al > 40 && nh < 64) { heads[nh].x = x; heads[nh].y = y + gh / 2; heads[nh].r = 3.5f * depth; heads[nh].a = al / 2; nh++; }
+        (void)t;
+        int gi = (int)((unsigned)(S.drop[c].seed + row * 7 + (k == 0 ? S.frame / 4 : 0)) % 36);
+        SDL_SetTextureColorMod(atlas, (col >> 16) & 255, (col >> 8) & 255, col & 255);
+        SDL_SetTextureAlphaMod(atlas, (Uint8)al);
+        float sc = gsc * depth;
+        SDL_FRect d = { x - gr[gi].w * sc / 2, y, gr[gi].w * sc, gr[gi].h * sc };
+        SDL_RenderCopyF(S.r, atlas, &gr[gi], &d);
+      }
+    }
+    for (int i = 0; i < nh; i++) soft_dot(heads[i].x, heads[i].y, heads[i].r, S.th->accent, heads[i].a);
+    return;
   }
   int cols = S.lite ? 32 : 48, cw = W / cols, gh = 26;
   for (int c = 0; c < cols; c++) {
@@ -1634,17 +1873,143 @@ static void fx_rain(void) {                      /* pluie de code */
       if (y < 150) al = al * (y < 0 ? 0 : y) / 150 / 3;      /* presque invisible derriere la barre du haut */
       SDL_SetTextureAlphaMod(t, (Uint8)al);
       int w, h; SDL_QueryTexture(t, NULL, NULL, &w, &h);
+      if (font_hi(S.f22)) { w /= 2; h /= 2; }
       SDL_Rect d = { c * cw + (cw - w) / 2, y, w, h };
       SDL_RenderCopy(S.r, t, NULL, &d);
     }
   }
 }
 
+/* vitesse de l'effet reglee dans le Studio Theme (50 % = vitesse d'origine) */
+static float fx_k(void) { int v = S.th->fx_speed ? S.th->fx_speed : 50; return 0.25f + v / 66.0f; }
+
+/* Braises : etincelles chaudes qui montent en ondulant et scintillent (carte graphique) */
+static void fx_embers(void) {
+  enum { N = 110 };
+  static struct { float x, y, v, s, ph; int c; } E[N];
+  static int init;
+  float k = fx_k() * S.dt * 60;
+  for (int i = 0; i < N; i++) {
+    if (!init || E[i].y < -20) {
+      E[i].x = (float)(rand() % W); E[i].y = init ? H + rand() % 80 : (float)(rand() % H);
+      E[i].v = 0.6f + (rand() % 100) / 70.0f; E[i].s = 0.8f + (rand() % 100) / 45.0f;
+      E[i].ph = (rand() % 628) / 100.0f; E[i].c = rand() % 4;
+    }
+    E[i].y -= E[i].v * k;
+    E[i].x += sinf(E[i].y * 0.012f + E[i].ph) * 0.6f * k;
+    static const uint32_t C[3] = { 0xff6a1a, 0xffa53a, 0xffd27a };
+    uint32_t c = E[i].c == 3 ? S.th->accent : C[E[i].c];
+    float fl = 0.65f + 0.35f * sinf(S.frame * 0.21f + E[i].ph * 7);
+    int a = (int)(210 * fl * (E[i].y < H * 0.25f ? E[i].y / (H * 0.25f) : 1));
+    SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_ADD);
+    soft_line(E[i].x, E[i].y, E[i].x - sinf(E[i].y * 0.012f + E[i].ph) * 4, E[i].y + 10 * E[i].s, 1.6f * E[i].s, c, a, 0);
+    SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_BLEND);
+    soft_dot(E[i].x, E[i].y, E[i].s * 0.9f, c, a);
+  }
+  init = 1;
+}
+
+/* Aurore : voiles de lumiere qui ondulent en haut de l'ecran */
+static void fx_aurora(void) {
+  enum { NX = 64 };
+  float t = SDL_GetTicks() / 1000.0f * fx_k();
+  for (int band = 0; band < 3; band++) {
+    uint32_t c = band == 1 ? S.th->accent2 : band == 2 ? mix_color(S.th->accent, 0xffffff, 0.35f) : S.th->accent;
+    SDL_Vertex v[(NX + 1) * 3];
+    int idx[NX * 12], k = 0;
+    for (int i = 0; i <= NX; i++) {
+      float x = (float)W * i / NX, u = (float)i / NX;
+      float mid = H * (0.22f + 0.06f * band) + 60 * sinf(u * 5.0f + t * 0.35f + band * 1.7f) + 25 * sinf(u * 13.0f - t * 0.6f + band);
+      float hgt = 170 + 90 * sinf(u * 3.0f + t * 0.25f + band * 2.1f);
+      float shimmer = 0.55f + 0.45f * sinf(u * 22.0f + t * 1.3f + band * 3);
+      float ys[3] = { mid - hgt, mid, mid + hgt * 0.5f };
+      int as[3] = { 0, (int)(120 * shimmer), 0 };
+      for (int r = 0; r < 3; r++) {
+        SDL_Vertex *p = &v[i * 3 + r];
+        p->position.x = x; p->position.y = ys[r];
+        p->color.r = (c >> 16) & 255; p->color.g = (c >> 8) & 255; p->color.b = c & 255; p->color.a = (Uint8)as[r];
+        p->tex_coord.x = p->tex_coord.y = 0;
+      }
+    }
+    for (int i = 0; i < NX; i++)
+      for (int r = 0; r < 2; r++) {
+        int a = i * 3 + r, b = a + 1, c2 = a + 3, d = a + 4;
+        idx[k++] = a; idx[k++] = c2; idx[k++] = d; idx[k++] = a; idx[k++] = d; idx[k++] = b;
+      }
+    SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_ADD);
+    SDL_RenderGeometry(S.r, NULL, v, (NX + 1) * 3, idx, k);
+    SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_BLEND);
+  }
+}
+
+/* Bokeh : grosses bulles de lumiere floues qui derivent a plusieurs profondeurs */
+static void fx_bokeh(void) {
+  enum { N = 34 };
+  static struct { float x, y, r, vx, vy, ph; int c; } B[N];
+  static int init;
+  if (!init) {
+    for (int i = 0; i < N; i++) {
+      B[i].x = (float)(rand() % W); B[i].y = (float)(rand() % H); B[i].r = 18 + rand() % 70;
+      B[i].vx = ((rand() % 100) - 50) / 160.0f; B[i].vy = -0.1f - (rand() % 100) / 260.0f;
+      B[i].ph = (rand() % 628) / 100.0f; B[i].c = rand() % 3;
+    }
+    init = 1;
+  }
+  float k = fx_k() * S.dt * 60;
+  for (int i = 0; i < N; i++) {
+    B[i].x += B[i].vx * k; B[i].y += B[i].vy * k * (90.0f / B[i].r);
+    if (B[i].y < -B[i].r * 2) { B[i].y = H + B[i].r * 2; B[i].x = (float)(rand() % W); }
+    if (B[i].x < -B[i].r * 2) B[i].x = W + B[i].r * 2;
+    if (B[i].x > W + B[i].r * 2) B[i].x = -B[i].r * 2;
+    uint32_t c = B[i].c == 0 ? S.th->accent : B[i].c == 1 ? S.th->accent2 : 0xffffff;
+    int a = (int)((40 + 30 * sinf(S.frame * 0.02f + B[i].ph)) * (60.0f / B[i].r + 0.4f));
+    glow((int)B[i].x, (int)B[i].y, (int)B[i].r, c, a > 120 ? 120 : a);
+  }
+}
+
+/* Rayons : faisceaux de lumiere qui balaient lentement depuis le haut */
+static void fx_rays(void) {
+  float t = SDL_GetTicks() / 1000.0f * fx_k();
+  static const float SX[2] = { 0.18f, 0.82f };
+  SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_ADD);
+  for (int src = 0; src < 2; src++)
+    for (int r = 0; r < 4; r++) {
+      float ang = (src ? -1 : 1) * (0.25f + 0.22f * r) + 0.12f * sinf(t * 0.3f + r * 1.3f + src * 2);
+      float len = H * 1.25f, wd = 0.07f + 0.03f * r;
+      float x0 = W * SX[src], y0 = -40;
+      float ax = x0 + sinf(ang - wd) * len, ay = y0 + cosf(ang - wd) * len;
+      float bx = x0 + sinf(ang + wd) * len, by = y0 + cosf(ang + wd) * len;
+      uint32_t c = r % 2 ? S.th->accent2 : S.th->accent;
+      int a = (int)(38 + 18 * sinf(t * 0.7f + r * 2.1f + src));
+      SDL_Vertex v[3];
+      float px[3] = { x0, ax, bx }, py[3] = { y0, ay, by };
+      for (int i = 0; i < 3; i++) {
+        v[i].position.x = px[i]; v[i].position.y = py[i];
+        v[i].color.r = (c >> 16) & 255; v[i].color.g = (c >> 8) & 255; v[i].color.b = c & 255;
+        v[i].color.a = (Uint8)(i ? 0 : a);
+        v[i].tex_coord.x = v[i].tex_coord.y = 0;
+      }
+      static const int idx[3] = { 0, 1, 2 };
+      SDL_RenderGeometry(S.r, NULL, v, 3, idx, 3);
+    }
+  SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_BLEND);
+}
+
 static void draw_fx(void) {
+  float keep = S.dt;
+  S.dt *= fx_k();                                /* vitesse reglee dans le Studio Theme */
   switch (S.th->fx) {
   case FX_GRID: fx_grid(); break;
   case FX_WARP: fx_warp(); break;
   case FX_RAIN: fx_rain(); break;
+  }
+  S.dt = keep;
+  if (S.lite) return;                            /* effets reserves a la carte graphique */
+  switch (S.th->fx) {
+  case FX_EMBERS: fx_embers(); break;
+  case FX_AURORA: fx_aurora(); break;
+  case FX_BOKEH: fx_bokeh(); break;
+  case FX_RAYS: fx_rays(); break;
   }
 }
 
@@ -1727,7 +2092,20 @@ static void draw_topbar(void) {
   if (S.sysline[0]) draw_text_a(S.f22, S.sysline, W - CAR_X, 114, 0x9aa4b5, 2, 0, 170);
   const char *act = active_line();               /* payloads actifs, sous l'IP */
   int toasting = S.toast[0] && SDL_GetTicks() < S.toast_until;   /* un message passe devant */
-  if (act[0] && !toasting) draw_text_a(S.f22, act, W - CAR_X, S.sysline[0] ? 140 : 114, 0x2ecc71, 2, 0, 200);
+  int ay = S.sysline[0] ? 140 : 114;
+  if (act[0] && !toasting) draw_text_a(S.f22, act, W - CAR_X, ay, 0x2ecc71, 2, 0, 200);
+  /* images par seconde (mesurees sur la derniere seconde) et resolution reelle de l'ecran */
+  static Uint32 fps_t0; static int fps_n, fps_v; static char perf[64];
+  fps_n++;
+  if (!fps_t0) fps_t0 = SDL_GetTicks();
+  if (SDL_GetTicks() - fps_t0 >= 1000) {
+    fps_v = (int)(fps_n * 1000.0 / (SDL_GetTicks() - fps_t0) + 0.5);
+    fps_n = 0; fps_t0 = SDL_GetTicks();
+    int ow = 0, oh = 0;
+    SDL_GetRendererOutputSize(S.r, &ow, &oh);
+    snprintf(perf, sizeof perf, "%d %s  ·  %dx%d", fps_v, tr("i/s"), ow, oh);
+  }
+  if (perf[0] && !toasting) draw_text_a(S.f22, perf, W - CAR_X, act[0] ? ay + 26 : ay, fps_v >= 55 ? 0x9aa4b5 : 0xffb340, 2, 0, 170);
 }
 
 static void playtime_str(long secs, char *out, size_t n) {
@@ -2186,7 +2564,7 @@ static void draw_carousel(void) {
     if (e->is_folder) draw_folder_tile(e->node, ix, iy, w, h);
     else draw_app_tile(e->app, ix, iy, w, h);
     if (fade < 255) fill_round(ix, iy, w, h, tile_rad() * w / TILE_SEL, S.th->top, 255 - fade);
-    if (is_sel) outline_round(ix, iy, w, h, tile_rad() * w / TILE_SEL, 4, moving ? 0xffc53d : 0xffffff, 255);
+    if (is_sel && (moving || !PHOTO_BOX)) outline_round(ix, iy, w, h, tile_rad() * w / TILE_SEL, 4, moving ? 0xffc53d : 0xffffff, 255);
   }
 
   if (S.nentries) {
@@ -2278,8 +2656,8 @@ static SDL_Texture *folder_tex(Node *f) {
 /* Jaquettes laterales (deja deformees, avec leur reflet) et reflet de la
    jaquette centrale : calcules une fois puis simplement recopies. Sans carte
    graphique (PS5), deformer des images a chaque image coute trop cher. */
-#define SIDE_W (FLOW_SIDE * 55 / 100)
-#define SPINE (BOXES ? FLOW_SIDE * 10 / 100 : 0)    /* epaisseur visible du boitier (tranche) */
+#define SIDE_W (FLOW_SIDE * 54 / 100)
+#define SPINE (BOXES ? FLOW_SIDE * 6 / 100 : 0)    /* epaisseur visible du boitier (tranche) */
 #define SIDE_H (TH(FLOW_SIDE) + 6 + TH(FLOW_SIDE) * 35 / 100 + 1)
 #define REFL_H (6 + TH(FLOW) * 35 / 100 + 1)
 enum { WARP_LEFT, WARP_RIGHT, WARP_REFL };
@@ -2321,8 +2699,28 @@ static void quad4(float x0, float y0t, float y0b, float x1, float y1t, float y1b
 }
 
 /* tranche du boitier collee au bord proche (xn), qui fuit vers xb ; avec son reflet */
-static void draw_spine(float xn, float xb, float h, uint32_t body, uint32_t band) {
+static void draw_spine(float xn, float xb, float h, uint32_t body, uint32_t band, SDL_Texture *img) {
   float t0 = h * 0.03f, b0 = h * 0.97f;           /* le bord du fond parait plus court */
+  if (img) {                                       /* tranche en image, en perspective, ombree vers le fond */
+    SDL_Vertex v[4];
+    float xs[4] = { xn, xb, xb, xn }, ys[4] = { 0, t0, b0, h };
+    /* l'image garde son sens de lecture (texte jamais en miroir), quel que soit le cote */
+    float un = xb > xn ? 0.0f : 1.0f, us[4] = { un, 1 - un, 1 - un, un };
+    float vs[4] = { 0, 0, 1, 1 };
+    Uint8 ls[4] = { 255, 170, 170, 255 };
+    for (int i = 0; i < 4; i++) {
+      v[i].position.x = xs[i]; v[i].position.y = ys[i];
+      v[i].color.r = v[i].color.g = v[i].color.b = ls[i]; v[i].color.a = 255;
+      v[i].tex_coord.x = us[i]; v[i].tex_coord.y = vs[i];
+    }
+    static const int idx[6] = { 0, 1, 2, 0, 2, 3 };
+    SDL_SetTextureBlendMode(img, SDL_BLENDMODE_NONE);
+    SDL_RenderGeometry(S.r, img, v, 4, idx, 6);
+    SDL_SetTextureBlendMode(img, SDL_BLENDMODE_BLEND);
+    float ry = h + 6, rh = h * 0.35f;              /* reflet au sol */
+    quad4(xn, ry, ry + rh, xb, ry + t0, ry + rh * 0.95f, shade(body, 0.6f), shade(body, 0.35f), 70, 55);
+    return;
+  }
   quad4(xn, 0, h, xb, t0, b0, shade(body, 0.78f), shade(body, 0.45f), 255, 255);
   float bh = h * 0.09f;                            /* haut de la tranche : couleur du bandeau */
   quad4(xn, 0, bh, xb, t0, t0 + bh * 0.94f, shade(band, 0.85f), shade(band, 0.55f), 255, 255);
@@ -2331,6 +2729,68 @@ static void draw_spine(float xn, float xb, float h, uint32_t body, uint32_t band
   SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_NONE);
   float ry = h + 6, rh = h * 0.35f;                /* reflet au sol */
   quad4(xn, ry, ry + rh, xb, ry + t0, ry + rh * 0.95f, shade(body, 0.6f), shade(body, 0.35f), 70, 55);
+}
+
+/* tranche dessinee en direct a l'ecran (carte graphique) : meme rendu que la tranche
+   precalculee, a la hauteur et a l'epaisseur du moment (rotation continue) */
+static void draw_spine_live(float xn, float xb, float top, float h, uint32_t body, uint32_t band, SDL_Texture *img, int bright, int alpha) {
+  float t0 = h * 0.03f, b0 = h * 0.97f;
+  if (img) {
+    SDL_Vertex v[4];
+    float xs[4] = { xn, xb, xb, xn }, ys[4] = { top, top + t0, top + b0, top + h };
+    float un = xb > xn ? 0.0f : 1.0f, us[4] = { un, 1 - un, 1 - un, un };
+    float vs[4] = { 0, 0, 1, 1 };
+    int ls[4] = { 255, 170, 170, 255 };
+    for (int i = 0; i < 4; i++) {
+      v[i].position.x = xs[i]; v[i].position.y = ys[i];
+      v[i].color.r = v[i].color.g = v[i].color.b = (Uint8)(ls[i] * bright / 255);
+      v[i].color.a = (Uint8)alpha;
+      v[i].tex_coord.x = us[i]; v[i].tex_coord.y = vs[i];
+    }
+    static const int idx[6] = { 0, 1, 2, 0, 2, 3 };
+    SDL_SetTextureBlendMode(img, SDL_BLENDMODE_BLEND);
+    SDL_RenderGeometry(S.r, img, v, 4, idx, 6);
+  } else {
+    SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_BLEND);
+    float k = bright / 255.0f;
+    SDL_Vertex v[4];
+    float xs[4] = { xn, xb, xb, xn }, ys[4] = { top, top + t0, top + b0, top + h };
+    uint32_t cs[4] = { shade(body, 0.78f * k), shade(body, 0.45f * k), shade(body, 0.45f * k), shade(body, 0.78f * k) };
+    for (int i = 0; i < 4; i++) {
+      v[i].position.x = xs[i]; v[i].position.y = ys[i];
+      v[i].color.r = (cs[i] >> 16) & 255; v[i].color.g = (cs[i] >> 8) & 255; v[i].color.b = cs[i] & 255; v[i].color.a = (Uint8)alpha;
+      v[i].tex_coord.x = v[i].tex_coord.y = 0;
+    }
+    static const int idx[6] = { 0, 1, 2, 0, 2, 3 };
+    SDL_RenderGeometry(S.r, NULL, v, 4, idx, 6);
+    (void)band;
+  }
+}
+
+/* eclat de lumiere qui balaie le plastique du boitier central, de temps en temps */
+static void draw_sheen(int x, int y, int w, int h) {
+  float p = fmodf(SDL_GetTicks() / 1000.0f, 7.0f) / 1.3f;   /* 1,3 s de passage toutes les 7 s */
+  if (p >= 1) return;
+  float slant = h * 0.35f, bw = w * 0.22f;
+  float cxp = x - slant - bw + p * (w + slant + bw * 2);
+  SDL_Rect clip = { x, y, w, h };
+  SDL_RenderSetClipRect(S.r, &clip);
+  SDL_Vertex v[6];
+  float xs[3] = { cxp - bw, cxp, cxp + bw };
+  int as[3] = { 0, 70, 0 };
+  for (int i = 0; i < 3; i++) {
+    SDL_Vertex *t = &v[i], *b = &v[i + 3];
+    t->position.x = xs[i] + slant; t->position.y = (float)y;
+    b->position.x = xs[i]; b->position.y = (float)(y + h);
+    t->color.r = t->color.g = t->color.b = b->color.r = b->color.g = b->color.b = 255;
+    t->color.a = b->color.a = (Uint8)as[i];
+    t->tex_coord.x = t->tex_coord.y = b->tex_coord.x = b->tex_coord.y = 0;
+  }
+  static const int idx[12] = { 0, 1, 4, 0, 4, 3, 1, 2, 5, 1, 5, 4 };
+  SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_ADD);
+  SDL_RenderGeometry(S.r, NULL, v, 6, idx, 12);
+  SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_BLEND);
+  SDL_RenderSetClipRect(S.r, NULL);
 }
 
 static void warp_forget(SDL_Texture *src) {
@@ -2344,7 +2804,9 @@ static void warp_forget(SDL_Texture *src) {
 static SDL_Texture *warp_tex(SDL_Texture *src, uint32_t ver, int kind, App *app) {
   uint32_t body = 0, band = 0;
   int spine = kind != WARP_REFL && case_spine(app, &body, &band);
-  ver = ver * 31 + (uint32_t)S.th_ver;
+  SDL_Texture *sptex = NULL;
+  if (spine && S.base->case_style == CASE_PHOTO) { int k = case_img(app); if (k >= 0) sptex = CASEIMG[k].sp; }
+  ver = ver * 31 + (uint32_t)S.th_ver + (sptex ? 7u : 0u);
   ver = (ver * 31 + body) * 31 + band;
   int slot = 0;
   for (int i = 0; i < 40; i++) {
@@ -2364,12 +2826,12 @@ static SDL_Texture *warp_tex(SDL_Texture *src, uint32_t ver, int kind, App *app)
   SDL_SetTextureBlendMode(src, SDL_BLENDMODE_NONE);
   if (kind == WARP_REFL) draw_persp(src, 0, FLOW, -6.0f - TH(FLOW) / 2.0f, TH(FLOW), TH(FLOW), 255, 255, 2);
   else {
-    float near = TH(FLOW_SIDE), far = near * 0.8f, fx = kind == WARP_LEFT ? 0 : SPINE;   /* face avant */
+    float near = TH(FLOW_SIDE), far = near * 0.78f, fx = kind == WARP_LEFT ? 0 : SPINE;   /* face avant */
     draw_persp(src, fx, fx + SIDE_W, near / 2.0f, kind == WARP_LEFT ? far : near, kind == WARP_LEFT ? near : far, 255, 255, 1);
     if (spine) {                                 /* la tranche, cote centre de l'ecran */
       SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_NONE);
-      if (kind == WARP_LEFT) draw_spine(SIDE_W, SIDE_W + SPINE, near, body, band);
-      else draw_spine(SPINE, 0, near, body, band);
+      if (kind == WARP_LEFT) draw_spine(SIDE_W, SIDE_W + SPINE, near, body, band, sptex);
+      else draw_spine(SPINE, 0, near, body, band, sptex);
       SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_BLEND);
     }
   }
@@ -2420,9 +2882,24 @@ static void border_run(int x, int y, int w, int h, uint32_t c) {
 }
 
 static void draw_flow(void) {
+  WHERE("dessin : cover flow");
   int sel = *cur_sel();
-  S.scroll += ((float)sel - S.scroll) * ease(0.18f);
-  if (fabsf(sel - S.scroll) < 0.002f) S.scroll = (float)sel;
+  int loop = flow_looping(), nent = S.nentries;
+  /* mode de defilement (Parametres) : normal, doux, rapide, elastique (ressort amorti) */
+  static float vel;
+  int st = S.menu.scroll_style & 3;
+  if (st == 3) {
+    float k = S.dt * 60;
+    vel += ((float)sel - S.scroll) * 0.09f * k;
+    vel *= powf(0.80f, k);
+    S.scroll += vel * k;
+    if (fabsf(sel - S.scroll) < 0.002f && fabsf(vel) < 0.002f) { S.scroll = (float)sel; vel = 0; }
+  } else {
+    static const float SPD[3] = { 0.18f, 0.085f, 0.32f };
+    S.scroll += ((float)sel - S.scroll) * ease(SPD[st]);
+    vel = 0;
+    if (fabsf(sel - S.scroll) < 0.002f) S.scroll = (float)sel;
+  }
   float target_cx = S.mode == MODE_THEME ? (W - 860) / 2.0f : W / 2.0f;
   if (S.flow_cx == 0) S.flow_cx = target_cx;
   S.flow_cx += (target_cx - S.flow_cx) * ease(0.15f);
@@ -2430,12 +2907,15 @@ static void draw_flow(void) {
   /* sur PS5 (dessin sans carte graphique) on dessine moins de jaquettes */
   float maxrel = S.lite ? 3.6f : 6.5f, reflrel = S.lite ? 1.5f : 7.0f;
   FlowItem items[32]; int n = 0;
-  for (int i = (int)S.scroll - 7; i <= (int)S.scroll + 8 && n < 32; i++) {
-    if (i < 0 || i >= S.nentries) continue;
+  float lim = loop ? (nent - 1) / 2.0f + 0.49f : 99;  /* en boucle : chaque jeu une seule fois a l'ecran */
+  int ni = 0;
+  for (int i = (int)floorf(S.scroll) - 7; i <= (int)floorf(S.scroll) + 8 && ni < 32; i++) {
+    if (!loop && (i < 0 || i >= nent)) continue;
     float rel = i - S.scroll;
-    if (fabsf(rel) > maxrel) continue;
-    items[n].i = i; items[n].rel = rel; n++;
+    if (fabsf(rel) > maxrel || fabsf(rel) > lim) continue;
+    items[ni].i = loop ? ((i % nent) + nent) % nent : i; items[ni].rel = rel; ni++;
   }
+  n = ni;
   qsort(items, n, sizeof items[0], cmp_flow);   /* du plus loin au plus proche */
 
   for (int k = 0; k < n; k++) {
@@ -2483,7 +2963,7 @@ static void draw_flow(void) {
       if (zt < 1) zoom = 1 + 0.045f * sinf(zt * 3.14159f);
     }
     SDL_Texture *cached = NULL;
-    if (tex && a >= 0.999f) {                     /* sur le cote : texture deja deformee */
+    if (tex && a >= 0.999f && S.lite) {           /* sur le cote, sans carte graphique : texture deja deformee */
       cached = warp_tex(tex, ver, rel < 0 ? WARP_LEFT : WARP_RIGHT, e->is_folder ? NULL : e->app);
       if (cached) {
         SDL_SetTextureColorMod(cached, bright, bright, bright);
@@ -2492,6 +2972,11 @@ static void draw_flow(void) {
         SDL_Rect d = { (int)(cx - SIDE_W / 2.0f) - (rel < 0 ? 0 : tw - SIDE_W), (int)(cy - TH(FLOW_SIDE) / 2.0f), tw, SIDE_H };
         SDL_RenderCopy(S.r, cached, NULL, &d);
       }
+    } else if (tex && a < 0.001f && !S.lite) {    /* au centre (carte graphique) : leger balancement en 3D */
+      float zw = FLOW * zoom, zh = TH(FLOW) * zoom, sw = 0.018f * sinf(SDL_GetTicks() * 0.0011f);
+      draw_persp(tex, cx - zw / 2, cx + zw / 2, cy, zh * (1 + sw), zh * (1 - sw), 255, 255, 1);
+      if (!e->is_folder) draw_sheen((int)(cx - zw / 2), (int)(cy - zh / 2), (int)zw, (int)zh);
+      cached = tex;                               /* deja dessine */
     } else if (tex && a < 0.001f) {               /* au centre, immobile : image droite + reflet en cache */
       int zw = (int)(FLOW * zoom), zh = (int)(TH(FLOW) * zoom);
       SDL_Rect d = { (int)(cx - zw / 2.0f), (int)(cy - zh / 2.0f), zw, zh };
@@ -2510,7 +2995,16 @@ static void draw_flow(void) {
       SDL_SetTextureColorMod(tex, 255, 255, 255);
       SDL_SetTextureAlphaMod(tex, 255);
     }
-    else if (tex) draw_persp(tex, cx - w / 2, cx + w / 2, cy, hl, hr, bright, alpha, a < reflrel);
+    else if (tex) {
+      draw_persp(tex, cx - w / 2, cx + w / 2, cy, hl, hr, bright, alpha, a < reflrel);
+      uint32_t body = 0, band = 0;
+      if (t > 0.02f && !e->is_folder && case_spine(e->app, &body, &band)) {   /* tranche qui apparait en tournant */
+        SDL_Texture *sp = NULL;
+        if (S.base->case_style == CASE_PHOTO) { int ck = case_img(e->app); if (ck >= 0) sp = CASEIMG[ck].sp; }
+        float th = SPINE * t, xn = rel < 0 ? cx + w / 2 : cx - w / 2;
+        draw_spine_live(xn, rel < 0 ? xn + th : xn - th, cy - near / 2, near, body, band, sp, bright, alpha);
+      }
+    }
     else if (e->is_folder) draw_folder_tile(e->node, (int)(cx - w / 2), (int)(cy - hsz / 2), (int)w, (int)hsz);
 
     if (center && a < 0.05f) {
@@ -2526,8 +3020,8 @@ static void draw_flow(void) {
         draw_text(S.f22, b, x + 21, y + 15, 0xffffff, 0, 0);
       }
       if (!e->is_folder && menu_is_fav(&S.menu, e->app->id)) fav_badge(x, y, sz);
-      outline_round(x, y, sz, szh, rad, 4, moving ? 0xffc53d : 0xffffff, 255);
-      if (!moving) border_run(x, y, sz, szh, S.th->accent);
+      if (moving || !PHOTO_BOX) outline_round(x, y, sz, szh, rad, 4, moving ? 0xffc53d : 0xffffff, 255);
+      if (!moving && !PHOTO_BOX) border_run(x, y, sz, szh, S.th->accent);
     }
   }
 }
@@ -2607,7 +3101,7 @@ static void draw_grid(void) {
       }
       if (e->is_folder) draw_folder_tile(e->node, ix, iy, sz, szh);
       else draw_app_tile(e->app, ix, iy, sz, szh);
-      if (is_sel) outline_round(ix, iy, sz, szh, tile_rad() * sz / TILE_SEL, 4, moving ? 0xffc53d : 0xffffff, 255);
+      if (is_sel && (moving || !PHOTO_BOX)) outline_round(ix, iy, sz, szh, tile_rad() * sz / TILE_SEL, 4, moving ? 0xffc53d : 0xffffff, 255);
       const char *name = e->is_folder ? e->node->name : menu_display_name(&S.menu, e->app);
       draw_text(is_sel ? S.f26 : S.f22, name, x + GRID_CELL / 2, (int)y + TH(GRID_CELL) + (is_sel ? 22 : 14),
                 is_sel ? 0xffffff : 0x9aa4b5, 1, GRID_CELL + GRID_GAP - 6);
@@ -2636,6 +3130,7 @@ static void draw_footer(void) {
   case MODE_KEYBOARD: hint = "✕  Touche      □  Effacer      △  Espace      OPTIONS  Valider      ○  Annuler"; break;
   default:
     if (S.sec == SEC_SYS) { hint = "▲▼  Choisir      ◀ ▶  Modifier      ✕  Valider      L1 R1  Sections"; break; }
+    if (S.sec == SEC_XPL) { hint = xpl_hint(); break; }
     snprintf(buf, sizeof buf, tr("%s      L1 R1  Sections      Pavé tactile  Vue : %s"),
              tr(S.sec == SEC_HOME ? (S.depth ? "✕  Ouvrir      ○  Retour      △  Options      □  Déplacer"
                                              : "✕  Ouvrir / Jouer      △  Options      □  Déplacer")
@@ -2652,7 +3147,88 @@ static void draw_footer(void) {
   }
 }
 
+/* Verre depoli (carte graphique) : l'image de fond du theme, reduite deux fois par le GPU
+   (flou doux), est montree a travers les panneaux. Preparee une fois par image de fond :
+   relire l'ecran affiche fige le pilote de la console, on ne le fait donc jamais. */
+static SDL_Texture *BK_MID, *BK_SMALL;
+static SDL_Texture *bk_src;
+static SDL_Texture *wallpaper(void);
+static int backdrop_grab(void) {
+  if (S.lite || SDL_GetRenderTarget(S.r) || getenv("L5_NOGLASS")) return 0;
+  SDL_Texture *wall = wallpaper();
+  if (!wall) return 0;
+  if (!BK_MID) BK_MID = SDL_CreateTexture(S.r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, 480, 270);
+  if (!BK_SMALL) BK_SMALL = SDL_CreateTexture(S.r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET, 120, 68);
+  if (!BK_MID || !BK_SMALL) return 0;
+  if (bk_src != wall) {                          /* nouvelle image de fond : flou prepare une fois */
+    int iw, ih;
+    SDL_QueryTexture(wall, NULL, NULL, &iw, &ih);
+    SDL_Rect src = { 0, 0, iw, ih };             /* meme cadrage que le fond affiche */
+    if ((long)iw * H > (long)ih * W) { src.w = (int)((long)ih * W / H); src.x = (iw - src.w) / 2; }
+    else { src.h = (int)((long)iw * H / W); src.y = (ih - src.h) / 2; }
+    SDL_SetTextureBlendMode(BK_MID, SDL_BLENDMODE_NONE);
+    SDL_SetTextureAlphaMod(wall, 255);
+    SDL_SetRenderTarget(S.r, BK_MID);
+    SDL_RenderCopy(S.r, wall, &src, NULL);
+    SDL_SetRenderTarget(S.r, BK_SMALL);
+    SDL_RenderCopy(S.r, BK_MID, NULL, NULL);
+    SDL_SetRenderTarget(S.r, NULL);
+    SDL_SetTextureBlendMode(BK_SMALL, SDL_BLENDMODE_BLEND);
+    bk_src = wall;
+    plat_log("verre depoli : fond prepare");
+  }
+  return 1;
+}
+
+/* rectangle arrondi rempli d'une texture plein ecran (coordonnees de l'ecran) */
+static void tex_round(SDL_Texture *t, int x, int y, int w, int h, int rad, int alpha, uint32_t tint) {
+  enum { SEG = 8 };
+  SDL_Vertex v[1 + 4 * (SEG + 1)];
+  int idx[3 * 4 * (SEG + 1)], n = 0, k = 0;
+  if (rad * 2 > h) rad = h / 2;
+  if (rad * 2 > w) rad = w / 2;
+  float cxs[4] = { x + w - rad, x + rad, x + rad, x + w - rad }, cys[4] = { y + rad, y + rad, y + h - rad, y + h - rad };
+  float a0[4] = { -1.5708f, 3.1416f, 1.5708f, 0 };   /* haut droit, haut gauche, bas gauche, bas droit */
+  v[n].position.x = x + w / 2.0f; v[n].position.y = y + h / 2.0f; n++;
+  for (int c = 0; c < 4; c++)
+    for (int i = 0; i <= SEG; i++) {
+      float ang = a0[c] - i * 1.5708f / SEG;
+      v[n].position.x = cxs[c] + cosf(ang) * rad;
+      v[n].position.y = cys[c] + sinf(ang) * rad;
+      n++;
+    }
+  for (int i = 0; i < n; i++) {
+    v[i].tex_coord.x = v[i].position.x / W;
+    v[i].tex_coord.y = v[i].position.y / H;
+    v[i].color.r = (tint >> 16) & 255; v[i].color.g = (tint >> 8) & 255; v[i].color.b = tint & 255;
+    v[i].color.a = (Uint8)alpha;
+  }
+  for (int i = 1; i < n; i++) { idx[k++] = 0; idx[k++] = i; idx[k++] = i + 1 < n ? i + 1 : 1; }
+  SDL_RenderGeometry(S.r, t, v, n, idx, k);
+}
+
 static void glass_panel(int x, int y, int w, int h) {
+  if (backdrop_grab()) {                         /* verre depoli : le decor reste visible, flou */
+    set_color(0x000000, 80);
+    SDL_Rect dim = { 0, 0, W, H };
+    SDL_RenderFillRect(S.r, &dim);
+    glow(x + w / 2, y, w / 2, S.th->accent, 70);
+    tex_round(BK_SMALL, x, y, w, h, 26, 255, 0xffffff);
+    fill_round(x, y, w, h, 26, 0x0b0f1a, 150);   /* teinte sombre pour la lisibilite */
+    SDL_Vertex v[4];                              /* reflet doux en haut du verre */
+    float ys[4] = { (float)y + 2, (float)y + 2, y + h * 0.35f, y + h * 0.35f }, xs[4] = { x + 14.0f, x + w - 14.0f, x + w - 14.0f, x + 14.0f };
+    for (int i = 0; i < 4; i++) {
+      v[i].position.x = xs[i]; v[i].position.y = ys[i];
+      v[i].color.r = v[i].color.g = v[i].color.b = 255; v[i].color.a = i < 2 ? 22 : 0;
+      v[i].tex_coord.x = v[i].tex_coord.y = 0;
+    }
+    static const int qi[6] = { 0, 1, 2, 0, 2, 3 };
+    SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_BLEND);
+    SDL_RenderGeometry(S.r, NULL, v, 4, qi, 6);
+    outline_round(x, y, w, h, 26, 2, S.th->accent, 190);
+    outline_round(x + 3, y + 3, w - 6, h - 6, 23, 1, 0xffffff, 28);
+    return;
+  }
   set_color(0x000000, 150);
   SDL_Rect dim = { 0, 0, W, H };
   SDL_RenderFillRect(S.r, &dim);
@@ -2685,6 +3261,7 @@ static void draw_catalog(void);
 static void open_start_menu(void);
 static void first_run_autoload(void);
 static void start_mode_set(int m);
+static void uninstall(int all);
 static void autoload_mark(int on);
 static void autoload_lost_check(void);
 static void open_catalog(void);
@@ -2909,10 +3486,41 @@ static void draw_saver_covers(void) {           /* secours : pas d'image dans fo
 static void scan_media_files(void);
 static SDL_Texture *SV[2];                       /* image affichee, image precedente (fondu) */
 static int sv_wall = -1;
+static Uint32 sv_start[2];                       /* debut d'affichage de chaque image */
+static int sv_side[2] = { 1, -1 };               /* sens de glissement de chaque image (garde au fondu) */
+
+/* image suivante decodee en arriere-plan pendant que la precedente glisse :
+   le decodage d'un JPEG plein ecran bloquait l'affichage (saut de l'image). */
+static SDL_atomic_t sv_busy;                     /* 1 : decodage en cours */
+static SDL_Surface *sv_surf;                     /* resultat, pris par le fil principal */
+static int sv_next = -1;
+static char sv_path[PATH_LEN];
+
+static int sv_loader(void *arg) {
+  (void)arg;
+  SDL_Surface *raw = IMG_Load(sv_path);           /* decodage + conversion au format de la texture, hors affichage */
+  sv_surf = raw ? SDL_ConvertSurfaceFormat(raw, SDL_PIXELFORMAT_ARGB8888, 0) : NULL;
+  if (raw) SDL_FreeSurface(raw);
+  SDL_AtomicSet(&sv_busy, 0);
+  return 0;
+}
+
+static void saver_preload(void) {                /* choisit et decode l'image d'apres */
+  if (SDL_AtomicGet(&sv_busy) || sv_surf || S.nwalls < 1) return;
+  int pick = rand() % S.nwalls;
+  if (S.nwalls > 1) while (pick == sv_wall) pick = rand() % S.nwalls;
+  snprintf(sv_path, sizeof sv_path, "%s/fonds/%s", plat_data_dir(), S.walls[pick]);
+  sv_next = pick;
+  SDL_AtomicSet(&sv_busy, 1);
+  SDL_Thread *t = SDL_CreateThread(sv_loader, "l5saver", NULL);
+  if (t) SDL_DetachThread(t);
+  else { sv_surf = IMG_Load(sv_path); SDL_AtomicSet(&sv_busy, 0); }
+}
 
 static void saver_free(void) {
   for (int i = 0; i < 2; i++) if (SV[i]) { SDL_DestroyTexture(SV[i]); SV[i] = NULL; }
   sv_wall = -1;
+  if (!SDL_AtomicGet(&sv_busy) && sv_surf) { SDL_FreeSurface(sv_surf); sv_surf = NULL; }
 }
 
 /* image recadree, plus large que l'ecran, preparee une fois : ensuite elle glisse
@@ -2946,19 +3554,35 @@ static void draw_saver(void) {
   Uint32 now = SDL_GetTicks();
   if (!S.saver_t) scan_media_files();            /* images ajoutees depuis la derniere fois */
   if (!S.nwalls) { draw_saver_covers(); return; }
-  if (!S.saver_t || now - S.saver_t > SHOW) {
+  if (!S.saver_t && !SDL_AtomicGet(&sv_busy) && !sv_surf) {   /* premiere image : chargee tout de suite */
     int pick = rand() % S.nwalls;
-    if (S.nwalls > 1) while (pick == sv_wall) pick = rand() % S.nwalls;
-    char path[PATH_LEN];
-    snprintf(path, sizeof path, "%s/fonds/%s", plat_data_dir(), S.walls[pick]);
-    SDL_Texture *t = load_tex(path);
+    snprintf(sv_path, sizeof sv_path, "%s/fonds/%s", plat_data_dir(), S.walls[pick]);
+    sv_surf = IMG_Load(sv_path);
+    sv_next = pick;
+  }
+  /* changement d'image seulement quand la suivante est deja decodee */
+  if ((!S.saver_t || now - S.saver_t > SHOW) && !SDL_AtomicGet(&sv_busy) && sv_surf) {
+    Uint64 c0 = SDL_GetPerformanceCounter();
+    SDL_Texture *t = SDL_CreateTextureFromSurface(S.r, sv_surf);
+    SDL_FreeSurface(sv_surf);
+    Uint64 c1 = SDL_GetPerformanceCounter();
+    sv_surf = NULL;
+    if (sv_next >= S.nwalls) sv_next = -1;       /* liste changee entre-temps */
     if (t) t = saver_prep(t);
-    if (t) {
-      if (SV[1]) SDL_DestroyTexture(SV[1]);
-      SV[1] = SV[0]; SV[0] = t; sv_wall = pick;
+    {
+      double f = 1000.0 / SDL_GetPerformanceFrequency(), up = (c1 - c0) * f, pr = (SDL_GetPerformanceCounter() - c1) * f;
+      if (up + pr > 40) plat_log("economiseur : image suivante %.1f ms (envoi %.1f, cadrage %.1f)", up + pr, up, pr);
     }
+    if (t && sv_next >= 0) {
+      if (SV[1]) SDL_DestroyTexture(SV[1]);
+      SV[1] = SV[0]; SV[0] = t; sv_wall = sv_next;
+      sv_start[1] = sv_start[0]; sv_start[0] = now;
+      sv_side[1] = sv_side[0]; sv_side[0] = -sv_side[1];   /* une image sur deux dans l'autre sens */
+    } else if (t) SDL_DestroyTexture(t);
     S.saver_t = now;
   }
+  if (S.saver_t && now - S.saver_t > FADE) saver_preload();   /* la suivante se prepare en douce */
+  if (!S.saver_t) S.saver_t = now;               /* image illisible : on reessaie plus tard */
   if (!SV[0]) { draw_saver_covers(); return; }
   Uint32 el = now - S.saver_t;
   SDL_SetRenderDrawColor(S.r, 0, 0, 0, 255);
@@ -2966,14 +3590,15 @@ static void draw_saver(void) {
   for (int i = 1; i >= 0; i--) {
     SDL_Texture *t = SV[i];
     if (!t || (i && el >= FADE)) continue;
-    float pan = (float)(i ? SHOW + el : el) / (SHOW + FADE);   /* 0..1 sur toute sa duree d'affichage */
+    float pan = (float)(now - sv_start[i]) / (SHOW + FADE);   /* 0..1 sur toute sa duree d'affichage */
     if (pan > 1) pan = 1;
-    int side = ((sv_wall + i) & 1) ? 1 : -1;
-    SDL_Rect d = { -(int)((SV_W - W) * (side > 0 ? pan : 1 - pan)), -(SV_H - H) / 2, SV_W, SV_H };
+    int side = sv_side[i];
+    /* position en virgule : glissement continu au sous-pixel (pas d'a-coups en 4K) */
+    SDL_FRect d = { -(float)(SV_W - W) * (side > 0 ? pan : 1 - pan), -(float)(SV_H - H) / 2, (float)SV_W, (float)SV_H };
     int a = i ? 255 : el < FADE ? (int)(255 * el / FADE) : 255;
     SDL_SetTextureBlendMode(t, a < 255 ? SDL_BLENDMODE_BLEND : SDL_BLENDMODE_NONE);
     SDL_SetTextureAlphaMod(t, (Uint8)a);
-    SDL_RenderCopy(S.r, t, NULL, &d);
+    SDL_RenderCopyF(S.r, t, NULL, &d);
     SDL_SetTextureAlphaMod(t, 255);
   }
   /* horloge et date */
@@ -3129,7 +3754,7 @@ static void gx_build_bg(void) {
 
 /* barre d'icones du haut : une case par section */
 static void gx_toolbar(void) {
-  static const char *const ICON[SEC_COUNT] = { "▤", "★", "PS5", "PS4", "▶", "HB", "EMU", "ELF", "↑", "◷", "⚙" };
+  static const char *const ICON[SEC_COUNT] = { "▤", "★", "PS5", "PS4", "▶", "HB", "EMU", "ELF", "↑", "◷", "⇆", "⚙" };
   int n = 0, cw = 92, ch = 62;
   for (int k = 0; k < SEC_COUNT; k++) if (S.sec_has[SEC_ORDER[k]]) n++;
   int tw = n * cw, x = (W - tw) / 2, y = 26;
@@ -3360,7 +3985,7 @@ static void xmb_glow(int cx, int cy, int rw, int rh, uint32_t c, int a) {
 }
 
 static void draw_xmb(Entry *e) {
-  static const char *const ICON[SEC_COUNT] = { "▤", "★", "PS5", "PS4", "▶", "HB", "EMU", "ELF", "↑", "◷", "⚙" };
+  static const char *const ICON[SEC_COUNT] = { "▤", "★", "PS5", "PS4", "▶", "HB", "EMU", "ELF", "↑", "◷", "⇆", "⚙" };
   static float wave, colx = -1, fade = 1;
   static int last_sec = -1, last_depth = -1;
   const int CX = 440, ROW = 262, XGAP = 250;      /* colonne choisie, ligne des categories */
@@ -3478,11 +4103,26 @@ static void draw_xmb(Entry *e) {
   }
 }
 
+/* tuile ouverte alors que launcher5.elf n'a pas ete lance (pas de droits, rien a afficher) */
+static void draw_no_bootstrap(void) {
+  SDL_SetRenderDrawColor(S.r, 8, 10, 18, 255);
+  SDL_RenderClear(S.r);
+  int w = 1240, h = 420, x = (W - w) / 2, y = (H - h) / 2;
+  fill_round(x, y, w, h, 28, 0x141a2a, 245);
+  draw_text(S.f48, tr("Launcher5 n'est pas démarré"), W / 2, y + 50, 0xffffff, 1, w - 80);
+  draw_text(S.f22, tr("Envoie launcher5.elf à ton chargeur ELF (port 9021), puis rouvre cette tuile."), W / 2, y + 150, 0xdfe5ee, 1, w - 80);
+  draw_text(S.f22, tr("Pour qu'il démarre tout seul : Paramètres › Démarrage de Launcher5 › Autoloader."), W / 2, y + 200, 0xc0c8d4, 1, w - 80);
+  draw_text(S.f22, tr("✕  Quitter"), W / 2, y + h - 80, S.th ? S.th->accent : 0x00e5ff, 1, w - 80);
+}
+
 static void draw(void) {
+  if (S.no_bootstrap) { draw_no_bootstrap(); present(); return; }
+  WHERE("dessin : preparation");
   frame_theme(selected());
   refresh_settings();
   check_tile_shape();
   update_sections();
+  xpl_tick();                                    /* Xplorer : operation suivie meme hors de la section */
   static int opened, want_resume;                /* a l'ouverture : premiere section dans l'ordre */
   if (!opened || !S.sec_has[S.sec]) {
     if (!opened) want_resume = 1;
@@ -3524,12 +4164,12 @@ static void draw(void) {
 
   if (S.saver_on) {
     draw_saver();
-    if (S.saver_on) { SDL_RenderPresent(S.r); return; }
+    if (S.saver_on) { present(); return; }
   }
   if (S.launching && SDL_GetTicks() - S.launch_t > 400) {
     draw_launching();
     draw_toast();
-    SDL_RenderPresent(S.r);
+    present();
     return;
   }
   if (GXMODE) {
@@ -3546,7 +4186,8 @@ static void draw(void) {
   {
     int tdx, tdy;
     if (tr_offset(&tdx, &tdy)) { SDL_Rect vp = { tdx, tdy, W, H }; SDL_RenderSetViewport(S.r, &vp); }
-    switch (S.menu.view) {
+    if (S.sec == SEC_XPL) draw_xplorer();
+    else switch (S.menu.view) {
     case VIEW_GRID: if (S.sec == SEC_SYS) draw_settings(); else draw_grid(); break;
     case VIEW_CLASSIC: if (S.sec == SEC_SYS) draw_settings(); else { draw_hero(e); draw_carousel(); } break;
     default: if (S.sec == SEC_SYS) draw_settings(); else { draw_flow(); draw_flow_info(e); } break;
@@ -3555,7 +4196,7 @@ static void draw(void) {
   }
   draw_footer();
 overlays:
-  if (((filter_now && S.sec != SEC_HOME) || search_q[0]) && S.sec != SEC_SYS && S.mode != MODE_THEME) {
+  if (((filter_now && S.sec != SEC_HOME) || search_q[0]) && S.sec != SEC_SYS && S.sec != SEC_XPL && S.mode != MODE_THEME) {
     char fl[200];
     if (search_q[0]) snprintf(fl, sizeof fl, tr("« %s »  ·  ○ effacer"), search_q);
     else snprintf(fl, sizeof fl, "□  %s", tr(FILTER_NAMES[filter_now]));
@@ -3576,7 +4217,7 @@ overlays:
   draw_letter();
   draw_toast();
   draw_boot();
-  SDL_RenderPresent(S.r);
+  present();
 }
 
 /* ------------------------------------------------------------------ */
@@ -4334,6 +4975,7 @@ static void open_quick(void) {
   add_choice("Relancer le launcher", ACT_Q_RESTART);
   add_choice("Vider le cache des jaquettes", ACT_Q_CACHE);
   add_choice("Quitter vers l'accueil PS5", ACT_Q_QUIT);
+  add_choice("Fermer le launcher", ACT_Q_STOP);
   S.mode = MODE_CONTEXT;
   sfx(SFX_OK);
 }
@@ -4394,7 +5036,7 @@ static void quick_action(int act) {
   case ACT_Q_RESTART:
     save();
     toast("Relance du launcher…");
-    draw(); SDL_RenderPresent(S.r);
+    draw(); present();
     if (!plat_restart_ui()) {
       /* fin immediate : les fils (jaquettes, musique) tournent encore, un nettoyage
          complet pourrait les faire planter. Le systeme libere tout a la sortie. */
@@ -4411,6 +5053,13 @@ static void quick_action(int act) {
   case ACT_Q_CATALOG: open_catalog(); break;
   case ACT_HELP_PAY: open_help(1); break;
   case ACT_Q_QUIT: { App *a = menu_find_app(&S.menu, "sys:home"); if (a) launch(a); break; }   /* comme dans les Parametres */
+  case ACT_Q_STOP:                               /* arret complet : interface et tache de fond (la tuile peut etre supprimee) */
+    save();
+    toast("Fermeture du launcher…");
+    draw(); present();
+    plat_log("menu rapide : fermeture complete du launcher");
+    if (plat_stop_launcher()) S.running = 0;
+    break;
   }
 }
 
@@ -4482,6 +5131,7 @@ static void do_action(int act) {
   case ACT_START_MANUAL: case ACT_START_PLUGIN: case ACT_START_AUTOLOAD: start_mode_set(act - ACT_START_MANUAL); break;
   case ACT_FIRST_YES: start_mode_set(2 /* autoloader */); break;
   case ACT_RELINK_YES: start_mode_set(2 /* autoloader */); break;
+  case ACT_UNINST_KEEP: case ACT_UNINST_ALL: uninstall(act == ACT_UNINST_ALL); break;
   case ACT_RELINK_NO: autoload_mark(0); toast("Tu pourras le remettre dans Paramètres › Démarrage de Launcher5"); break;
   case ACT_HELP_PAY: open_help(1); break;
   case ACT_K_BOOT: if (kernel_pending && boot_index(kernel_pending) < 0) boot_toggle(kernel_pending); break;
@@ -4576,7 +5226,19 @@ static void check_tile_shape(void) {
   for (int i = 0; i < S.menu.napps; i++) drop_tiles(&S.menu.apps[i]);
 }
 
+/* date de modification d'un dossier (0 si absent) : les listes ne sont relues que s'il a change */
+static long long dir_stamp(const char *sub) {
+  char d[PATH_LEN];
+  struct stat st;
+  data_path(d, sizeof d, sub);
+  return stat(d, &st) ? 0 : (long long)st.st_mtime * 1000000LL + (long long)st.st_size;
+}
+
 static void scan_media_files(void) {
+  static long long sw = -1, sm = -1;
+  long long nw = dir_stamp("fonds"), nm = dir_stamp("musique");
+  if (nw == sw && nm == sm && (S.walls || S.musics)) return;   /* rien de nouveau */
+  sw = nw; sm = nm;
   char dir[PATH_LEN];
   free(S.walls); free(S.musics);
   data_path(dir, sizeof dir, "fonds");
@@ -4585,7 +5247,12 @@ static void scan_media_files(void) {
   S.nmusics = theme_list_files(dir, MUSIC_EXTS, &S.musics);
 }
 
+static int presets_dirty = 1;                    /* theme enregistre ou supprime : a relire */
 static void load_presets(void) {
+  static long long st = -1;
+  long long nt = dir_stamp("themes");
+  if (!presets_dirty && nt == st && S.presets) return;
+  st = nt; presets_dirty = 0;
   free(S.presets); free(S.preset_files);
   S.nbuiltin = theme_builtin_count();
   char dir[PATH_LEN], path[PATH_LEN + THEME_FILE_LEN];
@@ -4627,8 +5294,13 @@ static void apply_theme(const Theme *t) {
 }
 
 static void open_theme_editor(void) {
+  Uint64 o0 = SDL_GetPerformanceCounter();
   scan_media_files();
+  Uint64 o1 = SDL_GetPerformanceCounter();
   load_presets();
+  double f = 1000.0 / SDL_GetPerformanceFrequency();
+  double ma = (o1 - o0) * f, mb = (SDL_GetPerformanceCounter() - o1) * f;
+  if (ma + mb > 30) plat_log("lenteur : studio, fichiers %.0f ms, themes %.0f ms", ma, mb);
   S.edit = S.cur;
   S.base = &S.edit;
   S.preset = find_preset(S.cur.name);
@@ -4641,8 +5313,9 @@ static void open_theme_editor(void) {
 static int row_visible(int r) {
   const Theme *t = &S.edit;
   switch (r) {
-  case R_WALL: return t->bg_mode == BG_IMAGE;
+  case R_WALL: case R_BGANIM: return t->bg_mode == BG_IMAGE;
   case R_ART: return t->bg_mode == BG_ART;
+  case R_FXSPEED: return t->fx != FX_NONE;
   case R_PSTYLE: case R_FALL: return t->particles != PART_NONE;
   case R_VOLUME: return t->music[0] != 0;
   case R_DELETE: return S.preset >= S.nbuiltin && !S.ed_dirty;
@@ -4652,7 +5325,7 @@ static int row_visible(int r) {
 
 static const char *ROW_LABEL[R_COUNT] = {
   "Thème de base", "Interface", "Couleurs", "Couleur principale", "Couleur secondaire", "Fond : haut", "Fond : bas", "Arrière-plan",
-  "Image", "Illustration du jeu", "Effet animé", "Halos lumineux", "Particules", "Forme", "Sens", "Boîtier", "Coins des jaquettes",
+  "Image", "Fond animé", "Illustration du jeu", "Effet animé", "Vitesse de l'effet", "Halos lumineux", "Particules", "Forme", "Sens", "Boîtier", "Coins des jaquettes",
   "Horloge", "Sons d'interface", "Musique", "Volume", "Enregistrer comme mon thème…", "Supprimer ce thème",
 };
 
@@ -4695,6 +5368,12 @@ static const char *row_value(int r, char *buf, long *sw) {
   case R_WALL: return S.nwalls ? (t->wallpaper[0] ? t->wallpaper : "aucune") : "dossier fonds vide";
   case R_ART: sprintf(buf, "%d %%", t->art); return buf;
   case R_GLOW: sprintf(buf, "%d %%", t->glow); return buf;
+  case R_FXSPEED: sprintf(buf, "%d %%", t->fx_speed ? t->fx_speed : 50); return buf;
+  case R_FX: {                                   /* trop de choix pour des puces : nom + fleches */
+    static const char *FXV[FX_COUNT] = { "Aucun", "Grille", "Étoiles", "Pluie", "Braises", "Aurore", "Bokeh", "Rayons" };
+    snprintf(buf, 96, "%s", tr(FXV[t->fx >= 0 && t->fx < FX_COUNT ? t->fx : 0]));
+    return buf;
+  }
   case R_PART: return PART[t->particles];
   case R_PSTYLE: return PST[t->pstyle];
   case R_FALL: return t->fall ? "Tombent" : "Montent";
@@ -4753,6 +5432,8 @@ static void theme_row_change(int d) {
   }
   case R_ART: t->art = step(t->art, d); break;
   case R_GLOW: t->glow = step(t->glow, d); break;
+  case R_FXSPEED: { int v = step(t->fx_speed ? t->fx_speed : 50, d); t->fx_speed = v < 10 ? 10 : v; break; }
+  case R_BGANIM: t->bg_anim = !t->bg_anim; break;
   case R_PART: t->particles = cyc(t->particles, d, PART_COUNT); break;
   case R_PSTYLE: t->pstyle = cyc(t->pstyle, d, PSTYLE_COUNT); break;
   case R_FALL: t->fall = !t->fall; break;
@@ -4791,7 +5472,7 @@ static void theme_saved_as(const char *name) {
   mkdir(dir, 0755);
   snprintf(path, sizeof path, "%s/%s", dir, file);
   if (theme_save(path, &S.edit)) { toast("⚠ Impossible d'enregistrer le thème"); return; }
-  load_presets();
+  presets_dirty = 1; load_presets();
   S.preset = find_preset(S.edit.name);
   S.ed_dirty = 0;
   char msg[160];
@@ -4827,7 +5508,7 @@ static void theme_editor_input(int in) {
       data_path(dir, sizeof dir, "themes");
       snprintf(path, sizeof path, "%s/%s", dir, S.preset_files[S.preset]);
       if (remove(path)) { toast("⚠ Impossible de supprimer ce thème"); return; }
-      load_presets();
+      presets_dirty = 1; load_presets();
       S.preset = -1;
       S.ed_dirty = 1;
       S.ed_row = R_SAVE;
@@ -4846,7 +5527,7 @@ static void theme_editor_input(int in) {
       data_path(dir, sizeof dir, "themes");
       mkdir(dir, 0755);
       snprintf(path, sizeof path, "%s/%s", dir, file);
-      if (!theme_save(path, &S.edit)) { load_presets(); S.preset = find_preset(S.edit.name); S.ed_dirty = 0; }
+      if (!theme_save(path, &S.edit)) { presets_dirty = 1; load_presets(); S.preset = find_preset(S.edit.name); S.ed_dirty = 0; }
       else plat_log("impossible d'enregistrer %s", path);
     }
     apply_theme(&S.edit);
@@ -4887,12 +5568,12 @@ static int row_chips(int r, const char *const **opts, int *cur) {
   static const char *const CLK[] = { "24 h", "12 h", "Masquée" };
   static const char *const LAY[] = { "Launcher5", "Loader GX", "Rebug XMB" };
   static const char *const AUTO[] = { "Du thème", "Du jeu" };
-  static const char *const FXN[] = { "Aucun", "Grille", "Hyperespace", "Pluie" };
+  static const char *const BGA[] = { "Fixe", "Animé" };
   const Theme *t = &S.edit;
   switch (r) {
   case R_LAYOUT: *opts = LAY; *cur = t->layout; return LAYOUT_COUNT;
   case R_AUTO: *opts = AUTO; *cur = t->auto_color ? 1 : 0; return 2;
-  case R_FX: *opts = FXN; *cur = t->fx; return FX_COUNT;
+  case R_BGANIM: *opts = BGA; *cur = t->bg_anim ? 1 : 0; return 2;
   case R_BG: *opts = BG; *cur = t->bg_mode; return BG_COUNT;
   case R_PART: *opts = PART; *cur = t->particles; return PART_COUNT;
   case R_PSTYLE: *opts = PST; *cur = t->pstyle; return PSTYLE_COUNT;
@@ -5035,8 +5716,9 @@ static void draw_theme_editor(void) {
         if (i18n_lang() == L_FR) draw_text(S.f22, color_name(list, nl, val, buf), sx - 16, y + 14, 0x9aa4b5, 2, 170);
         else { snprintf(buf, sizeof buf, "#%06X", val & 0xffffff); draw_text(S.f22, buf, sx - 16, y + 14, 0x9aa4b5, 2, 170); }
       }
-    } else if (r == R_ART || r == R_GLOW || r == R_VOLUME || r == R_SFX) {
-      int v = r == R_ART ? S.edit.art : r == R_GLOW ? S.edit.glow : r == R_SFX ? S.edit.sfx : S.edit.volume;
+    } else if (r == R_ART || r == R_GLOW || r == R_VOLUME || r == R_SFX || r == R_FXSPEED) {
+      int v = r == R_ART ? S.edit.art : r == R_GLOW ? S.edit.glow : r == R_SFX ? S.edit.sfx
+            : r == R_FXSPEED ? (S.edit.fx_speed ? S.edit.fx_speed : 50) : S.edit.volume;
       int tx = cx0 + 10, tw = cx1 - tx - 120;
       fill_round(tx, my - 4, tw, 8, 4, 0xffffff, 40);
       fill_round(tx, my - 4, tw * v / 100, 8, 4, S.th->accent, 255);
@@ -5483,6 +6165,10 @@ static void change_section(int dir) {
   S.scroll = (float)*cur_sel();
 }
 
+/* Cover Flow infini : seulement en navigation (pas en deplacement d'un jeu), 2 jeux ou plus */
+static int flow_looping(void) {
+  return S.menu.flow_loop && S.menu.view == VIEW_FLOW && S.mode == MODE_BROWSE && !GXMODE && !XMBMODE && S.nentries >= 2;
+}
 static void move_cursor(int dx, int dy) {
   if (S.mode == MODE_CONTEXT) { S.csel = (S.csel + dy + S.nchoices) % S.nchoices; return; }
   if (S.mode == MODE_PICKFOLDER) { S.fsel = (S.fsel + dy + S.nfolders) % S.nfolders; return; }
@@ -5508,6 +6194,10 @@ static void move_cursor(int dx, int dy) {
   }
   if (dy) { if (S.mode == MODE_BROWSE) change_section(dy); return; }
   int ns = *sel + dx;
+  if ((ns < 0 || ns >= S.nentries) && flow_looping()) {   /* Cover Flow infini : on repart de l'autre bout */
+    ns = (ns + S.nentries) % S.nentries;
+    S.scroll -= dx * S.nentries;                 /* le defilement continue dans le meme sens */
+  }
   if (ns < 0 || ns >= S.nentries) return;
   if (S.mode == MODE_MOVE) {
     Node *parent = current_node();
@@ -5560,6 +6250,10 @@ static void up_set(int state, const char *err) {
   SDL_UnlockMutex(UP.mx);
 }
 
+static int boot_copy_old(void);
+static SDL_atomic_t up_boot_sync;               /* copie d'allumage remplacee : resynchroniser l'autoloader */
+static const char *up_fetch(const char *url, const char *dig, const char *ver);
+
 static void up_check(void) {
   unsigned char *d; size_t n;
   long code = plat_https_get(UPDATE_API, &d, &n, 1 << 20);
@@ -5591,26 +6285,27 @@ static void up_check(void) {
   snprintf(UP.url, sizeof UP.url, "%s", url);
   snprintf(UP.digest, sizeof UP.digest, "%s", dig);
   SDL_UnlockMutex(UP.mx);
-  up_set(ver_cmp(ver, run_version()) > 0 ? UP_AVAILABLE : UP_LATEST, NULL);
   plat_log("mise a jour : version publiee %s, version actuelle %s", ver, run_version());
+  if (!ver_cmp(ver, run_version()) && boot_copy_old()) {   /* meme version : la copie de l'allumage suit */
+    const char *err = up_fetch(url, dig, ver);
+    plat_log("mise a jour : copie lancee a l'allumage %s", err ? err : "remplacee par la version actuelle");
+    if (!err) SDL_AtomicSet(&up_boot_sync, 1);   /* la copie de l'autoloader suit (fil de l'ecran) */
+  }
+  up_set(ver_cmp(ver, run_version()) > 0 ? UP_AVAILABLE : UP_LATEST, NULL);
 }
 
-static void up_download(void) {
-  char url[600], dig[72], ver[24];
-  SDL_LockMutex(UP.mx);
-  memcpy(url, UP.url, sizeof url); memcpy(dig, UP.digest, sizeof dig); memcpy(ver, UP.ver, sizeof ver);
-  SDL_UnlockMutex(UP.mx);
-  up_set(UP_DOWNLOADING, NULL);
+/* telecharge la version publiee, verifie l'empreinte, puis l'ecrit dans /data/launcher5 (copie
+   lancee a l'allumage). NULL si tout va bien, sinon le message d'erreur. */
+static const char *up_fetch(const char *url, const char *dig, const char *ver) {
   unsigned char *d; size_t n;
   long code = plat_https_get(url, &d, &n, 64 << 20);
-  if (code != 200) { up_set(UP_ERROR, code ? "Téléchargement refusé par GitHub" : "Téléchargement interrompu"); return; }
+  if (code != 200) return code ? "Téléchargement refusé par GitHub" : "Téléchargement interrompu";
   char hex[65];
   sha256_hex(d, n, hex);
   if (strcmp(hex, dig) || n < 4 || memcmp(d, "\x7f" "ELF", 4)) {
     free(d);
     plat_log("mise a jour : empreinte incorrecte, fichier refuse");
-    up_set(UP_ERROR, "Fichier abîmé : mise à jour refusée");
-    return;
+    return "Fichier abîmé : mise à jour refusée";
   }
   char tmp[PATH_LEN], dst[PATH_LEN], vf[PATH_LEN];
   up_path(tmp, sizeof tmp, "launcher5.elf.tmp");
@@ -5620,9 +6315,31 @@ static void up_download(void) {
   size_t w = f ? fwrite(d, 1, n, f) : 0;
   if (f) fclose(f);
   free(d);
-  if (w != n || rename(tmp, dst)) { remove(tmp); up_set(UP_ERROR, "Écriture impossible dans /data/launcher5"); return; }
+  if (w != n || rename(tmp, dst)) { remove(tmp); return "Écriture impossible dans /data/launcher5"; }
   if ((f = fopen(vf, "w"))) { fprintf(f, "%s\n", ver); fclose(f); }
-  plat_log("mise a jour : version %s prete (%s)", ver, dst);
+  return NULL;
+}
+
+/* copie lancee a l'allumage plus ancienne que la version qui tourne (launcher5.elf envoye a la
+   main sur le port 9021) : sans correction, l'allumage suivant relancerait l'ancienne version */
+static int boot_copy_old(void) {
+  char vf[PATH_LEN], el[PATH_LEN], v[24] = "";
+  up_path(vf, sizeof vf, "launcher5.version");
+  up_path(el, sizeof el, "launcher5.elf");
+  FILE *f = fopen(vf, "r");
+  if (f) { if (!fgets(v, sizeof v, f)) v[0] = 0; fclose(f); v[strcspn(v, "\r\n")] = 0; }
+  return access(el, R_OK) || !v[0] || ver_cmp(v, run_version()) < 0;
+}
+
+static void up_download(void) {
+  char url[600], dig[72], ver[24];
+  SDL_LockMutex(UP.mx);
+  memcpy(url, UP.url, sizeof url); memcpy(dig, UP.digest, sizeof dig); memcpy(ver, UP.ver, sizeof ver);
+  SDL_UnlockMutex(UP.mx);
+  up_set(UP_DOWNLOADING, NULL);
+  const char *err = up_fetch(url, dig, ver);
+  if (err) { up_set(UP_ERROR, err); return; }
+  plat_log("mise a jour : version %s prete", ver);
   up_set(UP_READY, NULL);
 }
 
@@ -6031,8 +6748,42 @@ static void starter_note(void) {
   S.toast_until = SDL_GetTicks() + 9000;
 }
 
+/* nom de base d'un payload : nom de fichier sans version ni extension, en minuscules
+   (« kstuff-lite_v1.11.elf » et « kstuff-lite.elf » -> kstuff-lite, « ShadowMountPlus_1.7.elf »
+   -> shadowmountplus) ; kstuff et kstuff-lite restent distincts. Vide si trop court. */
+static void pay_family(const char *path, char *k, size_t n) {
+  const char *b = strrchr(path, '/');
+  b = b ? b + 1 : path;
+  size_t i = 0;
+  for (; b[i] && i + 1 < n; i++) k[i] = (char)tolower((unsigned char)b[i]);
+  k[i] = 0;
+  char *e = strstr(k, ".elf"); if (!e) e = strstr(k, ".bin");
+  if (e) *e = 0;
+  if ((e = strstr(k, " ("))) *e = 0;             /* « nom (1).elf » : copie telechargee deux fois */
+  if ((e = strchr(k, '_'))) *e = 0;              /* « nom_v1.2 » */
+  for (e = k; *e; e++)                           /* « nom-v1.2 », « nom-1.2 » */
+    if (*e == '-' && (isdigit((unsigned char)e[1]) || (e[1] == 'v' && isdigit((unsigned char)e[2])))) { *e = 0; break; }
+  if (strlen(k) < 3) k[0] = 0;
+}
+
+/* une seule entree du catalogue dans cette famille : on peut s'y fier pour reconnaitre un
+   payload renomme (sinon, kstuff et kstuff-lite par exemple, seul le nom exact compte) */
+static int pcat_family_unique(const PCat *c, char *key, size_t n) {
+  pay_family(c->file, key, n);
+  if (!key[0]) return 0;
+  int same = 0;
+  for (int i = 0; i < PCT.n; i++) {
+    char k[64];
+    pay_family(PCT.it[i].file, k, sizeof k);
+    same += !strcmp(k, key);
+  }
+  return same == 1;
+}
+
 static App *pcat_installed(const PCat *c) {      /* deja present : copie de Launcher5 d'abord, sinon d'un autre gestionnaire */
-  App *other = NULL;
+  App *other = NULL, *fam = NULL;
+  char key[64];
+  int unique = pcat_family_unique(c, key, sizeof key);
   for (int i = 0; i < S.menu.napps; i++) {
     App *a = &S.menu.apps[i];
     if (a->kind != KIND_PAYLOAD) continue;
@@ -6040,9 +6791,40 @@ static App *pcat_installed(const PCat *c) {      /* deja present : copie de Laun
     if (!strcasecmp(a->title, c->name) || (b && !strcasecmp(b + 1, c->file))) {
       if (pay_ours(a)) return a;
       if (!other) other = a;
+    } else if (unique && !fam && !pay_shadowed(a)) { /* meme payload sous un autre nom de fichier */
+      char k[64];
+      pay_family(a->path, k, sizeof k);
+      if (!strcmp(k, key)) fam = a;
     }
   }
-  return other;
+  return other ? other : fam;
+}
+
+/* apres une installation : l'entree « Au demarrage » de la meme famille (payload renomme)
+   passe sur la nouvelle version ; l'ancien fichier reste sur la console */
+static void boot_follow(const PCat *c) {
+  char key[64];
+  if (!pcat_family_unique(c, key, sizeof key)) return;
+  if (nboot < 0) boot_load();
+  int have = -1;
+  for (int i = 0; i < nboot; i++) if (!strcasecmp(BOOTL[i], c->name)) have = i;
+  for (int i = 0; i < nboot; i++) {
+    if (i == have) continue;
+    App *a = boot_resolve(BOOTL[i]);
+    char k[64];
+    pay_family(a ? a->path : BOOTL[i], k, sizeof k);
+    if (strcmp(k, key)) continue;
+    plat_log("au demarrage : %s remplace par %s", BOOTL[i], c->name);
+    if (have >= 0) {                             /* deja dans la liste : l'ancienne entree part */
+      memmove(BOOTL[i], BOOTL[i + 1], (size_t)(nboot - i - 1) * NAME_LEN);
+      nboot--;
+      if (have > i) have--;
+      i--;
+    } else {
+      snprintf(BOOTL[i], NAME_LEN, "%s", c->name);
+      have = i;
+    }
+  }
 }
 
 static void pcat_install(int i) {
@@ -6050,7 +6832,15 @@ static void pcat_install(int i) {
   if (PCT.job) { toast("Un téléchargement est déjà en cours"); return; }
   PCat *c = &PCT.it[i];
   App *a = pcat_installed(c);
-  if (a && a->ver[0] && !strcmp(a->ver, c->ver)) { toast("Déjà à jour"); return; }
+  if (a && a->ver[0] && !strcmp(a->ver, c->ver)) {
+    plat_log("catalogue : %s deja a jour (%s, %s)", c->name, a->path, a->ver);
+    boot_follow(c);                              /* une ancienne copie renommee au demarrage : on passe a celle-ci */
+    boot_refresh();
+    toast("Déjà à jour");
+    return;
+  }
+  if (a) plat_log("catalogue : %s deja present (%s), mise a jour", c->name, a->path);
+  else plat_log("catalogue : installation de %s (%s)", c->name, c->file);
   PCat *copy = malloc(sizeof *copy);
   if (!copy) return;
   *copy = *c;
@@ -6082,10 +6872,14 @@ static void pcat_poll(void) {
     SDL_AtomicSet(&PCT.job_ready, 0);
     PCT.job = 0;
     if (PCT.job_ok) {
-      scan_all(&S.menu);                         /* le nouveau payload rejoint la section */
       char id[ID_LEN];
       snprintf(id, sizeof id, "elf:%.35s", PCT.job_file);
       App *a = menu_find_app(&S.menu, id);
+      Uint64 t0 = SDL_GetPerformanceCounter();
+      if (!a) {                                  /* nouveau payload : il rejoint la section (une mise a jour n'a pas besoin de tout relire) */
+        scan_all(&S.menu);
+        a = menu_find_app(&S.menu, id);
+      }
       if (a && PCT.job_idx < PCT.n) {            /* deja connu (mise a jour) : fiche et jaquette refaites */
         PCat *c = &PCT.it[PCT.job_idx];
         snprintf(a->title, sizeof a->title, "%s", c->name);
@@ -6097,7 +6891,10 @@ static void pcat_poll(void) {
         a->box_state = 0; a->box_pref = 0;
         drop_tiles(a);
       }
+      if (PCT.job_idx < PCT.n) boot_follow(&PCT.it[PCT.job_idx]);
       boot_refresh();                            /* la liste au demarrage suit la nouvelle version */
+      double ms = (SDL_GetPerformanceCounter() - t0) * 1000.0 / SDL_GetPerformanceFrequency();
+      if (ms > 30) plat_log("lenteur : fin d'installation en %.0f ms", ms);
       char msg[200];
       snprintf(msg, sizeof msg, tr("« %s » installé  ·  empreinte vérifiée"), PCT.job_idx < PCT.n ? PCT.it[PCT.job_idx].name : "");
       toast(msg);
@@ -6109,6 +6906,21 @@ static void pcat_poll(void) {
 static void open_catalog(void) {
   S.mode = MODE_CATALOG;
   if (PCT.state != 1 && (PCT.state != 2 || SDL_GetTicks() - PCT.loaded_at > 30 * 60 * 1000)) pcat_fetch();
+}
+
+/* essai / demonstration : va sur le premier payload qui a une mise a jour et l'installe */
+static void pcat_update_first(void) {
+  for (int i = 0; i < PCT.n; i++) {
+    PCat *c = &PCT.it[i];
+    App *a = pcat_installed(c);
+    if (a && a->ver[0] && strcmp(a->ver, c->ver) && !payload_excluded(c->name) && !payload_excluded(c->url)) {
+      PCT.sel = i;
+      plat_log("essai : mise a jour de %s (%s -> %s)", c->name, a->ver, c->ver);
+      pcat_install(i);
+      return;
+    }
+  }
+  toast("Tous tes payloads sont à jour");
 }
 
 static int pcat_rows(void) { return (H - 120 - 150 - 90) / 100; }
@@ -6202,7 +7014,7 @@ static void up_install(void) {
   char path[PATH_LEN];
   up_path(path, sizeof path, "launcher5.elf");
   toast(tr("Installation de la mise à jour : le launcher redémarre…"));
-  draw(); SDL_RenderPresent(S.r);
+  draw(); present();
   save();
   char mark[PATH_LEN];                           /* une seule tentative automatique par version */
   up_path(mark, sizeof mark, "cache/update_tried");
@@ -6248,11 +7060,14 @@ static void up_boot(void) {
   }
   char chk[PATH_LEN];
   up_path(chk, sizeof chk, "cache/update_check");
-  if (S.menu.auto_update && !recent_file(chk, 1)) up_start(0);
+  /* verification du jour ; tout de suite si la copie lancee a l'allumage est en retard */
+  if ((S.menu.auto_update && !recent_file(chk, 1)) || boot_copy_old()) up_start(0);
 }
 
 /* a chaque image : messages et installation demandee */
+static void autostart_sync(void);
 static void up_poll(void) {
+  if (SDL_AtomicGet(&up_boot_sync)) { SDL_AtomicSet(&up_boot_sync, 0); autostart_sync(); }
   if (!UP.mx || !UP.notify) return;
   UP.notify = 0;
   char msg[160];
@@ -6284,8 +7099,8 @@ static void up_poll(void) {
 /* ------------------------------------------------------------------ */
 /* Menu Parametres : une vraie liste de reglages + une carte d'infos    */
 /* ------------------------------------------------------------------ */
-enum { SR_STATUS, SR_THEME, SR_VIEW, SR_COVERS, SR_ONLINE, SR_SAVER, SR_SFX, SR_SFXPACK, SR_BOOT, SR_RETURN, SR_FOLDERS, SR_HIDDEN, SR_HIDEIP,
-       SR_AUTOSTART, SR_AUTOUPD, SR_UPDATE, SR_CONTROLS, SR_QUIT, SR_COUNT };
+enum { SR_STATUS, SR_THEME, SR_VIEW, SR_SCROLL, SR_LOOP, SR_COVERS, SR_ONLINE, SR_SAVER, SR_SFX, SR_SFXPACK, SR_BOOT, SR_RETURN, SR_FOLDERS, SR_HIDDEN, SR_HIDEIP,
+       SR_AUTOSTART, SR_AUTOUPD, SR_UPDATE, SR_CONTROLS, SR_QUIT, SR_UNINSTALL, SR_COUNT };
 static int autostart_state(void);
 static int as_cached;
 static int autostart_enable(char *msg, size_t mn);
@@ -6330,6 +7145,8 @@ static void settings_change(int d, int activate) {
     }
     break;
   case SR_VIEW: set_view(S.menu.view + (d ? d : 1)); break;
+  case SR_SCROLL: S.menu.scroll_style = ((S.menu.scroll_style + (d ? d : 1)) % 4 + 4) % 4; save(); break;
+  case SR_LOOP: S.menu.flow_loop = !S.menu.flow_loop; save(); break;
   case SR_COVERS: S.menu.boxes = !S.menu.boxes; boxes_changed(); save(); break;
   case SR_ONLINE:                              /* les boites sont refaites avec ou sans les officielles */
     S.menu.covers_online = !S.menu.covers_online;
@@ -6394,6 +7211,16 @@ static void settings_change(int d, int activate) {
   case SR_QUIT:
     if (activate) { App *a = menu_find_app(&S.menu, "sys:home"); if (a) launch(a); }
     break;
+  case SR_UNINSTALL:
+    if (activate) {
+      S.nchoices = 0; S.csel = 0; S.quick = 0;
+      snprintf(S.ctx_title, sizeof S.ctx_title, "%s", tr("Désinstaller Launcher5 ?"));
+      add_choice("Désinstaller (garder mes réglages)", ACT_UNINST_KEEP);
+      add_choice("Désinstaller et tout effacer", ACT_UNINST_ALL);
+      S.mode = MODE_CONTEXT;
+      sfx(SFX_OK);
+    }
+    break;
   }
 }
 
@@ -6410,7 +7237,25 @@ static void settings_change(int d, int activate) {
 static void al_find(const char *root, char *out, size_t n) {
   char bases[9][64];
   int nb = 0;
-  for (int u = 0; u < 8; u++) snprintf(bases[nb++], sizeof bases[0], "%s/mnt/usb%d", root, u);
+  /* cles USB branchees seulement : une lecture de /mnt plutot que 8 essais (chaque
+     emplacement vide coute cher a verifier, surtout depuis l'application GPU) */
+  char mnt[64];
+  snprintf(mnt, sizeof mnt, "%s/mnt", root);
+  DIR *md = opendir(mnt);
+  struct stat mst;
+  int mdev_ok = !stat(mnt, &mst);
+  if (md) {
+    struct dirent *me;
+    while ((me = readdir(md)) && nb < 8)
+      if (!strncmp(me->d_name, "usb", 3) && me->d_name[3] >= '0' && me->d_name[3] <= '7' && !me->d_name[4]) {
+        char up[96];
+        struct stat ust;
+        snprintf(up, sizeof up, "%s/%s", mnt, me->d_name);
+        if (mdev_ok && (stat(up, &ust) || ust.st_dev == mst.st_dev)) continue;   /* rien de monte */
+        snprintf(bases[nb++], sizeof bases[0], "%s", up);
+      }
+    closedir(md);
+  }
   snprintf(bases[nb++], sizeof bases[0], "%s/data", root);
   for (int b = 0; b < nb; b++) {
     char p[600];
@@ -6431,9 +7276,37 @@ static void al_find(const char *root, char *out, size_t n) {
   snprintf(out, n, "%s/data/ps5_autoloader", root);
 }
 
+/* Dossier de l'autoloader : trouve une fois tout de suite, puis tenu a jour toutes les 10 s
+   par un fil a part (cle USB branchee ou retiree) : l'ecran n'attend jamais la recherche. */
+static struct { SDL_mutex *mx; char dir[512]; Uint32 at; SDL_atomic_t busy; } AL;
+static int al_worker(void *u) {
+  (void)u;
+  char d[512];
+  al_find(plat_root(), d, sizeof d);
+  SDL_LockMutex(AL.mx);
+  snprintf(AL.dir, sizeof AL.dir, "%s", d);
+  AL.at = SDL_GetTicks();
+  SDL_UnlockMutex(AL.mx);
+  SDL_AtomicSet(&AL.busy, 0);
+  return 0;
+}
 static void al_path(char *o, size_t n, const char *f) {
+  if (!AL.mx) AL.mx = SDL_CreateMutex();
   char dir[512];
-  al_find(plat_root(), dir, sizeof dir);
+  SDL_LockMutex(AL.mx);
+  snprintf(dir, sizeof dir, "%s", AL.dir);
+  Uint32 at = AL.at;
+  SDL_UnlockMutex(AL.mx);
+  if (!dir[0]) {                                 /* premiere fois : recherche directe */
+    al_find(plat_root(), dir, sizeof dir);
+    SDL_LockMutex(AL.mx);
+    snprintf(AL.dir, sizeof AL.dir, "%s", dir);
+    AL.at = SDL_GetTicks();
+    SDL_UnlockMutex(AL.mx);
+  } else if (SDL_GetTicks() - at > 10000 && SDL_AtomicCAS(&AL.busy, 0, 1)) {
+    SDL_Thread *t = SDL_CreateThread(al_worker, "autoloader", NULL);
+    if (t) SDL_DetachThread(t); else SDL_AtomicSet(&AL.busy, 0);
+  }
   snprintf(o, n, "%s%s%s", dir, f ? "/" : "", f ? f : "");
 }
 
@@ -6504,7 +7377,7 @@ static int onion_enable(char *msg, size_t mn) {
 }
 
 /* -1 : pas de ps5_autoloader sur la console ; 0 : desactive ; 1 : Launcher5 y demarre */
-static int as_cached = -2;                       /* etat relu au plus toutes les 3 s (-2 : a relire) */
+static int as_cached = -2;                      /* etat relu au plus toutes les 3 s (-2 : a relire) */
 static int autostart_state(void) {
   static Uint32 at;
   int cached = as_cached;
@@ -6678,12 +7551,19 @@ static int autostart_disable(char *msg, size_t mn) {
 
 /* --- Mode de demarrage : un choix explicite (jamais une bascule a chaque appui) --- */
 enum { SM_MANUAL, SM_PLUGIN, SM_AUTOLOAD };
+static int sm_cached = -1;                       /* -1 : a recalculer (vide quand le mode change) */
 static int start_mode(void) {
+  /* affiche a chaque image dans les Parametres : recalcule au plus toutes les 3 s
+     (la recherche de l'autoloader parcourt des dossiers) */
+  int cached = sm_cached;
+  static Uint32 at;
+  if (cached >= 0 && SDL_GetTicks() - at < 3000) return cached;
+  at = SDL_GetTicks();
   char al[PATH_LEN];
   al_path(al, sizeof al, "autoload.txt");
-  if (!access(al, F_OK) && al_has_launcher()) return SM_AUTOLOAD;
-  if (onion_plugin_installed()) return SM_PLUGIN;
-  return SM_MANUAL;
+  if (!access(al, F_OK) && al_has_launcher()) return sm_cached = SM_AUTOLOAD;
+  if (onion_plugin_installed()) return sm_cached = SM_PLUGIN;
+  return sm_cached = SM_MANUAL;
 }
 static int start_mode_available(int m) {
   char al[PATH_LEN];
@@ -6730,9 +7610,22 @@ static void start_mode_set(int m) {
   if (!rc && m == SM_AUTOLOAD) rc = autostart_enable(msg, sizeof msg);
   if (!rc && m == SM_MANUAL) snprintf(msg, sizeof msg, "%s", tr("Démarrage manuel : la chaîne d'origine est remise"));
   if (!rc) autoload_mark(m == SM_AUTOLOAD);      /* choix de l'utilisateur : on suit */
-  as_cached = -2;
+  as_cached = -2; sm_cached = -1;
   if (rc) sfx(SFX_ERROR);
   toast(msg);
+}
+
+/* Desinstallation : le demarrage automatique est retire ici (autoload.txt d'origine remis,
+   plugin OnionHEN retire), puis le bootstrap ferme l'interface et desinstalle la tuile. */
+static void uninstall(int all) {
+  char msg[200] = "";
+  save();
+  if (start_mode() != SM_MANUAL && autostart_disable(msg, sizeof msg)) { sfx(SFX_ERROR); toast(msg); return; }
+  autoload_mark(0);
+  plat_log("desinstallation demandee (%s)", all ? "tout effacer" : "reglages gardes");
+  toast("Désinstallation de Launcher5…");
+  draw(); present();
+  if (plat_uninstall(all)) { sfx(SFX_ERROR); toast("Désinstallation impossible"); }
 }
 
 /* Premier lancement : Launcher5 s'inscrit dans ps5_autoloader. Sans autoload.txt (ou vide), tout
@@ -6776,7 +7669,7 @@ static void first_run_autoload(void) {
     char msg[200];
     if (autostart_enable(msg, sizeof msg)) sfx(SFX_ERROR);
     plat_log("premier lancement : %s", msg);
-    as_cached = -2;
+    as_cached = -2; sm_cached = -1;
     toast(msg);
     return;
   }
@@ -6922,7 +7815,7 @@ static void status_poll(void) {
     }
     char msg[200];
     if (!autostart_enable(msg, sizeof msg)) autoload_mark(1);
-    as_cached = -2;
+    as_cached = -2; sm_cached = -1;
   }
   status_refresh();
   int bad = 0;
@@ -6962,6 +7855,11 @@ static void settings_value(int r, char *v, size_t n, int *toggle) {
   switch (r) {
   case SR_THEME: snprintf(v, n, "%s", tr(S.cur.name)); break;
   case SR_VIEW: snprintf(v, n, "%s", tr(VIEW_NAMES[S.menu.view])); break;
+  case SR_SCROLL: {
+    static const char *SCN[4] = { "Normal", "Doux", "Rapide", "Élastique" };
+    snprintf(v, n, "%s", tr(SCN[S.menu.scroll_style & 3])); break;
+  }
+  case SR_LOOP: *toggle = S.menu.flow_loop; break;
   case SR_COVERS: snprintf(v, n, "%s", tr(S.menu.boxes ? "Boîtes" : "Icônes")); break;
   case SR_SAVER:
     if (S.menu.saver > 0) snprintf(v, n, tr("%d min"), S.menu.saver);
@@ -7113,16 +8011,18 @@ static void draw_view_preview(int cx, int cy, int cw, int ch) {
 }
 
 static void draw_settings(void) {
-  static const char *ICON[SR_COUNT] = { "✓", "◐", "▦", "▯", "⬇", "☾", "♪", "♫", "★", "↺", "▤", "◌", "⊘", "⚡", "◷", "↻", "✚", "⌂" };
+  static const char *ICON[SR_COUNT] = { "✓", "◐", "▦", "⇄", "∞", "▯", "⬇", "☾", "♪", "♫", "★", "↺", "▤", "◌", "⊘", "⚡", "◷", "↻", "✚", "⌂", "✖" };
   static const char *LABEL[SR_COUNT] = {
-    "État de la console", "Thème", "Affichage des jeux", "Jaquettes", "Jaquettes officielles", "Économiseur d'écran", "Sons d'interface", "Style des sons", "Son de démarrage",
+    "État de la console", "Thème", "Affichage des jeux", "Défilement des jaquettes", "Cover Flow infini", "Jaquettes", "Jaquettes officielles", "Économiseur d'écran", "Sons d'interface", "Style des sons", "Son de démarrage",
     "Retour automatique", "Section Mes dossiers", "Éléments masqués", "Masquer l'IP", "Démarrage de Launcher5", "Mises à jour automatiques", "Mettre à jour",
-    "Commandes de la manette", "Quitter vers l'accueil PS5",
+    "Commandes de la manette", "Quitter vers l'accueil PS5", "Désinstaller Launcher5",
   };
   static const char *HELP[SR_COUNT] = {
     "✕ vérifie kstuff, ShadowMount, le démarrage  ·  et répare tout",
     "◀ ▶ change de thème  ·  ✕ ouvre le Studio Thème",
     "Cover Flow, Grille ou Carrousel  ·  aperçu à droite",
+    "Normal, Doux, Rapide ou Élastique (petit rebond à l'arrivée)",
+    "Après le dernier jeu, on repart au premier, sans fin",
     "Boîtes verticales ou icônes carrées",
     "Téléchargées depuis la base Launcher5 sur Internet",
     "Diaporama de tes fonds d'écran au repos",
@@ -7138,6 +8038,7 @@ static void draw_settings(void) {
     "✕ vérifie, télécharge et installe la dernière version",
     "✕ affiche la manette et les raccourcis du launcher",
     "Ferme le launcher et revient à l'accueil de la PS5",
+    "Retire la tuile et le démarrage automatique  ·  remet ton autoload.txt",
   };
   /* liste des reglages (defile si elle depasse l'ecran) */
   if (set_row < set_top) set_top = set_row;
@@ -7160,7 +8061,10 @@ static void draw_settings(void) {
     draw_text(S.f22, tr(HELP[r]), px + 108, y + 52, 0x9aa4b5, 0, 600);
     /* valeur */
     char v[96]; int tog;
+    Uint64 sv0 = SDL_GetPerformanceCounter();
     settings_value(r, v, sizeof v, &tog);
+    double svms = (SDL_GetPerformanceCounter() - sv0) * 1000.0 / SDL_GetPerformanceFrequency();
+    if (svms > 30) plat_log("lenteur : parametre %d en %.0f ms", r, svms);
     int right = px + pw - 30, my = y + (rh - 10) / 2;
     if (tog >= 0) {                              /* interrupteur */
       int sw = 92, sh = 44, sx = right - sw;
@@ -7186,7 +8090,13 @@ static void draw_settings(void) {
   int cx = px + pw + 50, cw = W - CAR_X - cx, cy = py + 26, ch = SR_VISIBLE * rh + 4;
   fill_round(cx, cy, cw, ch, 22, 0x05070b, 185);
   outline_round(cx, cy, cw, ch, 22, 1, 0xffffff, 30);
-  if (set_row == SR_VIEW) { draw_view_preview(cx, cy, cw, ch); return; }
+  if (set_row == SR_VIEW) {
+    Uint64 p0 = SDL_GetPerformanceCounter();
+    draw_view_preview(cx, cy, cw, ch);
+    double pms = (SDL_GetPerformanceCounter() - p0) * 1000.0 / SDL_GetPerformanceFrequency();
+    if (pms > 30) plat_log("lenteur : apercu de l'affichage en %.0f ms", pms);
+    return;
+  }
   int tx = cx + 40, ty = cy + 36;
   draw_text(S.f48, "LAUNCHER", tx, ty, 0xffffff, 0, 0);
   draw_text(S.f48, "5", tx + text_w(S.f48, "LAUNCHER") + 6, ty, S.th->accent, 0, 0);
@@ -7194,7 +8104,12 @@ static void draw_settings(void) {
   fill_round(tx, ty + 116, 120, 5, 2, S.th->accent2, 255);
 
   static char ip[64]; static long long mb = -1; static int tc = -1; static Uint32 t0;
-  if (!t0 || SDL_GetTicks() - t0 > 5000) { plat_sysinfo(ip, sizeof ip, &mb, &tc); t0 = SDL_GetTicks(); }
+  if (!t0 || SDL_GetTicks() - t0 > 5000) {
+    Uint64 i0 = SDL_GetPerformanceCounter();
+    plat_sysinfo(ip, sizeof ip, &mb, &tc); t0 = SDL_GetTicks();
+    double ims = (SDL_GetPerformanceCounter() - i0) * 1000.0 / SDL_GetPerformanceFrequency();
+    if (ims > 30) plat_log("lenteur : infos console en %.0f ms", ims);
+  }
   long total = 0; int napps = 0;
   for (int i = 0; i < S.menu.napps; i++) if (S.menu.apps[i].kind != KIND_SYSTEM) napps++;
   for (int i = 0; i < S.menu.nstats; i++) total += S.menu.stats[i].playtime;
@@ -7216,10 +8131,774 @@ static void draw_settings(void) {
   }
 }
 
+
+/* ------------------------------------------------------------------ */
+/* Launcher5 Xplorer : les stockages de la console, leurs dossiers, et  */
+/* copier / deplacer / supprimer. Le travail est fait par le bootstrap  */
+/* (fichier xjob) : il continue meme si l'ecran est ferme.              */
+/* ------------------------------------------------------------------ */
+#ifdef L5_GPU
+int l5_df(const char *path, long long *avail, long long *total);
+int l5_du(const char *path, long long *size, long long *files);
+#else
+static long long xpl_du_rec(const char *p, long long *files) {
+  struct stat st;
+  if (lstat(p, &st)) return 0;
+  if (!S_ISDIR(st.st_mode)) { (*files)++; return st.st_size; }
+  long long t = 0;
+  DIR *d = opendir(p);
+  struct dirent *e;
+  while (d && (e = readdir(d))) {
+    if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+    char c[1200];
+    snprintf(c, sizeof c, "%s/%s", p, e->d_name);
+    t += xpl_du_rec(c, files);
+  }
+  if (d) closedir(d);
+  return t;
+}
+static int l5_du(const char *path, long long *size, long long *files) { *files = 0; *size = xpl_du_rec(path, files); return 0; }
+#include <sys/statvfs.h>
+static int l5_df(const char *path, long long *avail, long long *total) {
+  struct statvfs v;
+  if (statvfs(path, &v)) return -1;
+  *avail = (long long)v.f_bavail * (long long)v.f_frsize;
+  *total = (long long)v.f_blocks * (long long)v.f_frsize;
+  return 0;
+}
+#endif
+
+#define XPL_MAX_ST 12
+typedef struct { char name[256], title[128], perm[12]; int dir; long long size, files; } XItem;   /* size : -1 inconnue */
+#define XPL_MAX_IT 1024
+enum { XV_LIST, XV_ACTIONS, XV_DEST, XV_CONFIRM, XV_PROGRESS, XV_FILE };
+static struct {
+  int inited, view, focus;                       /* focus : 0 stockages, 1 contenu */
+  int nst, st_sel;
+  struct { char path[64], name[64]; long long avail, total; } st[XPL_MAX_ST];
+  char path[1024];                               /* dossier ouvert (chemin console) */
+  int nit, sel, top;
+  XItem *it;
+  int act_sel, dest_sel, conf_sel, ndest;
+  int dest[XPL_MAX_ST];
+  char src[1024], op[16], dst_dir[1024];
+  Uint32 poll_t, started;
+  char pstate[160], pfile[256];
+  long long pdone, ptotal, pspeed;
+  int pfiles, pend;
+} XS;
+
+static void xpl_full(char *out, size_t n, const char *p) { snprintf(out, n, "%s%s", plat_root(), p[0] ? p : "/"); }   /* "" : racine */
+static int xpl_is_mounted(const char *p) {       /* un disque est bien branche (pas le dossier vide) */
+  char a[300], b[300];
+  struct stat sa, sb;
+  xpl_full(a, sizeof a, p);
+  xpl_full(b, sizeof b, "/mnt");
+  if (stat(a, &sa) || !S_ISDIR(sa.st_mode)) return 0;
+  if (stat(b, &sb)) return 1;
+  return sa.st_dev != sb.st_dev;
+}
+typedef struct { int nst; struct { char path[64], name[64]; long long avail, total; } st[XPL_MAX_ST]; } XStore;
+static XStore xpl_new;                           /* resultat du fil de fond */
+static SDL_atomic_t xpl_busy, xpl_ready;
+static void xpl_storages_now(XStore *o);
+static int xpl_storages_thread(void *u) {
+  (void)u;
+  xpl_storages_now(&xpl_new);
+  SDL_AtomicSet(&xpl_ready, 1);
+  SDL_AtomicSet(&xpl_busy, 0);
+  return 0;
+}
+/* espace libre relu sans bloquer l'ecran (le service des dossiers peut prendre 0,3 s) */
+static void xpl_storages(void) {
+  if (SDL_AtomicGet(&xpl_busy)) return;
+  SDL_AtomicSet(&xpl_busy, 1);
+  SDL_Thread *t = SDL_CreateThread(xpl_storages_thread, "xpl", NULL);
+  if (t) SDL_DetachThread(t);
+  else xpl_storages_thread(NULL);
+}
+static void xpl_storages_take(void) {
+  if (!SDL_AtomicGet(&xpl_ready)) return;
+  SDL_AtomicSet(&xpl_ready, 0);
+  XS.nst = xpl_new.nst;
+  memcpy(XS.st, xpl_new.st, sizeof XS.st);
+  if (XS.st_sel >= XS.nst) XS.st_sel = XS.nst - 1;
+  if (XS.st_sel < 0) XS.st_sel = 0;
+}
+static void xpl_storages_now(XStore *o) {
+#define XS (*o)
+  XS.nst = 0;
+  struct { const char *p; const char *n; } fixed = { "/data", "Stockage interne" };
+  snprintf(XS.st[XS.nst].path, 64, "%s", fixed.p);
+  snprintf(XS.st[XS.nst].name, 64, "%s", tr(fixed.n));
+  XS.nst++;
+  for (int k = 0; k < 2; k++)
+    for (int i = 0; i < 8 && XS.nst < XPL_MAX_ST; i++) {
+      char p[64];
+      snprintf(p, sizeof p, k ? "/mnt/ext%d" : "/mnt/usb%d", i);
+      if (!xpl_is_mounted(p)) continue;
+      snprintf(XS.st[XS.nst].path, 64, "%s", p);
+      if (k) snprintf(XS.st[XS.nst].name, 64, tr("Stockage étendu %d"), i);
+      else snprintf(XS.st[XS.nst].name, 64, tr("Disque USB %d"), i + 1);
+      XS.nst++;
+    }
+  for (int i = 0; i < XS.nst; i++) {
+    char f[300];
+    if (!XS.st[i].path[0]) { XS.st[i].avail = XS.st[i].total = -1; continue; }   /* racine : pas un disque a elle seule */
+    xpl_full(f, sizeof f, XS.st[i].path);
+    if (l5_df(f, &XS.st[i].avail, &XS.st[i].total)) XS.st[i].avail = XS.st[i].total = -1;
+  }
+  {
+    char lg[400] = "";
+    for (int i = 0; i < XS.nst; i++) {
+      size_t l = strlen(lg);
+      snprintf(lg + l, sizeof lg - l, " %s (%lld Mo libres)", XS.st[i].path, XS.st[i].avail >= 0 ? XS.st[i].avail >> 20 : -1);
+    }
+    plat_log("xplorer : stockages%s", lg);
+  }
+#undef XS
+}
+static int xpl_cmp(const void *a, const void *b) {
+  const XItem *x = a, *y = b;
+  if (x->dir != y->dir) return y->dir - x->dir;  /* dossiers d'abord */
+  return strcasecmp(x->name, y->name);
+}
+static void xpl_list(void) {
+  Uint64 t0 = SDL_GetPerformanceCounter();
+  if (!XS.it) XS.it = calloc(XPL_MAX_IT, sizeof *XS.it);
+  XS.nit = 0;
+  if (!XS.it) return;
+  char f[1100];
+  xpl_full(f, sizeof f, XS.path);
+  DIR *d = opendir(f);
+  struct dirent *e;
+  while (d && (e = readdir(d)) && XS.nit < XPL_MAX_IT) {
+    if (e->d_name[0] == '.' && (!e->d_name[1] || (e->d_name[1] == '.' && !e->d_name[2]))) continue;
+    XItem *t = &XS.it[XS.nit];
+    snprintf(t->name, sizeof t->name, "%s", e->d_name);
+    char c[1400];
+    snprintf(c, sizeof c, "%s/%s", f, e->d_name);
+    struct stat st;
+    t->dir = e->d_type == DT_DIR;
+    t->size = t->files = -1;
+    t->title[0] = t->perm[0] = 0;
+    if (!lstat(c, &st)) {                         /* type et droits, comme en FTP (drwxr-xr-x, crw-rw-rw-...) */
+      mode_t m = st.st_mode;
+      if (S_ISLNK(m) && !stat(c, &st)) m = st.st_mode | 0;   /* lien : on suit la cible */
+      char *q = t->perm;
+      *q++ = S_ISDIR(m) ? 'd' : S_ISCHR(m) ? 'c' : S_ISBLK(m) ? 'b' : S_ISLNK(m) ? 'l' : S_ISFIFO(m) ? 'p' : S_ISSOCK(m) ? 's' : '-';
+      for (int k = 8; k >= 0; k--) *q++ = (m >> k) & 1 ? "xwr"[k % 3] : '-';
+      *q = 0;
+      if (!t->dir) {
+        t->dir = S_ISDIR(m);
+        t->size = t->dir ? -1 : (S_ISCHR(m) || S_ISBLK(m)) ? -4 : st.st_size;   /* -4 : peripherique */
+      }
+    }
+    if (t->dir && scan_folder_title(c, t->title, sizeof t->title)) t->title[0] = 0;   /* un jeu : son vrai nom */
+    XS.nit++;
+  }
+  if (d) closedir(d);
+  qsort(XS.it, XS.nit, sizeof *XS.it, xpl_cmp);
+  int games = 0;
+  for (int i = 0; i < XS.nit; i++) games += XS.it[i].title[0] != 0;
+  plat_log("xplorer : %s, %d elements dont %d jeux, debut : %s %s %s (%.0f ms)", XS.path, XS.nit, games,
+           XS.nit > 0 ? XS.it[0].name : "-", XS.nit > 1 ? XS.it[1].name : "-", XS.nit > 2 ? XS.it[2].name : "-",
+           (SDL_GetPerformanceCounter() - t0) * 1000.0 / SDL_GetPerformanceFrequency());
+  if (XS.sel >= XS.nit) XS.sel = XS.nit - 1;
+  if (XS.sel < 0) XS.sel = 0;
+}
+static void xpl_size_str(long long b, char *out, size_t n) {
+  if (b < 0) snprintf(out, n, "—");
+  else if (b >= 1000LL * 1000 * 1000) snprintf(out, n, "%.1f Go", b / 1e9);
+  else if (b >= 1000LL * 1000) snprintf(out, n, "%.0f Mo", b / 1e6);
+  else if (b >= 1000) snprintf(out, n, "%.0f Ko", b / 1e3);
+  else snprintf(out, n, "%lld o", b);
+}
+static int xpl_storage_of(const char *p) {       /* stockage qui contient ce chemin */
+  for (int i = 0; i < XS.nst; i++) {
+    size_t l = strlen(XS.st[i].path);
+    if (l && !strncmp(p, XS.st[i].path, l) && (p[l] == '/' || !p[l])) return i;
+  }
+  return -1;
+}
+static void xpl_open_storage(int i) {
+  XS.st_sel = i;
+  snprintf(XS.path, sizeof XS.path, "%s", XS.st[i].path);
+  XS.sel = XS.top = 0;
+  XS.focus = 1;
+  xpl_list();
+}
+static void xpl_init(void) {
+  xpl_storages_take();
+  if (XS.inited) return;
+  XS.inited = 1;
+  xpl_storages();
+}
+static void xpl_job(const char *op) {
+  char tp[PATH_LEN], jp[PATH_LEN], pp[PATH_LEN];
+  data_path(tp, sizeof tp, "xjob.tmp");
+  data_path(jp, sizeof jp, "xjob");
+  data_path(pp, sizeof pp, "cache/xprog");
+  remove(pp);                                    /* l'etat precedent ne compte plus */
+  FILE *f = fopen(tp, "w");
+  if (!f) { toast("Impossible de lancer l'opération"); XS.view = XV_LIST; return; }
+  fprintf(f, "%s\n%s\n%s\n", op, XS.src, XS.dst_dir);
+  fclose(f);
+  rename(tp, jp);
+  snprintf(XS.op, sizeof XS.op, "%s", op);
+  XS.view = XV_PROGRESS;
+  XS.pend = 0;
+  XS.pstate[0] = XS.pfile[0] = 0;
+  XS.pdone = XS.ptotal = XS.pspeed = 0;
+  XS.pfiles = 0;
+  XS.started = SDL_GetTicks();
+  XS.poll_t = 0;
+  plat_log("xplorer : %s %s -> %s", op, XS.src, XS.dst_dir[0] ? XS.dst_dir : "-");
+}
+static void xpl_poll(void) {
+  if (SDL_GetTicks() - XS.poll_t < 250) return;
+  XS.poll_t = SDL_GetTicks();
+  char pp[PATH_LEN];
+  data_path(pp, sizeof pp, "cache/xprog");
+  FILE *f = fopen(pp, "r");
+  if (!f) return;
+  char l[6][300] = { { 0 } };
+  for (int i = 0; i < 6 && fgets(l[i], sizeof l[i], f); i++) l[i][strcspn(l[i], "\r\n")] = 0;
+  fclose(f);
+  snprintf(XS.pstate, sizeof XS.pstate, "%s", l[0]);
+  XS.pdone = atoll(l[1]); XS.ptotal = atoll(l[2]); XS.pspeed = atoll(l[3]); XS.pfiles = atoi(l[4]);
+  snprintf(XS.pfile, sizeof XS.pfile, "%s", l[5]);
+  if (!XS.pend && (!strcmp(l[0], "fini") || !strcmp(l[0], "annule") || !strncmp(l[0], "erreur", 6))) {
+    XS.pend = 1;
+    sfx(strcmp(l[0], "fini") ? SFX_ERROR : SFX_OK);
+    xpl_storages();                              /* espace libre a jour (en fond) */
+    Uint64 t0 = SDL_GetPerformanceCounter();
+    if (XS.focus) xpl_list();
+    double ms = (SDL_GetPerformanceCounter() - t0) * 1000.0 / SDL_GetPerformanceFrequency();
+    if (ms > 30) plat_log("lenteur : xplorer, liste en %.0f ms", ms);
+  }
+}
+
+/* taille de l'element choisi : calculee en fond (un gros jeu = des milliers de fichiers) */
+static struct { char path[1100], want[1100]; long long size, files; SDL_atomic_t busy, ready; Uint32 sel_t; int sel_i; } XDU;
+static int xpl_du_thread(void *u) {
+  (void)u;
+  char full[1200];
+  xpl_full(full, sizeof full, XDU.path);
+#ifdef L5_GPU
+  const char *q = XDU.path;                      /* le bootstrap lit le vrai chemin */
+#else
+  const char *q = full;
+#endif
+  if (l5_du(q, &XDU.size, &XDU.files)) XDU.size = XDU.files = -1;
+  SDL_AtomicSet(&XDU.ready, 1);
+  SDL_AtomicSet(&XDU.busy, 0);
+  return 0;
+}
+static void xpl_du_tick(void) {
+  if (SDL_AtomicGet(&XDU.ready)) {               /* resultat : range dans l'element correspondant */
+    SDL_AtomicSet(&XDU.ready, 0);
+    plat_log("xplorer : taille de %s : %lld Mo, %lld fichiers", XDU.path, XDU.size >= 0 ? XDU.size >> 20 : -1, XDU.files);
+    for (int i = 0; i < XS.nit; i++) {
+      char p[1100];
+      snprintf(p, sizeof p, "%s/%s", XS.path, XS.it[i].name);
+      if (!strcmp(p, XDU.path)) { XS.it[i].size = XDU.size < 0 ? -2 : XDU.size; XS.it[i].files = XDU.files; }
+    }
+  }
+  if (!XS.focus || !XS.nit || XS.sel >= XS.nit) return;
+  if (XDU.sel_i != XS.sel) { XDU.sel_i = XS.sel; XDU.sel_t = SDL_GetTicks(); return; }
+  XItem *t = &XS.it[XS.sel];
+  if (!t->dir || t->size != -1 || SDL_GetTicks() - XDU.sel_t < 300 || SDL_AtomicGet(&XDU.busy)) return;
+  snprintf(XDU.path, sizeof XDU.path, "%s/%s", XS.path, t->name);
+  SDL_AtomicSet(&XDU.busy, 1);
+  t->size = -3;                                  /* en cours */
+  SDL_Thread *th = SDL_CreateThread(xpl_du_thread, "xdu", NULL);
+  if (th) SDL_DetachThread(th);
+  else { SDL_AtomicSet(&XDU.busy, 0); t->size = -2; }
+}
+/* une operation lancee continue si on change de section : on la suit et on previent a la fin */
+static void xpl_tick(void) {
+  if (XS.view == XV_PROGRESS && !XS.pend && S.sec != SEC_XPL) {
+    xpl_poll();
+    if (XS.pend) {
+      const char *what = !strcmp(XS.op, "move") ? "Déplacement" : !strcmp(XS.op, "copy") ? "Copie" : "Suppression";
+      char m[200];
+      snprintf(m, sizeof m, "%s : %s", tr(what), tr(!strcmp(XS.pstate, "fini") ? "terminé" : "pas terminé, ouvre l'Xplorer"));
+      toast(m);
+    }
+  }
+}
+
+static const char *XPL_ACTS[3] = { "Copier vers…", "Déplacer vers…", "Supprimer" };
+static const char *xpl_act_label(int i) { return tr(XPL_ACTS[i]); }
+static char xpl_dest_buf[XPL_MAX_ST][200];
+static const char *xpl_dest_label(int i) { return xpl_dest_buf[i]; }
+static const char *xpl_conf_label(int i) { return tr(i ? "Oui, supprimer pour de bon" : "Non, garder"); }
+
+/* destination : meme dossier parent, sur l'autre stockage (ex. /data/homebrew -> /mnt/ext1/homebrew) */
+static void xpl_open_dest(void) {
+  int si = xpl_storage_of(XS.src);
+  XS.ndest = 0;
+  const char *slash = strrchr(XS.src, '/');
+  char parent[1024];
+  snprintf(parent, sizeof parent, "%.*s", (int)(slash - XS.src), XS.src);
+  const char *rel = si >= 0 ? parent + strlen(XS.st[si].path) : "";
+  for (int i = 0; i < XS.nst; i++) {
+    if (i == si || !XS.st[i].path[0]) continue;
+    XS.dest[XS.ndest] = i;
+    char fr[32], warn[96] = "";
+    xpl_size_str(XS.st[i].avail, fr, sizeof fr);
+    long long need = XS.sel < XS.nit ? XS.it[XS.sel].size : -1;
+    if (need >= 0 && XS.st[i].avail >= 0 && need > XS.st[i].avail) snprintf(warn, sizeof warn, "  ·  %s", tr("pas assez de place"));
+    snprintf(xpl_dest_buf[XS.ndest], sizeof xpl_dest_buf[0], "%s%s  ·  %s %s%s", XS.st[i].path, rel, fr, tr("libres"), warn);
+    XS.ndest++;
+  }
+  if (!XS.ndest) { toast("Branche un autre disque pour copier ou déplacer"); XS.view = XV_LIST; return; }
+  XS.dest_sel = 0;
+  XS.view = XV_DEST;
+}
+
+/* fichier ouvert avec ✕ : fiche (type, droits, proprietaire, taille, date) et contenu */
+#define XF_MAX (256 * 1024)
+static struct {
+  char path[1100], info[6][160];
+  unsigned char *buf;
+  long len;
+  int text, top, lines, isdev;
+  char full[1200];
+  SDL_atomic_t busy, done;
+  unsigned char *dbuf;
+  long dlen;
+} XF;
+/* lecture d'un peripherique dans un fil a part : s'il ne repond pas, l'ecran ne se fige jamais */
+static int xf_dev_thread(void *u) {
+  (void)u;
+  XF.dlen = 0;
+  int fd = open(XF.full, O_RDONLY | O_NONBLOCK);
+  if (fd >= 0) {
+    fd_set rs; FD_ZERO(&rs); FD_SET(fd, &rs);
+    struct timeval tv = { 0, 500 * 1000 };
+    if (select(fd + 1, &rs, NULL, NULL, &tv) > 0) { long r = read(fd, XF.dbuf, 64 * 1024); XF.dlen = r > 0 ? r : 0; }
+    close(fd);
+  } else XF.dlen = -1;
+  SDL_AtomicSet(&XF.done, 1);
+  SDL_AtomicSet(&XF.busy, 0);
+  return 0;
+}
+static int xf_line_count(void) {
+  if (!XF.text) return (int)((XF.len + 15) / 16);
+  int n = 1;
+  for (long i = 0; i < XF.len; i++) if (XF.buf[i] == '\n') n++;
+  return n;
+}
+
+static void xf_classify(void);
+static void xpl_open_file(void) {
+  snprintf(XF.path, sizeof XF.path, "%s/%s", XS.path, XS.it[XS.sel].name);
+  char full[1200];
+  xpl_full(full, sizeof full, XF.path);
+  struct stat st;
+  for (int i = 0; i < 6; i++) XF.info[i][0] = 0;
+  XF.len = 0; XF.top = 0; XF.text = 0; XF.isdev = 0;
+  if (!XF.buf) XF.buf = malloc(XF_MAX);
+  if (lstat(full, &st)) { snprintf(XF.info[0], 160, "%s : %s", tr("Erreur"), strerror(errno)); XS.view = XV_FILE; return; }
+  mode_t m = st.st_mode;
+  const char *type = S_ISREG(m) ? "Fichier" : S_ISCHR(m) ? "Périphérique (caractère)" : S_ISBLK(m) ? "Périphérique (bloc)"
+                   : S_ISLNK(m) ? "Lien" : S_ISFIFO(m) ? "Tube" : S_ISSOCK(m) ? "Prise réseau" : "Autre";
+  /* seul un vrai fichier est lu ici ; tout le reste (peripherique, lien comme /dev/stdin, tube...)
+     est lu dans un fil a part : une lecture qui attend sans fin ne fige jamais l'ecran */
+  struct stat ts;
+  XF.isdev = stat(full, &ts) || !S_ISREG(ts.st_mode);
+#ifndef L5_GPU                                   /* readlink absent des applications natives (plantage) */
+  if (S_ISLNK(m)) {
+    char to[256];
+    ssize_t tl = readlink(full, to, sizeof to - 1);
+    if (tl > 0) { to[tl] = 0; snprintf(XF.info[3], 160, "→ %s", to); }
+  }
+#endif
+  char perm[11];
+  perm[0] = S_ISDIR(m) ? 'd' : S_ISCHR(m) ? 'c' : S_ISBLK(m) ? 'b' : S_ISLNK(m) ? 'l' : '-';
+  for (int k = 8; k >= 0; k--) perm[9 - k] = (m >> k) & 1 ? "xwr"[k % 3] : '-';
+  perm[10] = 0;
+  char sz[32], date[32];
+  xpl_size_str(st.st_size, sz, sizeof sz);
+  strftime(date, sizeof date, "%d/%m/%Y %H:%M", localtime(&st.st_mtime));
+  snprintf(XF.info[0], 160, "%s  ·  %s", tr(type), perm);
+  snprintf(XF.info[1], 160, tr("Propriétaire %d  ·  groupe %d  ·  inode %llu"), (int)st.st_uid, (int)st.st_gid, (unsigned long long)st.st_ino);
+  snprintf(XF.info[2], 160, tr("Taille %s (%lld octets)  ·  modifié le %s"), sz, (long long)st.st_size, date);
+  if (S_ISCHR(m) || S_ISBLK(m)) {
+    snprintf(XF.info[3], 160, tr("Pilote %d, unité %d"), (int)major(st.st_rdev), (int)minor(st.st_rdev));
+  }
+  /* contenu : fichier normal lu ici ; peripherique lu dans un fil a part (jamais bloquant) */
+  if (XF.isdev) {
+    snprintf(XF.full, sizeof XF.full, "%s", full);
+    if (!XF.dbuf) XF.dbuf = malloc(64 * 1024);
+    if (XF.dbuf && !SDL_AtomicGet(&XF.busy)) {
+      SDL_AtomicSet(&XF.busy, 1);
+      SDL_AtomicSet(&XF.done, 0);
+      SDL_Thread *th = SDL_CreateThread(xf_dev_thread, "xdev", NULL);
+      if (th) SDL_DetachThread(th); else SDL_AtomicSet(&XF.busy, 0);
+      snprintf(XF.info[4], 160, "%s", tr("Lecture du périphérique…"));
+    } else snprintf(XF.info[4], 160, "%s", tr("Un autre périphérique ne répond pas encore"));
+  } else {
+    int fd = open(full, O_RDONLY);
+    if (fd < 0) snprintf(XF.info[4], 160, "%s : %s", tr("Lecture impossible"), strerror(errno));
+    else {
+      for (long r; XF.buf && XF.len < XF_MAX && (r = read(fd, XF.buf + XF.len, XF_MAX - XF.len)) > 0;) XF.len += r;
+      close(fd);
+      if (!XF.len) snprintf(XF.info[4], 160, "%s", tr("Fichier vide"));
+      else if (st.st_size > XF_MAX) snprintf(XF.info[4], 160, tr("Début du fichier : %ld premiers octets"), XF.len);
+    }
+  }
+  xf_classify();
+  XS.view = XV_FILE;
+  plat_log("xplorer : ouverture de %s (%lld octets, %ld lus)", XF.path, (long long)st.st_size, XF.len);
+}
+
+static void xf_classify(void) {
+  int bin = 0;
+  for (long i = 0; i < XF.len && i < 4096; i++) {
+    unsigned char c = XF.buf[i];
+    if (c == 0 || (c < 9) || (c > 13 && c < 32 && c != 27)) bin++;
+  }
+  XF.text = XF.len > 0 && bin * 50 < (XF.len < 4096 ? XF.len : 4096);
+  XF.lines = xf_line_count();
+}
+static void draw_xpl_file(void) {
+  if (XF.isdev && SDL_AtomicGet(&XF.done)) {
+    SDL_AtomicSet(&XF.done, 0);
+    if (XF.dlen > 0 && XF.buf) { memcpy(XF.buf, XF.dbuf, XF.dlen); XF.len = XF.dlen; snprintf(XF.info[4], 160, tr("%ld octets reçus du périphérique"), XF.len); }
+    else snprintf(XF.info[4], 160, "%s", tr(XF.dlen < 0 ? "Lecture impossible" : "Le périphérique n'a rien envoyé"));
+    xf_classify();
+    plat_log("xplorer : peripherique %s : %ld octets recus", XF.path, XF.dlen);
+  }
+  int pw = W - 220, ph = H - 160, px = 110, py = 80;
+  glass_panel(px, py, pw, ph);
+  draw_text(S.f30, XF.path, px + 40, py + 28, 0xffffff, 0, pw - 80);
+  int y = py + 76;
+  for (int i = 0; i < 5; i++) if (XF.info[i][0]) { draw_text(S.f22, XF.info[i], px + 42, y, i == 4 ? 0xffb340 : 0x9aa4b5, 0, pw - 84); y += 30; }
+  y += 10;
+  fill_round(px + 30, y, pw - 60, py + ph - 70 - y, 14, 0x000000, 120);
+  int lh = 30, vis = (py + ph - 90 - y) / lh;
+  if (XF.top > XF.lines - vis) XF.top = XF.lines - vis;
+  if (XF.top < 0) XF.top = 0;
+  int ly = y + 10;
+  if (XF.text) {                                 /* texte : lignes */
+    long pos = 0;
+    for (int ln = 0; ln < XF.top && pos < XF.len; pos++) if (XF.buf[pos] == '\n') ln++;
+    for (int r = 0; r < vis && pos < XF.len; r++) {
+      char line[400];
+      int n = 0;
+      while (pos < XF.len && XF.buf[pos] != '\n' && n < (int)sizeof line - 1) { unsigned char c = XF.buf[pos++]; line[n++] = c == '\t' ? ' ' : c < 32 ? '.' : (char)c; }
+      while (pos < XF.len && XF.buf[pos] != '\n') pos++;
+      pos++;
+      line[n] = 0;
+      draw_text(S.f22, line, px + 50, ly + r * lh, 0xd0d6e0, 0, pw - 100);
+    }
+  } else {                                       /* binaire : adresse, octets, caracteres */
+    for (int r = 0; r < vis; r++) {
+      long off = (long)(XF.top + r) * 16;
+      if (off >= XF.len) break;
+      char line[160];
+      int n = snprintf(line, sizeof line, "%08lx   ", off);
+      for (int k = 0; k < 16; k++) n += off + k < XF.len ? snprintf(line + n, sizeof line - n, "%02x ", XF.buf[off + k]) : snprintf(line + n, sizeof line - n, "   ");
+      n += snprintf(line + n, sizeof line - n, "  ");
+      for (int k = 0; k < 16 && off + k < XF.len; k++) { unsigned char c = XF.buf[off + k]; line[n++] = c >= 32 && c < 127 ? (char)c : '.'; }
+      line[n] = 0;
+      draw_text(S.f22, line, px + 50, ly + r * lh, 0xd0d6e0, 0, pw - 100);
+    }
+  }
+  if (XF.lines > vis) {
+    char pg[64];
+    snprintf(pg, sizeof pg, tr("ligne %d / %d"), XF.top + 1, XF.lines);
+    draw_text(S.f22, pg, px + pw - 40, py + ph - 52, 0x9aa4b5, 2, 0);
+  }
+  draw_text(S.f22, tr("▲▼  Défiler      L2 R2  Page      ○  Fermer"), px + 42, py + ph - 52, 0x9aa4b5, 0, 0);
+}
+
+static void xpl_input(int in) {
+  xpl_init();
+  if (XS.view == XV_FILE) {
+    int page = 20;
+    if (in == IN_UP) XF.top--;
+    else if (in == IN_DOWN) XF.top++;
+    else if (in == IN_L2) XF.top -= page;
+    else if (in == IN_R2) XF.top += page;
+    else if (in == IN_BACK || in == IN_OK || in == IN_LEFT) { XS.view = XV_LIST; sfx(SFX_BACK); return; }
+    if (XF.top < 0) XF.top = 0;
+    if (XF.top > XF.lines - 1) XF.top = XF.lines - 1;
+    return;
+  }
+  if (XS.view == XV_PROGRESS) {
+    if (XS.pend && (in == IN_OK || in == IN_BACK)) { XS.view = XV_LIST; sfx(SFX_BACK); }
+    else if (!XS.pend && in == IN_BACK) {        /* annuler : le bootstrap efface la copie partielle */
+      char cp[PATH_LEN];
+      data_path(cp, sizeof cp, "cache/xcancel");
+      FILE *f = fopen(cp, "w");
+      if (f) fclose(f);
+      toast("Annulation…");
+      sfx(SFX_BACK);
+    }
+    return;
+  }
+  if (XS.view == XV_ACTIONS || XS.view == XV_DEST || XS.view == XV_CONFIRM) {
+    int *sel = XS.view == XV_ACTIONS ? &XS.act_sel : XS.view == XV_DEST ? &XS.dest_sel : &XS.conf_sel;
+    int n = XS.view == XV_ACTIONS ? 3 : XS.view == XV_DEST ? XS.ndest : 2;
+    if (in == IN_UP || in == IN_DOWN) { *sel = (*sel + (in == IN_UP ? -1 : 1) + n) % n; sfx(SFX_MOVE); return; }
+    if (in == IN_BACK || in == IN_MENU) { XS.view = XS.view == XV_ACTIONS ? XV_LIST : XV_ACTIONS; sfx(SFX_BACK); return; }
+    if (in != IN_OK) return;
+    sfx(SFX_OK);
+    if (XS.view == XV_ACTIONS) {
+      if (XS.act_sel == 2) { XS.conf_sel = 0; XS.view = XV_CONFIRM; }
+      else xpl_open_dest();
+    } else if (XS.view == XV_DEST) {
+      int di = XS.dest[XS.dest_sel], si = xpl_storage_of(XS.src);
+      const char *slash = strrchr(XS.src, '/');
+      char parent[1024];
+      snprintf(parent, sizeof parent, "%.*s", (int)(slash - XS.src), XS.src);
+      snprintf(XS.dst_dir, sizeof XS.dst_dir, "%s%s", XS.st[di].path, si >= 0 ? parent + strlen(XS.st[si].path) : "");
+      xpl_job(XS.act_sel == 1 ? "move" : "copy");
+    } else {
+      if (XS.conf_sel == 1) { XS.dst_dir[0] = 0; xpl_job("delete"); }
+      else XS.view = XV_LIST;
+    }
+    return;
+  }
+  /* liste */
+  if (!XS.focus) {                               /* les stockages */
+    switch (in) {
+    case IN_UP: if (XS.st_sel > 0) { XS.st_sel--; sfx(SFX_MOVE); } break;
+    case IN_DOWN: if (XS.st_sel < XS.nst - 1) { XS.st_sel++; sfx(SFX_MOVE); } break;
+    case IN_OK: case IN_RIGHT: if (XS.nst) { xpl_open_storage(XS.st_sel); sfx(SFX_OK); } break;
+    case IN_MOVE: xpl_storages(); toast("Stockages actualisés"); break;
+    }
+    return;
+  }
+  int page = 10;
+  switch (in) {
+  case IN_UP: if (XS.sel > 0) { XS.sel--; sfx(SFX_MOVE); } break;
+  case IN_DOWN: if (XS.sel < XS.nit - 1) { XS.sel++; sfx(SFX_MOVE); } break;
+  case IN_L2: XS.sel = XS.sel > page ? XS.sel - page : 0; sfx(SFX_MOVE); break;
+  case IN_R2: XS.sel = XS.sel + page < XS.nit ? XS.sel + page : XS.nit - 1; if (XS.sel < 0) XS.sel = 0; sfx(SFX_MOVE); break;
+  case IN_OK: case IN_RIGHT:
+    if (XS.nit && !XS.it[XS.sel].dir && in == IN_OK) { xpl_open_file(); sfx(SFX_OK); break; }   /* fichier : fiche et contenu */
+    if (XS.nit && XS.it[XS.sel].dir) {
+      size_t l = strlen(XS.path);
+      snprintf(XS.path + l, sizeof XS.path - l, "/%s", XS.it[XS.sel].name);
+      XS.sel = XS.top = 0;
+      xpl_list();
+      sfx(SFX_OK);
+    }
+    break;
+  case IN_BACK: case IN_LEFT: {
+    if (!strcmp(XS.path, XS.st[XS.st_sel].path) || !strchr(XS.path, '/')) { XS.focus = 0; sfx(SFX_BACK); break; }
+    char *sl = strrchr(XS.path, '/');
+    char prev[256];
+    snprintf(prev, sizeof prev, "%s", sl + 1);
+    *sl = 0;
+    xpl_list();
+    for (int i = 0; i < XS.nit; i++) if (!strcmp(XS.it[i].name, prev)) XS.sel = i;   /* on revient sur le dossier quitte */
+    sfx(SFX_BACK);
+    break;
+  }
+  case IN_MENU:
+    if (!XS.nit) break;
+    snprintf(XS.src, sizeof XS.src, "%s/%s", XS.path, XS.it[XS.sel].name);
+    XS.act_sel = 0;
+    XS.view = XV_ACTIONS;
+    sfx(SFX_OK);
+    break;
+  case IN_MOVE: xpl_list(); toast("Liste actualisée"); break;
+  }
+}
+
+static const char *xpl_hint(void) {
+  if (XS.view == XV_PROGRESS) return XS.pend ? "✕  OK" : "○  Annuler";
+  if (XS.view == XV_FILE) return "";
+  if (XS.view != XV_LIST) return "✕  Choisir      ○  Retour";
+  if (!XS.focus) return "▲▼  Choisir      ✕  Ouvrir      □  Actualiser      L1 R1  Sections";
+  return "✕  Ouvrir      ○  Retour      △  Copier · Déplacer · Supprimer      L2 R2  Page      L1 R1  Sections";
+}
+
+static void xpl_bar(int x, int y, int w, int h, double k, uint32_t c) {
+  if (k < 0) k = 0;
+  if (k > 1) k = 1;
+  fill_round(x, y, w, h, h / 2, 0xffffff, 28);
+  if (k > 0) fill_round(x, y, (int)(w * k) < h ? h : (int)(w * k), h, h / 2, c, 255);
+}
+
+static void draw_xpl_progress(void) {
+  xpl_poll();
+  int pw = 1160, ph = 470, px = (W - pw) / 2, py = (H - ph) / 2;
+  glass_panel(px, py, pw, ph);
+  const char *base = strrchr(XS.src, '/') ? strrchr(XS.src, '/') + 1 : XS.src;
+  const char *title = !strcmp(XS.op, "move") ? "Déplacement" : !strcmp(XS.op, "copy") ? "Copie" : "Suppression";
+  draw_text(S.f22, tr(title), px + 50, py + 36, S.th->accent, 0, 0);
+  draw_text(S.f36, base, px + 50, py + 70, 0xffffff, 0, pw - 100);
+  if (XS.dst_dir[0]) {
+    char to[1100];
+    snprintf(to, sizeof to, "→  %s", XS.dst_dir);
+    draw_text(S.f22, to, px + 50, py + 124, 0x9aa4b5, 0, pw - 100);
+  }
+  const char *st = XS.pstate;
+  uint32_t ac = S.th->accent;
+  char line[300];
+  if (!st[0]) {
+    snprintf(line, sizeof line, "%s", tr(SDL_GetTicks() - XS.started > 5000 ? "En attente du launcher (bootstrap)…" : "Préparation…"));
+  } else if (!strcmp(st, "fini")) {
+    ac = 0x35d07f;
+    snprintf(line, sizeof line, "%s", tr(
+                                         !strcmp(XS.op, "move") ? "Terminé : déplacé, l'original a été supprimé"
+                                         : !strcmp(XS.op, "copy") ? "Terminé : copie vérifiée" : "Terminé : supprimé"));
+  } else if (!strcmp(st, "annule")) {
+    ac = 0xffb340;
+    snprintf(line, sizeof line, "%s", tr("Annulé : rien n'a été changé, l'original est intact"));
+  } else if (!strncmp(st, "erreur:", 7)) {
+    ac = 0xff4d6a;
+    static const char *const ERR[][2] = {
+      { "emplacement non autorise", "emplacement non autorisé (système)" },
+      { "introuvable", "introuvable" },
+      { "destination dans la source", "la destination est dans la source" },
+      { "existe deja a destination", "existe déjà à la destination, rien n'a été touché" },
+      { "pas assez de place", "pas assez de place sur le disque de destination" },
+      { "copie impossible", "copie impossible (disque plein ou retiré ?), l'original est intact" },
+      { "copie incomplete", "copie incomplète, l'original est gardé" },
+      { "copie faite", "copié, mais l'original n'a pas pu être entièrement supprimé" },
+      { "suppression incomplete", "suppression incomplète" },
+      { "dossier du launcher", "le dossier du launcher est protégé" },
+    };
+    const char *msg = st + 7;
+    for (size_t i = 0; i < sizeof ERR / sizeof ERR[0]; i++) if (!strncmp(st + 7, ERR[i][0], strlen(ERR[i][0]))) msg = ERR[i][1];
+    snprintf(line, sizeof line, "%s : %s", tr("Erreur"), tr(msg));
+  } else if (!strcmp(st, "suppression")) {
+    snprintf(line, sizeof line, "%s", tr("Copie vérifiée, suppression de l'original…"));
+  } else {
+    char a[32], b[32], v[32];
+    xpl_size_str(XS.pdone, a, sizeof a);
+    xpl_size_str(XS.ptotal, b, sizeof b);
+    xpl_size_str(XS.pspeed, v, sizeof v);
+    snprintf(line, sizeof line, "%s / %s   ·   %s/s", a, b, v);
+  }
+  double k = XS.ptotal > 0 ? (double)XS.pdone / XS.ptotal : (!strcmp(st, "fini") ? 1 : 0);
+  if (!strcmp(st, "encours") && XS.ptotal <= 0) k = fmod(SDL_GetTicks() / 1500.0, 1.0);   /* suppression : en cours */
+  xpl_bar(px + 50, py + 200, pw - 100, 22, k, ac);
+  if (XS.ptotal > 0 && !XS.pend) {
+    char pc[16];
+    snprintf(pc, sizeof pc, "%d %%", (int)(k * 100));
+    draw_text(S.f48, pc, px + pw - 50, py + 250, 0xffffff, 2, 0);
+    if (XS.pspeed > 0 && XS.ptotal > XS.pdone) {
+      long rest = (long)((XS.ptotal - XS.pdone) / XS.pspeed);
+      char eta[64];
+      snprintf(eta, sizeof eta, tr("encore %ld min %02ld s"), rest / 60, rest % 60);
+      draw_text(S.f22, eta, px + pw - 50, py + 316, 0x9aa4b5, 2, 0);
+    }
+  }
+  draw_text(S.f30, line, px + 50, py + 252, XS.pend ? ac : 0xffffff, 0, XS.pend ? pw - 100 : pw - 400);
+  if (XS.pfile[0] && !XS.pend) draw_text(S.f22, XS.pfile, px + 50, py + 300, 0x9aa4b5, 0, pw - 400);
+  draw_text(S.f22, tr(XS.pend ? "✕  OK" : "○  Annuler  ·  la copie partielle est effacée, l'original ne bouge pas"),
+            px + 50, py + ph - 64, 0x9aa4b5, 0, pw - 100);
+}
+
+static void draw_xplorer(void) {
+  WHERE("dessin : xplorer");
+  xpl_init();
+  xpl_du_tick();
+  int px = CAR_X, py = 165;
+  draw_text(S.f22, "LAUNCHER5 XPLORER", px + 4, py - 8, S.th->accent, 0, 0);
+  /* stockages */
+  int sw = 560, sh = 150;
+  if (!XS.nst) draw_text(S.f26, "…", px + 20, py + 40, 0x9aa4b5, 0, 0);
+  for (int i = 0; i < XS.nst; i++) {
+    int y = py + 26 + i * (sh + 14), on = i == XS.st_sel, act = on && !XS.focus;
+    uint32_t ac = S.th->accent;
+    if (act) {
+      if (!S.lite) glow(px + 80, y + sh / 2, 160, ac, 70);
+      fill_round(px, y, sw, sh, 20, ac, 46);
+      fill_round(px, y + 18, 6, sh - 36, 3, ac, 255);
+    } else fill_round(px, y, sw, sh, 20, 0x05070b, on ? 200 : 165);
+    if (on && XS.focus) outline_round(px, y, sw, sh, 20, 2, ac, 160);
+    fill_round(px + 26, y + 24, 60, 60, 30, act ? ac : 0x1a2030, 255);
+    draw_text(S.f30, !XS.st[i].path[0] ? "◉" : strcmp(XS.st[i].path, "/data") ? "⛁" : "▣", px + 56, y + 32, act ? 0x05070b : ac, 1, 0);
+    draw_text(S.f30, XS.st[i].name, px + 108, y + 20, 0xffffff, 0, sw - 130);
+    draw_text(S.f22, XS.st[i].path[0] ? XS.st[i].path : "/", px + 110, y + 60, 0x9aa4b5, 0, sw - 130);
+    if (XS.st[i].total > 0) {
+      double used = 1.0 - (double)XS.st[i].avail / XS.st[i].total;
+      xpl_bar(px + 26, y + 104, sw - 52, 14, used, used > 0.9 ? 0xff4d6a : ac);
+      char a[32], b[64];
+      xpl_size_str(XS.st[i].avail, a, sizeof a);
+      snprintf(b, sizeof b, tr("%s libres"), a);
+      draw_text(S.f22, b, px + sw - 26, y + 60, 0xffffff, 2, 0);
+    }
+  }
+  /* contenu */
+  int cx = px + sw + 40, cw = W - CAR_X - cx, cy = py + 26, ch = H - cy - 120, rh = 62;
+  fill_round(cx, cy, cw, ch, 22, 0x05070b, 185);
+  outline_round(cx, cy, cw, ch, 22, 1, 0xffffff, XS.focus ? 60 : 30);
+  if (!XS.focus) {
+    int ty = cy + 60;
+    draw_text(S.f48, tr("Tes stockages"), cx + 50, ty, 0xffffff, 0, cw - 100);
+    static const char *TIPS[4] = {
+      "✕ ouvre un stockage et ses dossiers",
+      "△ sur un jeu : copier, déplacer ou supprimer",
+      "Déplacer : la copie est vérifiée, puis l'original est supprimé",
+      "Tout continue même si tu lances un jeu",
+    };
+    for (int i = 0; i < 4; i++) {
+      fill_round(cx + 52, ty + 112 + i * 64, 10, 10, 5, S.th->accent, 255);
+      draw_text(S.f26, tr(TIPS[i]), cx + 80, ty + 98 + i * 64, 0xd0d6e0, 0, cw - 140);
+    }
+  } else {
+    draw_text(S.f26, XS.path[0] ? XS.path : "/", cx + 40, cy + 26, S.th->accent, 0, cw - 80);
+    int ly = cy + 80, vis = (ch - 100) / rh;
+    if (XS.sel < XS.top) XS.top = XS.sel;
+    if (XS.sel >= XS.top + vis) XS.top = XS.sel - vis + 1;
+    if (!XS.nit) draw_text(S.f26, tr("Dossier vide"), cx + 40, ly + 10, 0x9aa4b5, 0, 0);
+    for (int i = XS.top; i < XS.nit && i < XS.top + vis; i++) {
+      int y = ly + (i - XS.top) * rh, on = i == XS.sel;
+      if (on) fill_round(cx + 20, y, cw - 40, rh - 8, 14, S.th->accent, 60);
+      if (on) fill_round(cx + 20, y + 12, 5, rh - 32, 2, S.th->accent, 255);
+      draw_text(S.f26, XS.it[i].dir ? "▸" : "·", cx + 50, y + 10, XS.it[i].dir ? S.th->accent : 0x9aa4b5, 1, 0);
+      if (XS.it[i].title[0]) {                   /* un jeu : son nom, puis le dossier en gris */
+        int tw = draw_text(S.f26, XS.it[i].title, cx + 80, y + 10, on ? 0xffffff : 0xd0d6e0, 0, cw - 820);
+        draw_text(S.f22, XS.it[i].name, cx + 80 + tw + 18, y + 14, 0x7d8799, 0, cw - 600 - tw);
+      } else draw_text(S.f26, XS.it[i].name, cx + 80, y + 10, on ? 0xffffff : 0xd0d6e0, 0, cw - 500);
+      char sz[32] = "";
+      if (XS.it[i].size >= 0 && XS.it[i].dir && XS.it[i].files >= 0) {   /* dossier : taille et nombre d'elements */
+        char b[32];
+        xpl_size_str(XS.it[i].size, b, sizeof b);
+        snprintf(sz, sizeof sz, tr("%s · %lld fichiers"), b, XS.it[i].files);
+      } else if (XS.it[i].size >= 0) xpl_size_str(XS.it[i].size, sz, sizeof sz);
+      else if (XS.it[i].size == -3) snprintf(sz, sizeof sz, "…");
+      else if (XS.it[i].size == -4) snprintf(sz, sizeof sz, "%s", tr("périphérique"));
+      if (sz[0]) draw_text(S.f22, sz, cx + cw - 50, y + 14, on ? 0xffffff : 0x9aa4b5, 2, 0);
+      if (XS.it[i].perm[0]) draw_text(S.f22, XS.it[i].perm, cx + cw - 320, y + 14, 0x6f7a8c, 2, 0);   /* droits, comme en FTP */
+    }
+    if (XS.nit > vis) {
+      int lh = vis * rh - 8, kh = lh * vis / XS.nit, ky = ly + (lh - kh) * XS.top / (XS.nit - vis);
+      fill_round(cx + cw - 16, ly, 5, lh, 2, 0xffffff, 30);
+      fill_round(cx + cw - 16, ky, 5, kh, 2, S.th->accent, 220);
+    }
+  }
+  /* fenetres */
+  if (XS.view == XV_ACTIONS) {
+    char t[300];
+    snprintf(t, sizeof t, "%s", strrchr(XS.src, '/') + 1);
+    draw_list_panel(t, 3, xpl_act_label, XS.act_sel, NULL);
+  } else if (XS.view == XV_DEST) {
+    draw_list_panel(tr(XS.act_sel == 1 ? "Déplacer vers…" : "Copier vers…"), XS.ndest, xpl_dest_label, XS.dest_sel, NULL);
+  } else if (XS.view == XV_CONFIRM) {
+    char t[400];
+    snprintf(t, sizeof t, tr("Supprimer « %s » ?"), strrchr(XS.src, '/') + 1);
+    draw_list_panel(t, 2, xpl_conf_label, XS.conf_sel, NULL);
+  } else if (XS.view == XV_PROGRESS) draw_xpl_progress();
+  else if (XS.view == XV_FILE) draw_xpl_file();
+}
+
 static void handle_inner(int in);
 
 /* Chaque appui : sortie de l'intro / de l'economiseur, puis son selon ce qui a change */
 static void handle(int in) {
+  if (S.no_bootstrap) { if (in == IN_OK || in == IN_BACK) S.running = 0; return; }   /* ecran d'aide : quitter */
   S.last_input = SDL_GetTicks();
   if (!S.boot_done) { S.boot_done = 1; return; }
   if (S.saver_on) { S.saver_on = 0; S.saver_t = 0; saver_free(); return; }
@@ -7240,6 +8919,10 @@ static void handle(int in) {
 
 static void handle_inner(int in) {
   if (boot_job && in == IN_BACK) { boot_cancel = 1; return; }   /* ○ : annule les payloads au demarrage */
+  if (S.mode == MODE_BROWSE && S.sec == SEC_XPL && in != IN_L1 && in != IN_R1 && in != IN_START) {
+    xpl_input(in);                               /* Launcher5 Xplorer */
+    return;
+  }
   if (S.mode == MODE_BROWSE && S.sec == SEC_SYS) {     /* menu Parametres */
     if (settings_input(in)) return;
     if (in == IN_MENU || in == IN_START || in == IN_MOVE) return;
@@ -7425,10 +9108,20 @@ static void poll(void) {
       if (button_to_input(ev.cbutton.button) == held.input) held.input = -1;
       break;
     case SDL_CONTROLLERAXISMOTION: {
-      static int last_dir = -1;
+      /* une direction par axe : un axe au repos n'annule pas le mouvement de l'autre
+         (certaines versions de SDL envoient les deux axes en continu) */
+      static int axis_dir[2] = { -1, -1 };
       int v = ev.caxis.value, dir = -1;
-      if (ev.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) dir = v < -16000 ? IN_LEFT : v > 16000 ? IN_RIGHT : -2;
-      else if (ev.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) dir = v < -16000 ? IN_UP : v > 16000 ? IN_DOWN : -2;
+      if (ev.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX || ev.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) {
+        int ax = ev.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY;
+        int lo = axis_dir[ax] >= 0 ? 12000 : 16000;   /* hysteresis : pas de clignotement au seuil */
+        dir = !ax ? (v < -lo ? IN_LEFT : v > lo ? IN_RIGHT : -1) : (v < -lo ? IN_UP : v > lo ? IN_DOWN : -1);
+        if (dir == axis_dir[ax]) break;               /* rien de nouveau sur cet axe */
+        if (axis_dir[ax] >= 0 && held.input == axis_dir[ax]) held.input = -1;   /* axe relache ou inverse */
+        axis_dir[ax] = dir;
+        if (dir >= 0) { handle(dir); held.input = dir; held.next = SDL_GetTicks() + 380; }
+        break;
+      }
       else if (ev.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT || ev.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT) {
         static int down[2];                      /* L2 / R2 : gachettes, un appui = un saut */
         int k = ev.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT;
@@ -7436,9 +9129,6 @@ static void poll(void) {
         else if (v < 8000) down[k] = 0;
         break;
       }
-      else break;
-      if (dir >= 0 && dir != last_dir) { handle(dir); held.input = dir; held.next = SDL_GetTicks() + 380; last_dir = dir; }
-      if (dir == -2) { if (held.input == last_dir) held.input = -1; last_dir = -1; }
       break;
     }
     }
@@ -7455,7 +9145,18 @@ static void poll(void) {
 /* launcher en arriere-plan (profil, parametres…) et repris au retour.  */
 /* ------------------------------------------------------------------ */
 static int video_open(void) {
-#ifdef __PS5__
+#if defined(L5_GPU)
+  /* application native : dessin par la carte graphique (OpenGL) */
+  SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
+  /* moteur impose : SDL coupe alors le regroupement des dessins ; on le remet (chaque
+     envoi au GPU coute cher sur PS5, le regroupement en fait beaucoup moins) */
+  if (!getenv("L5_NOBATCH")) SDL_SetHint(SDL_HINT_RENDER_BATCHING, "1");
+  /* fenetre a la taille de l'ecran (4K) ; le dessin reste en 1920x1080, agrandi par le GPU */
+  SDL_DisplayMode dm;
+  int ww = W, wh = H;
+  if (!SDL_GetDesktopDisplayMode(0, &dm) && dm.w >= W) { ww = dm.w; wh = dm.h; }
+  S.win = SDL_CreateWindow("Launcher5", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, ww, wh, SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN);
+#elif defined(__PS5__)
   S.win = SDL_CreateWindow("Launcher5", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, W, H, SDL_WINDOW_FULLSCREEN);
 #else
   if (getenv("L5_SOFTWARE"))  /* meme taille que la TV pour mesurer comme sur la PS5 */
@@ -7475,8 +9176,12 @@ static int video_open(void) {
     SDL_RendererInfo info;
     SDL_GetRendererInfo(S.r, &info);
     plat_log("rendu : %s (flags %x)", info.name, info.flags);
-    S.lite = (info.flags & SDL_RENDERER_SOFTWARE) != 0;
+    S.lite = (info.flags & SDL_RENDERER_SOFTWARE) != 0 && !getenv("L5_FULL");   /* L5_FULL : test du rendu complet */
     if (S.lite) plat_log("mode leger active (dessin sans carte graphique)");
+    int ow = W, oh = H;
+    SDL_GetRendererOutputSize(S.r, &ow, &oh);
+    hidpi = !S.lite && ow >= W * 3 / 2;
+    plat_log("ecran : %dx%d%s", ow, oh, hidpi ? " (textes en double resolution)" : "");
   }
   SDL_RenderSetLogicalSize(S.r, W, H);
   SDL_SetRenderDrawBlendMode(S.r, SDL_BLENDMODE_BLEND);
@@ -7597,11 +9302,28 @@ static void check_external_changes(void) {
 
 int main(int argc, char **argv) {
   if (argc > 1 && argv[1] && !strcmp(argv[1], "--prepare")) return starter_prepare();   /* sans ecran */
+#ifdef L5_GPU
+  /* application lancee par le bootstrap : il lui donne les droits complets juste apres le
+     demarrage (sortie du bac a sable). Sans lui (tuile ouverte seule), on reste limite. */
+  plat_log("attente des droits (pid %d)", (int)getpid());   /* signal lu par le bootstrap */
+  struct stat est;
+  int elevated = 0;
+  for (int i = 0; i < 150 && !elevated; i++) {
+    elevated = geteuid() == 0 || !stat("/user/app", &est);   /* hors du bac a sable */
+    if (!elevated) SDL_Delay(100);
+  }
+#else
+  int elevated = 1;
+#endif
   if (plat_init()) return 1;
+  if (!elevated) plat_log("interface GPU sans droits complets (bootstrap absent ?)");
+  S.no_bootstrap = !elevated;
   i18n_init(plat_sys_lang());   /* langue de la console */
   SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
   if (getenv("L5_NOBATCH")) SDL_SetHint(SDL_HINT_RENDER_BATCHING, "0");   /* mesures precises */
-#ifdef __PS5__
+#if defined(L5_GPU)
+  SDL_SetMainReady();
+#elif defined(__PS5__)
   SDL_SetHint("SDL_VIDEODRIVER", "ps5");
 #endif
   if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK | SDL_INIT_EVENTS)) {
@@ -7613,7 +9335,7 @@ int main(int argc, char **argv) {
 
   if (video_open()) return 1;
 
-#define FONT(var, data, size) var = TTF_OpenFontRW(SDL_RWFromConstMem(data, data##_len), 1, size)
+#define FONT(var, data, size) do { var = TTF_OpenFontRW(SDL_RWFromConstMem(data, data##_len), 1, size);     if (hidpi) for (int fi = 0; fi < 8; fi++) if (!HIFONT[fi].lo) {       HIFONT[fi].lo = var; HIFONT[fi].hi = TTF_OpenFontRW(SDL_RWFromConstMem(data, data##_len), 1, (size) * 2); break; } } while (0)
   FONT(S.f22, font_regular, 22);
   FONT(S.f26, font_regular, 26);
   FONT(S.f30, font_bold, 30);
@@ -7634,9 +9356,15 @@ int main(int argc, char **argv) {
   S.menu.boxes = 1;                     /* jaquettes boites par defaut */
   S.menu.covers_online = 1;
   S.menu.auto_update = 1;
+  S.menu.flow_loop = 1;                 /* Cover Flow infini par defaut */
   menu_load(&S.menu, S.menu_path);
   menu_prune_missing(&S.menu);
   menu_merge_new_apps(&S.menu);
+  {
+    int n[KIND_PAYLOAD + 1] = { 0 };
+    for (int i = 0; i < S.menu.napps; i++) if (S.menu.apps[i].kind >= 0 && S.menu.apps[i].kind <= KIND_PAYLOAD) n[S.menu.apps[i].kind]++;
+    plat_log("liste : %d jeux PS5, %d jeux PS4, %d homebrews, %d payloads", n[KIND_PS5], n[KIND_PS4], n[KIND_HOMEBREW], n[KIND_PAYLOAD]);
+  }
   /* theme : theme.json (complet), sinon le theme fourni du meme nom */
   {
     char dir[PATH_LEN];
@@ -7653,6 +9381,7 @@ int main(int argc, char **argv) {
     S.th = S.base;
     S.tiles_corners = S.cur.corners;
     scan_media_files();
+    load_presets();                              /* le Studio Theme s'ouvrira sans attente */
     data_path(dir, sizeof dir, "catalog.json");
     if (menu_export_catalog(&S.menu, dir)) plat_log("impossible d'ecrire %s", dir);
   }
@@ -7665,6 +9394,26 @@ int main(int argc, char **argv) {
   const char *script = getenv("L5_SCRIPT"), *shot = getenv("L5_SHOT");
   char *steps = script ? strdup(script) : NULL, *cursor = steps;
   int wait = 0;
+  /* Essai sur la console : un scenario depose dans cache/essai.txt est joue une fois
+     (touches separees par des virgules, PAUSE:n images, MESURE:nom), puis supprime.
+     Les mesures (images/s, pire image) vont dans le journal. */
+  int test_mode = 0;
+  if (!steps) {
+    char tp[PATH_LEN];
+    data_path(tp, sizeof tp, "cache/essai.txt");
+    FILE *tf = fopen(tp, "r");
+    if (tf) {
+      static char tbuf[8192];
+      size_t tn = fread(tbuf, 1, sizeof tbuf - 1, tf);
+      fclose(tf);
+      remove(tp);
+      tbuf[tn] = 0;
+      for (char *q = tbuf; *q; q++) if (*q == '\n' || *q == '\r' || *q == ' ') *q = ',';
+      steps = strdup(tbuf); cursor = steps; test_mode = 1;
+      plat_log("essai : scenario lance");
+    }
+  }
+  Uint64 m_t0 = 0; double m_worst = 0; int m_frames = 0, pause_left = 0;
 
   import_sessions();
   S.running = 1;
@@ -7673,6 +9422,7 @@ int main(int argc, char **argv) {
   if (!S.boot_done) sfx(SFX_BOOT);
   int saver_secs = getenv("L5_SAVER") ? atoi(getenv("L5_SAVER")) : 0;   /* test : economiseur plus rapide */
   Uint64 last = SDL_GetPerformanceCounter();
+  if (elevated) {   /* sans droits (bac a sable) : aucune action sur le demarrage ni mise a jour */
   up_boot();
   autostart_sync();                              /* copie a jour dans ps5_autoloader */
   /* les payloads au demarrage sont envoyes par le bootstrap, avant l'ouverture de l'interface ;
@@ -7681,12 +9431,16 @@ int main(int argc, char **argv) {
   first_run_autoload();                          /* premier lancement : inscription dans l'autoloader */
   starter_note();
   autoload_lost_check();                         /* Launcher5 retire de autoload.txt par un autre outil ? */
+  }
+  { SDL_Thread *wd = SDL_CreateThread(watchdog, "surveillance", NULL); if (wd) SDL_DetachThread(wd); }
   while (S.running) {
-    box_poll();
-    up_poll();
-    pcat_poll();
-    status_poll();
-    boot_poll();
+    loop_ticks++;
+    WHERE("jaquettes (box_poll)"); box_poll();
+    WHERE("mises a jour (up_poll)"); up_poll();
+    WHERE("catalogue (pcat_poll)"); pcat_poll();
+    WHERE("etat console (status_poll)"); status_poll();
+    WHERE("demarrage (boot_poll)"); boot_poll();
+    WHERE("evenements systeme");
     Uint64 now = SDL_GetPerformanceCounter();
     S.dt = (float)(now - last) / SDL_GetPerformanceFrequency();
     if (S.dt > 0.1f) S.dt = 0.1f;
@@ -7715,8 +9469,10 @@ int main(int argc, char **argv) {
       plat_log("retour au premier plan : affichage repris");
       if (video_open()) { plat_log("reprise de l'affichage impossible"); break; }
     }
+    WHERE("musique");
     music_pause(0);
     music_update();
+    WHERE("changements exterieurs");
     if (S.frame % 90 == 45) check_external_changes();
     {
       Uint32 limit = saver_secs ? (Uint32)saver_secs * 1000 : (Uint32)S.menu.saver * 60000;
@@ -7724,14 +9480,46 @@ int main(int argc, char **argv) {
           SDL_GetTicks() - S.last_input > limit) { S.saver_on = 1; S.saver_t = 0; }
     }   /* environ toutes les 1,5 s */
     if (overlaid == 2) SDL_Delay(30);                                                          /* menu PS ouvert */
+    WHERE("manette (poll)");
     poll();
-    if (steps && S.frame % 6 == 5) {
+    WHERE("dessin");
+    if (test_mode) {                             /* mesures de l'essai : duree de chaque image */
+      static Uint64 prev;
+      Uint64 nowc = SDL_GetPerformanceCounter();
+      if (prev) { double ms = (nowc - prev) * 1000.0 / SDL_GetPerformanceFrequency(); if (ms > m_worst) m_worst = ms; }
+      prev = nowc;
+      if (!m_t0) m_t0 = nowc;
+      m_frames++;
+    }
+    if (pause_left > 0) pause_left--;
+    else if (steps && S.frame % 6 == 5) {
       char *tok = cursor ? strsep(&cursor, ",") : NULL;
-      if (tok) {
+      while (tok && !*tok && cursor) tok = strsep(&cursor, ",");
+      if (tok && !strncmp(tok, "PAUSE:", 6)) { pause_left = atoi(tok + 6); }
+      else if (tok && !strncmp(tok, "MESURE:", 7)) {
+        double sec = (SDL_GetPerformanceCounter() - m_t0) / (double)SDL_GetPerformanceFrequency();
+        plat_log("mesure %s : %.1f images/s, pire image %.1f ms (%d images)", tok + 7, sec > 0 ? m_frames / sec : 0, m_worst, m_frames);
+        m_t0 = SDL_GetPerformanceCounter(); m_worst = 0; m_frames = 0;
+      }
+      else if (tok) {
         static const char *names[IN_COUNT] = { "U", "D", "L", "R", "OK", "BACK", "MENU", "MOVE", "L1", "R1", "START", "VIEW",
                                                "L2", "R2", "SEARCH" };
         if (!strncmp(tok, "TXT:", 4)) kb_type(tok + 4);
+        else if (!strcmp(tok, "CATALOGUE")) { S.mode = MODE_BROWSE; open_catalog(); }
+        else if (!strncmp(tok, "CATINST:", 8)) {   /* installe un payload du catalogue par son nom */
+          int i = 0;
+          if (S.mode == MODE_CATALOG && PCT.state == 2)
+            for (; i < PCT.n; i++) if (!strcasecmp(PCT.it[i].name, tok + 8)) { pcat_install(i); break; }
+          plat_log("essai : installation de %s (ecran %d, catalogue %d, %d/%d)", tok + 8, S.mode, PCT.state, i, PCT.n);
+        }
+        else if (!strncmp(tok, "DEMARRAGE:", 10)) start_mode_set(atoi(tok + 10));   /* 0 manuel, 2 autoloader */
+        else if (!strcmp(tok, "VEILLE")) { S.saver_on = 1; S.saver_t = 0; }
+        else if (!strcmp(tok, "CATMAJ")) { if (S.mode == MODE_CATALOG && PCT.state == 2) pcat_update_first(); }
+        else if (!strncmp(tok, "SEC:", 4)) { int sc = atoi(tok + 4); if (sc >= 0 && sc < SEC_COUNT && S.sec_has[sc]) S.sec = sc; }
         else for (int i = 0; i < IN_COUNT; i++) if (!strcmp(tok, names[i])) handle(i);
+      } else if (test_mode) {
+        plat_log("essai : termine");
+        free(steps); steps = NULL; cursor = NULL; test_mode = 0;
       } else if (++wait > 8) {
         draw();
         if (shot) {
@@ -7747,6 +9535,14 @@ int main(int argc, char **argv) {
     }
     draw();
     S.frame++;
+#ifdef L5_GPU
+    if (S.frame == 30) {                         /* le bootstrap sait que le dessin GPU marche */
+      char p[PATH_LEN];
+      data_path(p, sizeof p, "cache/gpu_ok");
+      FILE *f = fopen(p, "w");
+      if (f) fclose(f);
+    }
+#endif
     /* mesure de fluidite (images par seconde) dans le journal */
     static Uint32 t0 = 0;
     if (!t0) t0 = SDL_GetTicks();

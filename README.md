@@ -2,7 +2,7 @@
 
 # Launcher5 — game loader pour PS5
 
-**par cedsaill** · v2.5.8 · [English below](#english)
+**par cedsaill** · v2.5.9 · [English below](#english)
 
 **Tu lances Launcher5, tu joues.** Tout est automatique : au premier lancement, il installe
 kstuff et ShadowMount et s'ajoute au démarrage de la console. À chaque allumage, tout est
@@ -48,12 +48,24 @@ prêt et le launcher s'ouvre sur tes jeux.
 - Tuile **Launcher5** sur l'accueil de la PS5, 60 images/s
 
 ## Installation
+**Nouvelle installation**
 1. PS5 jailbreakée avec un chargeur ELF actif (port 9021).
-2. Télécharge `launcher5.elf` dans les [Releases](../../releases).
-3. Envoie `launcher5.elf` au chargeur (port 9021).
-4. C'est tout : tu peux jouer. Aux allumages suivants, tout démarre seul.
+2. Télécharge `launcher5.elf` dans les [Releases](../../releases) et envoie-le au port 9021.
+3. Le launcher installe sa tuile **Launcher5** sur l'accueil et s'ouvre.
+4. Au premier lancement, il installe kstuff et ShadowMount et s'ajoute au démarrage de la
+   console (`autoload.txt`). Si ton `autoload.txt` contient déjà tes payloads, il te demande
+   avant de le remplacer ; l'ancien fichier est toujours sauvegardé.
+5. Ensuite, à chaque allumage, tout démarre seul : tu ouvres la tuile et tu joues.
+
+**Tu as déjà une version précédente**
+- Accepte la mise à jour proposée dans le launcher, ou envoie le nouveau `launcher5.elf` au port 9021.
+- Ton `autoload.txt` n'est pas modifié, tes réglages, thèmes, favoris et dossiers sont conservés.
 
 Pour revenir à ton ancien `autoload.txt` : **Paramètres › Démarrage de Launcher5 › Manuel**.
+
+**Désinstaller** : **Paramètres › Désinstaller Launcher5** remet ton `autoload.txt` d'origine et
+retire la tuile (en gardant tes réglages ou en effaçant tout). Redémarre ensuite la console :
+la tuile disparaît de l'accueil.
 
 Testé sur CFI-1216A, firmware 13.60.
 
@@ -127,6 +139,11 @@ follows the console language (French, English, Spanish, German, Italian, Portugu
 That's it: you can play. Your previous `autoload.txt` is kept and backed up
 (*Settings › Launcher5 startup › Manual* restores it). If something is missing,
 *Settings › Console status › ✕ Fix everything* sets it all up again.
+Coming from a previous version: accept the update offered in the launcher (or send the new
+`launcher5.elf`); your `autoload.txt` and settings are kept.
+
+**Uninstall:** *Settings › Uninstall Launcher5* restores your original `autoload.txt` and removes
+the tile; restart the console and the tile is gone from the home screen.
 
 **Updates:** the launcher checks GitHub once a day; *Settings › Update* downloads the new version,
 verifies its SHA-256 and installs it. It is saved on the console as `/data/launcher5/launcher5.elf`:

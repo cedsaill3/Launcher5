@@ -24,9 +24,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <sys/uio.h>
+#include <sys/mount.h>
 #include <sys/socket.h>
+#include <sys/select.h>
+#include <sys/ioctl.h>
+#include <sys/disk.h>
 #include <sys/sysctl.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -67,9 +74,25 @@ INCBIN(wall4, "assets/fonds/launcher5-04.jpg")
 INCBIN(wall5, "assets/fonds/launcher5-05.jpg")
 INCBIN(wall6, "assets/fonds/launcher5-06.jpg")
 INCBIN(wall7, "assets/fonds/launcher5-07.jpg")
+INCBIN(wall8, "assets/fonds/launcher5-crane.jpg")
 /* images de boitiers PS5 / PS4 (style « Images ») */
 INCBIN(case_ps5, "assets/boitiers/ps5.png")
 INCBIN(case_ps4, "assets/boitiers/ps4.png")
+/* musique d'ambiance fournie (libre de droits) */
+INCBIN(music1, "assets/musique/phonk-menu.mp3")
+#ifdef L5_HAVE_GPU
+/* interface dessinee par la carte graphique : une vraie application, installee sous l'identifiant
+   de la tuile Launcher5 (une seule tuile sur l'accueil). LNCH00006 : ancienne tuile GPU, retiree. */
+#define GPU_ID        "LNCH00005"
+#define GPU_BUILD     "build/gpu"
+#define OLD_GPU_ID    "LNCH00006"
+#define GPU_DIR       "/system_ex/app/" GPU_ID
+#define GPU_OK        DATA_DIR "/cache/gpu_ok"       /* ecrit par l'interface GPU apres ses premieres images */
+#define GPU_FAILED    DATA_DIR "/cache/gpu_failed"   /* version ou l'interface GPU n'a pas demarre */
+INCBIN(gpu_eboot, GPU_BUILD "/eboot.bin")
+INCBIN(gpu_libc, GPU_BUILD "/sce_module/libc.prx")
+INCBIN(gpu_param, GPU_BUILD "/sce_sys/param.json")
+#endif
 
 /* Plugin OnionHEN : description lue dans la section « .onion_plugin » (128 octets).
    Pose dans /data/OnionHEN/plugins/, le launcher est lance par OnionHEN au demarrage
@@ -98,6 +121,7 @@ int  sceSystemServiceKillApp(int app_id, int how, int reason, int core_dump);
 int  sceSystemServiceLaunchApp(const char *title_id, char **argv, app_launch_ctx_t *ctx);
 int  sceAppInstUtilInitialize(void);
 int  sceAppInstUtilAppInstallAll(void *);
+int  sceAppInstUtilAppUnInstall(const char *title_id);
 int  sceKernelSendNotificationRequest(int, void *, size_t, int);
 int  sceSystemServiceGetAppTitleId(int app_id, char *title_id);
 int  sceSystemServiceParamGetInt(int id, int *value);
@@ -133,7 +157,8 @@ static void install_wallpapers(void) {
   { "launcher5-04.jpg", wall4, wall4_end },
   { "launcher5-05.jpg", wall5, wall5_end },
   { "launcher5-06.jpg", wall6, wall6_end },
-  { "launcher5-07.jpg", wall7, wall7_end }
+  { "launcher5-07.jpg", wall7, wall7_end },
+  { "launcher5-crane.jpg", wall8, wall8_end }
   };
   char path[256];
   struct stat st;
@@ -148,6 +173,9 @@ static void install_wallpapers(void) {
     logf("boitier ps5 non installe");
   if (stat(DATA_DIR "/boitiers/ps4.png", &st) && write_file(DATA_DIR "/boitiers/ps4.png", case_ps4, (size_t)(case_ps4_end - case_ps4), 0644))
     logf("boitier ps4 non installe");
+  mkdir(DATA_DIR "/musique", 0755);              /* musique fournie : posee si elle manque */
+  if (stat(DATA_DIR "/musique/phonk-menu.mp3", &st) && write_file(DATA_DIR "/musique/phonk-menu.mp3", music1, (size_t)(music1_end - music1), 0644))
+    logf("musique non installee");
   remove(DATA_DIR "/sons/demarrage-techno.mp3");  /* son retire en 2.1.2 */
   rmdir(DATA_DIR "/sons");
 }
@@ -225,27 +253,127 @@ static long long appinfo_sig(void) {
 static long long catalog_sig;
 
 /* La tuile est-elle enregistree dans la base des applications ? 1 oui, 0 non, -1 on ne sait pas */
-static int relay_registered(void) {
+static int app_registered(const char *id) {
   if (copy_appinfo()) return -1;
   sqlite3 *db;
   if (sqlite3_open_v2(DB_COPY, &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) { sqlite3_close(db); return -1; }
   sqlite3_stmt *st;
   int found = -1;
-  if (sqlite3_prepare_v2(db, "select 1 from tbl_appinfo where titleId = '" RELAY_ID "' limit 1", -1, &st, NULL) == SQLITE_OK) {
+  if (sqlite3_prepare_v2(db, "select 1 from tbl_appinfo where titleId = ? limit 1", -1, &st, NULL) == SQLITE_OK) {
+    sqlite3_bind_text(st, 1, id, -1, SQLITE_STATIC);
     found = sqlite3_step(st) == SQLITE_ROW;
     sqlite3_finalize(st);
   }
   sqlite3_close(db);
   return found;
 }
+static int relay_registered(void) { return app_registered(RELAY_ID); }
+
+/* Desinstallation : une appli installee par dossier (sans PKG) n'est pas retiree par le systeme
+   (il repond OK sans rien faire) et l'accueil refuse de la supprimer. On efface donc ses lignes
+   des deux bases ; la tuile disparait au redemarrage suivant. Seul cet identifiant est vise. */
+static int sql_run(sqlite3 *db, const char *sql, const char *a, const char *b) {
+  sqlite3_stmt *st;
+  if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return 0;
+  if (a) sqlite3_bind_text(st, 1, a, -1, SQLITE_TRANSIENT);
+  if (b) sqlite3_bind_text(st, 2, b, -1, SQLITE_TRANSIENT);
+  sqlite3_step(st);
+  sqlite3_finalize(st);
+  return sqlite3_changes(db);
+}
+static int forget_app(const char *id) {
+  char loc[64], flag[64], cid[96] = "";
+  snprintf(loc, sizeof loc, "cid:local:%s", id);
+  snprintf(flag, sizeof flag, "nsx_content_flag_%s", id);
+  int n = 0;
+  sqlite3 *db;
+  if (sqlite3_open_v2(APPINFO_DB, &db, SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK) {
+    sqlite3_busy_timeout(db, 5000);
+    n += sql_run(db, "DELETE FROM tbl_appinfo WHERE titleId = ?", id, NULL);
+    n += sql_run(db, "DELETE FROM tbl_conceptinfo WHERE local_concept_id = ?", loc, NULL);
+  }
+  sqlite3_close(db);
+  if (sqlite3_open_v2("/system_data/priv/mms/app.db", &db, SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK) {
+    sqlite3_busy_timeout(db, 5000);
+    /* tables par utilisateur (suffixe) : on les trouve par leur nom */
+    char tabs[16][64];
+    int nt = 0;
+    sqlite3_stmt *st;
+    if (sqlite3_prepare_v2(db, "SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'tbl_iconinfo_%' "
+                           "OR name LIKE 'tbl_concepticoninfo_%' OR name LIKE 'tbl_info_%')", -1, &st, NULL) == SQLITE_OK) {
+      while (nt < 16 && sqlite3_step(st) == SQLITE_ROW)
+        snprintf(tabs[nt++], sizeof tabs[0], "%s", (const char *)sqlite3_column_text(st, 0));
+      sqlite3_finalize(st);
+    }
+    char q[256];
+    for (int i = 0; i < nt; i++) {               /* concept propre a l'icone (cid:scp:... des anciennes versions) */
+      if (strncmp(tabs[i], "tbl_iconinfo_", 13)) continue;
+      snprintf(q, sizeof q, "SELECT localConceptId FROM \"%s\" WHERE titleId = ?", tabs[i]);
+      if (sqlite3_prepare_v2(db, q, -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, id, -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(st) == SQLITE_ROW && sqlite3_column_text(st, 0))
+          snprintf(cid, sizeof cid, "%s", (const char *)sqlite3_column_text(st, 0));
+        sqlite3_finalize(st);
+      }
+      if (cid[0]) {                              /* concept partage avec une autre appli : on n'y touche pas */
+        snprintf(q, sizeof q, "SELECT 1 FROM \"%s\" WHERE localConceptId = ? AND titleId <> ? LIMIT 1", tabs[i]);
+        if (sqlite3_prepare_v2(db, q, -1, &st, NULL) == SQLITE_OK) {
+          sqlite3_bind_text(st, 1, cid, -1, SQLITE_TRANSIENT);
+          sqlite3_bind_text(st, 2, id, -1, SQLITE_TRANSIENT);
+          if (sqlite3_step(st) == SQLITE_ROW) cid[0] = 0;
+          sqlite3_finalize(st);
+        }
+      }
+    }
+    n += sql_run(db, "DELETE FROM tbl_contentinfo WHERE titleId = ?", id, NULL);
+    n += sql_run(db, "DELETE FROM tbl_conceptmetadata WHERE localConceptId IN (?, ?)", loc, cid[0] ? cid : loc);
+    for (int i = 0; i < nt; i++) {
+      if (!strncmp(tabs[i], "tbl_iconinfo_", 13)) snprintf(q, sizeof q, "DELETE FROM \"%s\" WHERE titleId = ?", tabs[i]);
+      else if (!strncmp(tabs[i], "tbl_concepticoninfo_", 20)) snprintf(q, sizeof q, "DELETE FROM \"%s\" WHERE localConceptId IN (?, ?)", tabs[i]);
+      else snprintf(q, sizeof q, "DELETE FROM \"%s\" WHERE key = ?", tabs[i]);
+      if (!strncmp(tabs[i], "tbl_iconinfo_", 13)) n += sql_run(db, q, id, NULL);
+      else if (!strncmp(tabs[i], "tbl_concepticoninfo_", 20)) n += sql_run(db, q, loc, cid[0] ? cid : loc);
+      else n += sql_run(db, q, flag, NULL);
+    }
+  }
+  sqlite3_close(db);
+  return n;
+}
 
 /* Tuile « Launcher5 » sur l'accueil de la PS5 : installee si elle manque,
    reinstallee si elle a ete supprimee de l'accueil */
+/* remplace l'icone de la tuile si elle a change (fichier present uniquement) */
+static int refresh_icon(const char *path) {
+  size_t n = fake_icon_end - fake_icon;
+  struct stat st;
+  if (stat(path, &st)) return 0;
+  if ((size_t)st.st_size == n) {
+    FILE *f = fopen(path, "rb");
+    if (f) {
+      uint8_t *b = malloc(n);
+      int same = b && fread(b, 1, n, f) == n && !memcmp(b, fake_icon, n);
+      free(b);
+      fclose(f);
+      if (same) return 0;
+    }
+  }
+  logf("icone de la tuile mise a jour : %s (%d)", path, write_file(path, fake_icon, n, 0644));
+  return 1;
+}
+
 static int install_relay_app(void) {
   struct stat st;
   int files = !stat("/user/app/" RELAY_ID "/sce_sys/param.json", &st) || !stat("/user/appmeta/" RELAY_ID "/param.json", &st);
   int reg = relay_registered();
-  if (files && reg != 0) return 0;   /* deja installee */
+  if (files && reg != 0) {           /* deja installee : l'icone suit la version */
+    int changed = refresh_icon("/user/app/" RELAY_ID "/sce_sys/icon0.png");
+    changed |= refresh_icon("/user/app/" RELAY_ID "/icon0.png");
+    if (changed) {                   /* l'accueil garde l'ancienne image : on reinscrit la tuile */
+      sceAppInstUtilInitialize();
+      logf("tuile reinscrite pour la nouvelle icone : %d", install_app(RELAY_ID, "/user/app/"));
+    }
+    return 0;
+  }
   logf("installation de la tuile Launcher5 (" RELAY_ID ")");
   if (mkdir("/user/app/" RELAY_ID, 0755) && errno != EEXIST) return -1;
   if (mkdir("/user/app/" RELAY_ID "/sce_sys", 0755) && errno != EEXIST) return -1;
@@ -254,6 +382,243 @@ static int install_relay_app(void) {
   sceAppInstUtilInitialize();
   return install_app(RELAY_ID, "/user/app/");
 }
+
+#ifdef L5_HAVE_GPU
+static pid_t pid_by_name(const char *name);
+static int alive(pid_t pid);
+/* fichier identique a celui integre ? */
+static int same_content(const char *path, const uint8_t *d, size_t n) {
+  struct stat st;
+  if (stat(path, &st) || (size_t)st.st_size != n) return 0;
+  FILE *f = fopen(path, "rb");
+  if (!f) return 0;
+  uint8_t *b = malloc(n);
+  int same = b && fread(b, 1, n, f) == n && !memcmp(b, d, n);
+  free(b);
+  fclose(f);
+  return same;
+}
+
+/* ecrit le fichier s'il a change : -1 erreur, 0 deja a jour, 1 ecrit */
+static int put_file(const char *path, const uint8_t *d, size_t n, int mode) {
+  if (same_content(path, d, n)) return 0;
+  char tmp[256];
+  snprintf(tmp, sizeof tmp, "%s.l5new", path);
+  if (write_file(tmp, d, n, mode)) { remove(tmp); return -1; }
+  if (rename(tmp, path)) { remove(tmp); return -1; }
+  return 1;
+}
+
+/* /system_ex en ecriture (comme le fait le lanceur de homebrews) */
+static int remount_system_ex_rw(void) {
+#define IOV(s) { (void *)(s), (s) ? strlen(s) + 1 : 0 }
+  struct iovec iov[] = {
+    IOV("from"), IOV("/dev/ssd0.system_ex"), IOV("fspath"), IOV("/system_ex"),
+    IOV("fstype"), IOV("exfatfs"), IOV("large"), IOV("yes"), IOV("timezone"), IOV("static"),
+    IOV("async"), IOV(NULL), IOV("ignoreacl"), IOV(NULL),
+  };
+#undef IOV
+  return nmount(iov, sizeof iov / sizeof iov[0], MNT_UPDATE);
+}
+
+static int xp_delete(const char *p);
+/* ancienne tuile GPU (LNCH00006, versions precedentes) : desinstallee, une seule tuile reste */
+static void remove_old_gpu_tile(void) {
+  struct stat st;
+  int reg = app_registered(OLD_GPU_ID);
+  if (reg <= 0 && stat("/user/app/" OLD_GPU_ID, &st) && stat("/system_ex/app/" OLD_GPU_ID, &st)) return;
+  int app = sceSystemServiceGetAppIdOfRunningBigApp();   /* encore ouverte (version precedente) : fermee d'abord */
+  char tid[32] = { 0 };
+  if (app > 0 && !sceSystemServiceGetAppTitleId(app, tid) && !strcmp(tid, OLD_GPU_ID)) {
+    sceSystemServiceKillApp(app, -1, 0, 0);
+    usleep(800 * 1000);
+  }
+  if (reg > 0) { sceAppInstUtilInitialize(); logf("ancienne tuile GPU retiree (%d)", sceAppInstUtilAppUnInstall(OLD_GPU_ID)); }
+  xp_delete("/user/app/" OLD_GPU_ID);
+  xp_delete("/system_ex/app/" OLD_GPU_ID);
+  xp_delete("/user/appmeta/" OLD_GPU_ID);
+}
+
+/* Interface GPU : application native (eboot.bin) installee par le bootstrap, sous la tuile Launcher5 */
+static int gpu_installed;
+#define GPU_ICON fake_icon
+#define GPU_ICON_END fake_icon_end
+static int install_gpu_app(void) {
+  remove_old_gpu_tile();
+  if (mkdir(GPU_DIR, 0755) && errno != EEXIST) {
+    if (remount_system_ex_rw() || (mkdir(GPU_DIR, 0755) && errno != EEXIST)) {
+      logf("interface GPU : /system_ex inaccessible (%d)", errno);
+      return -1;
+    }
+  }
+  /* empreinte de la version installee : on ne relit pas les 35 Mo a chaque ouverture */
+  char stamp[96], cur[96] = "";
+  snprintf(stamp, sizeof stamp, "%s %zu %zu %s %s", L5_VERSION, (size_t)(gpu_eboot_end - gpu_eboot),
+           (size_t)(gpu_libc_end - gpu_libc), __DATE__, __TIME__);
+  struct stat st;
+  FILE *sf = fopen(GPU_DIR "/l5stamp", "r");
+  if (sf) { if (!fgets(cur, sizeof cur, sf)) cur[0] = 0; fclose(sf); }
+  cur[strcspn(cur, "\r\n")] = 0;
+  if (!strcmp(cur, stamp) && !stat(GPU_DIR "/eboot.bin", &st) && !stat("/user/app/" GPU_ID "/sce_sys/param.json", &st)
+      && app_registered(GPU_ID) != 0) {
+    gpu_installed = 1;
+    return 0;
+  }
+  mkdir(GPU_DIR "/sce_module", 0755);
+  mkdir(GPU_DIR "/sce_sys", 0755);
+  mkdir("/user/app/" GPU_ID, 0755);
+  mkdir("/user/app/" GPU_ID "/sce_sys", 0755);
+  int r[6] = {
+    put_file(GPU_DIR "/eboot.bin", gpu_eboot, gpu_eboot_end - gpu_eboot, 0755),
+    put_file(GPU_DIR "/sce_module/libc.prx", gpu_libc, gpu_libc_end - gpu_libc, 0755),
+    put_file(GPU_DIR "/sce_sys/param.json", gpu_param, gpu_param_end - gpu_param, 0644),
+    put_file(GPU_DIR "/sce_sys/icon0.png", GPU_ICON, GPU_ICON_END - GPU_ICON, 0644),
+    put_file("/user/app/" GPU_ID "/sce_sys/param.json", gpu_param, gpu_param_end - gpu_param, 0644),
+    put_file("/user/app/" GPU_ID "/sce_sys/icon0.png", GPU_ICON, GPU_ICON_END - GPU_ICON, 0644),
+  };
+  int changed = 0;
+  for (int i = 0; i < 6; i++) {
+    if (r[i] < 0) { logf("interface GPU : ecriture impossible (fichier %d)", i); return -1; }
+    changed |= r[i];
+  }
+  int reg = app_registered(GPU_ID);
+  if (changed || reg == 0) {
+    sceAppInstUtilInitialize();
+    int e = install_app(GPU_ID, "/user/app/");
+    logf("interface GPU : application %s (%d)", reg == 0 ? "installee" : "mise a jour", e);
+  }
+  sf = fopen(GPU_DIR "/l5stamp", "w");
+  if (sf) { fprintf(sf, "%s\n", stamp); fclose(sf); }
+  gpu_installed = 1;
+  return 0;
+}
+
+/* GPU utilisable ? (pas d'echec deja constate avec cette version) */
+static int gpu_wanted(void) {
+  if (!gpu_installed || !stat(DATA_DIR "/no_gpu", &(struct stat){0})) return 0;
+  char v[32] = "";
+  FILE *f = fopen(GPU_FAILED, "r");
+  if (f) { if (!fgets(v, sizeof v, f)) v[0] = 0; fclose(f); }
+  v[strcspn(v, "\r\n")] = 0;
+  return strcmp(v, L5_VERSION) != 0;
+}
+
+/* droits complets pour l'interface GPU (hors du bac a sable, comme l'interface logicielle) */
+/* l'interface GPU ecrit « attente des droits » dans le journal une fois demarree : avant,
+   elle charge encore ses modules depuis /app0 et ne les trouverait plus hors du bac a sable */
+static long log_size(void) { struct stat st; return stat(LOG_PATH, &st) ? 0 : (long)st.st_size; }
+static int ui_waiting(long from, pid_t pid) {
+  FILE *f = fopen(LOG_PATH, "r");
+  if (!f) return 0;
+  fseek(f, from, SEEK_SET);
+  char line[256], want[64];
+  snprintf(want, sizeof want, "attente des droits (pid %d)", (int)pid);
+  int found = 0;
+  while (!found && fgets(line, sizeof line, f)) found = strstr(line, want) != NULL;
+  fclose(f);
+  return found;
+}
+static long gpu_log_from;
+static int raise_app(pid_t pid) {
+  for (int i = 0; i < 100 && !ui_waiting(gpu_log_from, pid) && alive(pid); i++) usleep(100 * 1000);
+  int e = elfldr_raise_privileges(pid);
+  if (!e) e = kernel_set_ucred_authid(pid, 0x4801000000000013L);
+  return e;
+}
+
+/* Lecture des dossiers pour l'interface GPU : une application n'a pas le droit de lister
+   un dossier (appel refuse par le systeme). Elle demande la liste au bootstrap par une
+   connexion locale (127.0.0.1 seulement) : chemin en entree, une ligne par element
+   (« d nom » pour un dossier, « f nom » sinon) en sortie. */
+#define DIR_PORT 5051
+static long long xp_size(const char *p, int *files);
+static int xp_allowed(const char *p);
+static void *dir_client(void *arg) {
+  int c = (int)(intptr_t)arg;
+  struct timeval tv = { 3, 0 };                  /* jamais de fil bloque sans fin */
+  setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+  setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+  char path[1024];
+  size_t n = 0;
+  while (n + 1 < sizeof path) {
+    ssize_t r = recv(c, path + n, 1, 0);
+    if (r <= 0 || path[n] == '\n') break;
+    n++;
+  }
+  path[n] = 0;
+  if (!strncmp(path, "?df ", 4)) {              /* espace libre et taille d'un stockage */
+    struct statvfs v;
+    char out[64];
+    int len = statvfs(path + 4, &v) ? snprintf(out, sizeof out, "-1 -1\n")
+      : snprintf(out, sizeof out, "%lld %lld\n", (long long)v.f_bavail * (long long)v.f_frsize, (long long)v.f_blocks * (long long)v.f_frsize);
+    send(c, out, len, 0);
+    close(c);
+    return NULL;
+  }
+  if (!strncmp(path, "?du ", 4)) {              /* taille d'un jeu ou d'un dossier, nombre de fichiers */
+    struct timeval tv = { 60, 0 };
+    setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    char out[64];
+    int files = 0, len;
+    const char *q = path + 4;
+    if (!xp_allowed(q) || !strcmp(q, "/") || !strcmp(q, "/mnt"))   /* /dev compris */
+      len = snprintf(out, sizeof out, "-1 -1\n");
+    else { long long sz = xp_size(path + 4, &files); len = snprintf(out, sizeof out, "%lld %d\n", sz, files); }
+    send(c, out, len, 0);
+    close(c);
+    return NULL;
+  }
+  DIR *d = n ? opendir(path) : NULL;
+  if (d) {
+    struct dirent *e;
+    char line[600];
+    while ((e = readdir(d))) {
+      if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+      int isdir = e->d_type == DT_DIR;
+      if (e->d_type == DT_UNKNOWN) {             /* certains disques (exFAT) ne le disent pas */
+        char full[1400];
+        struct stat st;
+        snprintf(full, sizeof full, "%s/%s", path, e->d_name);
+        isdir = !stat(full, &st) && S_ISDIR(st.st_mode);
+      }
+      int len = snprintf(line, sizeof line, "%c %s\n", isdir ? 'd' : 'f', e->d_name);
+      if (send(c, line, len, 0) != len) break;
+    }
+    closedir(d);
+  }
+  close(c);
+  return NULL;
+}
+static void *dir_server(void *arg) {
+  (void)arg;
+  int s = socket(AF_INET, SOCK_STREAM, 0);
+  if (s < 0) return NULL;
+  int one = 1;
+  setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  struct sockaddr_in a = { 0 };
+  a.sin_family = AF_INET;
+  a.sin_port = htons(DIR_PORT);
+  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  int bound = 0;
+  for (int i = 0; i < 40 && !(bound = !bind(s, (struct sockaddr *)&a, sizeof a)); i++) usleep(250 * 1000);   /* ancien bootstrap */
+  if (!bound || listen(s, 16)) { logf("dossiers : service local indisponible (%d)", errno); close(s); return NULL; }
+  for (;;) {
+    int c = accept(s, NULL, NULL);
+    if (c < 0) { usleep(100 * 1000); continue; }
+    pthread_t t;
+    if (pthread_create(&t, NULL, dir_client, (void *)(intptr_t)c)) close(c);
+    else pthread_detach(t);
+  }
+  return NULL;
+}
+
+static pid_t gpu_pid(void) {
+  int app = sceSystemServiceGetAppIdOfRunningBigApp();
+  char tid[32] = { 0 };
+  if (app <= 0 || sceSystemServiceGetAppTitleId(app, tid) || strcmp(tid, GPU_ID)) return -1;
+  return pid_by_name("eboot.bin");
+}
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Catalogue des applications (base appinfo.db de la console)          */
@@ -830,9 +1195,39 @@ static int starter_setup(char *status, size_t sn) {
 static time_t t_start;                           /* mesure du temps d'ouverture */
 static int after_update;                          /* lance par une mise a jour (tuile peut-etre encore ouverte) */
 
+#ifdef L5_HAVE_GPU
+static int gpu_pending;                  /* interface GPU lancee : a-t-elle affiche ses images ? */
+static time_t gpu_started;               /* heure du lancement de l'interface GPU */
+#endif
 static pid_t start_ui(void) {
   export_catalog();                      /* a jour a chaque ouverture */
   remove(REQUEST_PATH);
+#ifdef L5_HAVE_GPU
+  struct stat gs;
+  if (gpu_pending && stat(GPU_OK, &gs)) {
+    FILE *f = fopen(GPU_FAILED, "w");
+    if (f) { fprintf(f, "%s\n", L5_VERSION); fclose(f); }
+    logf("interface GPU : pas d'image au dernier lancement, retour au dessin classique");
+    notify("Launcher5 : affichage GPU indisponible, mode classique");
+  }
+  gpu_pending = 0;
+  if (gpu_wanted()) {
+    remove(GPU_OK);
+    gpu_log_from = log_size();
+    if (!launch_title(GPU_ID)) {
+      pid_t p = -1;
+      for (int i = 0; i < 80 && p <= 0; i++) { usleep(100 * 1000); p = gpu_pid(); }
+      if (p > 0) {
+        int e = raise_app(p);
+        gpu_pending = 1;
+        gpu_started = time(NULL);
+        logf("interface GPU lancee (pid %d, droits %d, %ld s apres le lancement)", p, e, (long)(time(NULL) - t_start));
+        return p;
+      }
+    }
+    logf("interface GPU : lancement impossible, dessin classique");
+  }
+#endif
   char *argv[] = { (char *)UI_PATH, NULL };
   char *envp[] = { NULL };
   pid_t ui = -1;
@@ -853,6 +1248,256 @@ static pid_t start_ui(void) {
   }
   logf("interface lancee (pid %d, %ld s apres le lancement)", ui, (long)(time(NULL) - t_start));
   return ui;
+}
+
+
+/* ------------------------------------------------------------------ */
+/* Launcher5 Xplorer : copies, deplacements et suppressions entre les   */
+/* stockages, faits ici (le bootstrap continue meme si l'ecran se ferme */
+/* ou qu'un jeu est lance). Demande : fichier xjob (operation, source,  */
+/* destination). Progression : cache/xprog. Annulation : cache/xcancel. */
+/* ------------------------------------------------------------------ */
+#define XJOB    DATA_DIR "/xjob"
+#define XPROG   DATA_DIR "/cache/xprog"
+#define XCANCEL DATA_DIR "/cache/xcancel"
+
+/* Launcher5 public : seulement les stockages des jeux, jamais le systeme, jamais « .. » */
+static int xp_allowed(const char *p) {
+  static const char *const ROOTS[] = { "/data/", "/mnt/usb", "/mnt/ext", "/user/data/" };
+  if (!p || p[0] != '/' || strstr(p, "/../") || strstr(p, "/./") || strstr(p, "//")) return 0;
+  size_t l = strlen(p);
+  if (l >= 3 && !strcmp(p + l - 3, "/..")) return 0;
+  for (size_t i = 0; i < sizeof ROOTS / sizeof ROOTS[0]; i++)
+    if (!strncmp(p, ROOTS[i], strlen(ROOTS[i]))) return 1;
+  return 0;
+}
+static int xp_protected(const char *p) { (void)p; return 0; }   /* deja limite par xp_allowed */
+/* chemin reel (liens symboliques suivis) aussi dans un stockage autorise : un lien pose dans
+   /data ne doit pas ouvrir le reste du disque */
+static int xp_real_ok(const char *p) {
+  char rp[1024];
+  if (!realpath(p, rp)) return 0;
+  size_t l = strlen(rp);
+  if (l + 2 > sizeof rp) return 0;
+  rp[l] = '/'; rp[l + 1] = 0;                    /* « /data » -> « /data/ » : la racine du stockage compte */
+  return xp_allowed(rp);
+}
+/* racine d'un stockage (/data, /mnt/usb0, /mnt/ext1...) : on ne la supprime jamais */
+static int xp_is_root(const char *p) {
+  if (!strcmp(p, "/data") || !strcmp(p, "/user/data")) return 1;
+  if (!strncmp(p, "/mnt/", 5) && !strchr(p + 5, '/')) return 1;
+  return 0;
+}
+
+static struct { long long done, total; time_t t0; char file[256]; int files; } XP;
+static time_t xp_last;
+static void xp_write(const char *state) {
+  char tmp[] = XPROG ".tmp";
+  FILE *f = fopen(tmp, "w");
+  if (!f) return;
+  long sec = (long)(time(NULL) - XP.t0);
+  long long speed = sec > 0 ? XP.done / sec : 0;
+  fprintf(f, "%s\n%lld\n%lld\n%lld\n%d\n%s\n", state, XP.done, XP.total, speed, XP.files, XP.file);
+  fclose(f);
+  rename(tmp, XPROG);
+}
+static int xp_cancelled(void) { struct stat st; return !stat(XCANCEL, &st); }
+
+static long long xp_size(const char *p, int *files) {        /* taille totale (dossier : recursif) */
+  struct stat st;
+  if (lstat(p, &st)) return 0;
+  if (!S_ISDIR(st.st_mode)) { (*files)++; return st.st_size; }
+  long long t = 0;
+  DIR *d = opendir(p);
+  struct dirent *e;
+  while (d && (e = readdir(d))) {
+    if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+    char c[1024];
+    snprintf(c, sizeof c, "%s/%s", p, e->d_name);
+    t += xp_size(c, files);
+  }
+  if (d) closedir(d);
+  return t;
+}
+
+static int xp_copy_file(const char *src, const char *dst, mode_t mode) {
+  int in = open(src, O_RDONLY), out = in < 0 ? -1 : open(dst, O_WRONLY | O_CREAT | O_TRUNC, mode & 0777);
+  if (in < 0 || out < 0) { if (in >= 0) close(in); return -1; }
+  static char *buf;
+  if (!buf) buf = malloc(4 << 20);
+  int rc = buf ? 0 : -1;
+  snprintf(XP.file, sizeof XP.file, "%s", strrchr(src, '/') ? strrchr(src, '/') + 1 : src);
+  while (!rc) {
+    ssize_t n = read(in, buf, 4 << 20);
+    if (n == 0) break;
+    if (n < 0) { rc = -1; break; }
+    for (ssize_t w = 0; w < n;) {
+      ssize_t k = write(out, buf + w, n - w);
+      if (k <= 0) { rc = -1; break; }        /* disque plein ou retire */
+      w += k;
+    }
+    XP.done += n;
+    if (time(NULL) != xp_last) { xp_last = time(NULL); xp_write("encours"); }
+    if (xp_cancelled()) rc = -2;
+  }
+  close(in);
+  if (close(out)) rc = rc ? rc : -1;
+  if (rc) remove(dst);                         /* pas de fichier a moitie copie */
+  return rc;
+}
+
+static int xp_copy(const char *src, const char *dst) {      /* 0, -1 erreur, -2 annule */
+  struct stat st;
+  if (lstat(src, &st)) return -1;
+  if (!S_ISDIR(st.st_mode)) { int r = xp_copy_file(src, dst, st.st_mode); if (!r) XP.files++; return r; }
+  if (mkdir(dst, 0777) && errno != EEXIST) return -1;
+  DIR *d = opendir(src);
+  if (!d) return -1;
+  struct dirent *e;
+  int rc = 0;
+  while (!rc && (e = readdir(d))) {
+    if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+    char a[1024], b[1024];
+    snprintf(a, sizeof a, "%s/%s", src, e->d_name);
+    snprintf(b, sizeof b, "%s/%s", dst, e->d_name);
+    rc = xp_copy(a, b);
+  }
+  closedir(d);
+  return rc;
+}
+
+static int xp_delete(const char *p) {
+  struct stat st;
+  if (lstat(p, &st)) return 0;
+  if (!S_ISDIR(st.st_mode)) return unlink(p);
+  DIR *d = opendir(p);
+  struct dirent *e;
+  int rc = 0;
+  while (d && (e = readdir(d))) {
+    if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+    char c[1024];
+    snprintf(c, sizeof c, "%s/%s", p, e->d_name);
+    rc |= xp_delete(c);
+  }
+  if (d) closedir(d);
+  return rmdir(p) | rc;
+}
+
+
+
+static void xp_run(const char *op, const char *src, const char *dst_dir) {
+  memset(&XP, 0, sizeof XP);
+  XP.t0 = time(NULL);
+  remove(XCANCEL);
+  const char *base = strrchr(src, '/') ? strrchr(src, '/') + 1 : src;
+  char dst[1024];
+  snprintf(dst, sizeof dst, "%s/%s", dst_dir, base);
+  struct stat st;
+  int modifies_src = strcmp(op, "copy") != 0;      /* deplacer ou supprimer touchent la source */
+  if (!xp_allowed(src) || (strcmp(op, "delete") && !xp_allowed(dst))) {
+    xp_write("erreur:emplacement non autorise"); logf("xplorer : refuse (%s %s)", op, src); return;
+  }
+  if ((modifies_src && (xp_is_root(src) || xp_protected(src))) || (strcmp(op, "delete") && xp_protected(dst))) {
+    xp_write("erreur:zone systeme protegee"); logf("xplorer : zone systeme refusee (%s %s)", op, src); return;
+  }
+  if (strcmp(op, "copy") && (!strcmp(src, DATA_DIR) || !strcmp(src, "/data/ps5_autoloader"))) {
+    xp_write("erreur:dossier du launcher protege"); return;   /* jamais le launcher lui-meme */
+  }
+  if (lstat(src, &st)) { xp_write("erreur:introuvable"); return; }
+  {                                              /* dossier parent reel de la source (un lien lui-meme reste supprimable) */
+    char par[1024];
+    snprintf(par, sizeof par, "%s", src);
+    char *sl = strrchr(par, '/');
+    if (sl && sl != par) *sl = 0;
+    if (!xp_real_ok(par) || (!S_ISLNK(st.st_mode) && !xp_real_ok(src))) {
+      xp_write("erreur:emplacement non autorise"); logf("xplorer : chemin reel refuse (%s %s)", op, src); return;
+    }
+  }
+  logf("xplorer : %s %s -> %s", op, src, strcmp(op, "delete") ? dst : "-");
+  if (!strcmp(op, "delete")) {
+    snprintf(XP.file, sizeof XP.file, "%s", base);
+    xp_write("encours");
+    xp_write(xp_delete(src) ? "erreur:suppression incomplete" : "fini");
+    return;
+  }
+  size_t sl = strlen(src);
+  if (!strncmp(dst, src, sl) && (dst[sl] == '/' || !dst[sl])) { xp_write("erreur:destination dans la source"); return; }
+  if (!lstat(dst, &st)) { xp_write("erreur:existe deja a destination"); return; }
+  {                                              /* dossier de destination cree au besoin */
+    char m[1024];
+    snprintf(m, sizeof m, "%s", dst_dir);
+    for (char *q = m + 1; *q; q++) if (*q == '/') { *q = 0; mkdir(m, 0777); *q = '/'; }
+    mkdir(m, 0777);
+  }
+  if (!xp_real_ok(dst_dir)) { xp_write("erreur:emplacement non autorise"); logf("xplorer : destination reelle refusee (%s)", dst_dir); return; }
+  if (!strcmp(op, "move") && !rename(src, dst)) { xp_write("fini"); return; }   /* meme disque : instantane */
+  int files = 0;
+  XP.total = xp_size(src, &files);
+  struct statvfs v;
+  if (!statvfs(dst_dir, &v) && (long long)v.f_bavail * (long long)v.f_frsize < XP.total) {
+    xp_write("erreur:pas assez de place"); return;
+  }
+  xp_write("encours");
+  int rc = xp_copy(src, dst);
+  if (rc == -2) { xp_delete(dst); xp_write("annule"); logf("xplorer : annule"); return; }
+  if (rc) { xp_delete(dst); xp_write("erreur:copie impossible (disque plein ou retire ?)"); logf("xplorer : echec de copie"); return; }
+  if (!strcmp(op, "move")) {
+    /* deplacement entre deux disques : l'original n'est supprime qu'apres verification de
+       la copie (meme taille totale, meme nombre de fichiers), puis on verifie qu'il a disparu */
+    int sf = 0, df = 0;
+    long long ss = xp_size(src, &sf), ds = xp_size(dst, &df);
+    if (ss != ds || sf != df) {
+      xp_delete(dst);
+      xp_write("erreur:copie incomplete, original garde");
+      logf("xplorer : verification echouee (%lld/%lld octets, %d/%d fichiers), original garde", ds, ss, df, sf);
+      return;
+    }
+    snprintf(XP.file, sizeof XP.file, "%s", base);
+    xp_write("suppression");
+    xp_delete(src);
+    if (!lstat(src, &st)) { usleep(500 * 1000); xp_delete(src); }   /* un second essai */
+    if (!lstat(src, &st)) {
+      int rf = 0;
+      long long rs = xp_size(src, &rf);
+      xp_write("erreur:copie faite, original pas entierement supprime");
+      logf("xplorer : original pas entierement supprime (%d fichiers, %lld octets restent)", rf, rs);
+      return;
+    }
+  }
+  xp_write("fini");
+  logf("xplorer : termine (%lld octets, %ld s)", XP.done, (long)(time(NULL) - XP.t0));
+}
+
+static void *xp_thread(void *u) {
+  (void)u;
+  for (;;) {
+    usleep(250 * 1000);
+    FILE *f = fopen(XJOB, "r");
+    if (!f) continue;
+    char op[32] = "", src[1024] = "", dst[1024] = "";
+    if (fgets(op, sizeof op, f) && fgets(src, sizeof src, f)) { if (!fgets(dst, sizeof dst, f)) dst[0] = 0; }
+    fclose(f);
+    remove(XJOB);
+    op[strcspn(op, "\r\n")] = 0; src[strcspn(src, "\r\n")] = 0; dst[strcspn(dst, "\r\n")] = 0;
+    xp_run(op, src, dst);
+  }
+  return NULL;
+}
+
+
+
+/* arrete l'interface : l'application GPU est fermee par le systeme, l'interface logicielle tuee */
+static void stop_ui(pid_t ui) {
+#ifdef L5_HAVE_GPU
+  int app = sceSystemServiceGetAppIdOfRunningBigApp();
+  char tid[32] = { 0 };
+  if (app > 0 && !sceSystemServiceGetAppTitleId(app, tid) && !strcmp(tid, GPU_ID) && gpu_pid() == ui) {
+    sceSystemServiceKillApp(app, -1, 0, 0);
+    for (int i = 0; i < 30 && alive(ui); i++) usleep(100 * 1000);
+    if (!alive(ui)) return;
+  }
+#endif
+  kill(ui, SIGKILL);
 }
 
 /* Un seul bootstrap a la fois : l'ancien s'arrete si on renvoie le launcher */
@@ -912,6 +1557,11 @@ int main(int argc, char **argv) {
   single_instance();
   if (install_relay_app()) { notify("Launcher5 : impossible d'installer l'application relais"); return EXIT_FAILURE; }
   install_wallpapers();
+  { pthread_t t; if (!pthread_create(&t, NULL, xp_thread, NULL)) pthread_detach(t); }   /* Xplorer */
+#ifdef L5_HAVE_GPU
+  if (!after_update) install_gpu_app();          /* tuile de l'ancienne version peut-etre encore ouverte */
+  { pthread_t t; if (!pthread_create(&t, NULL, dir_server, NULL)) pthread_detach(t); }   /* dossiers pour l'interface GPU */
+#endif
   if (write_file(UI_PATH, ui_elf, ui_elf_end - ui_elf, 0755)) {
     notify("Launcher5 : impossible d'écrire l'interface dans /data");
     return EXIT_FAILURE;
@@ -955,7 +1605,7 @@ int main(int argc, char **argv) {
           /* mise a jour : la nouvelle version est lancee ici ; au demarrage elle arrete
              ce bootstrap. Si elle ne prend pas la main, le chargeur ELF (port 9021) essaie. */
           for (int i = 0; i < 30 && alive(ui); i++) usleep(100 * 1000);
-          if (alive(ui)) kill(ui, SIGKILL);
+          if (alive(ui)) stop_ui(ui);
           if (spawn_payload(value)) logf("mise a jour : lancement direct impossible");
           else sleep(8);                              /* la nouvelle version nous arrete avant la fin */
           logf("mise a jour : pas de relais, essai par le chargeur ELF");
@@ -965,10 +1615,59 @@ int main(int argc, char **argv) {
           ui = start_ui();
           continue;
         }
+        if (!strcmp(type, "uninstall")) {
+          /* Parametres › Desinstaller : la tuile est fermee puis desinstallee (une appli de
+             /system_ex ne peut pas etre supprimee depuis l'accueil de la PS5) */
+          int app = sceSystemServiceGetAppIdOfRunningBigApp();
+          char tid[32] = { 0 };
+          if (app > 0) sceSystemServiceGetAppTitleId(app, tid);
+          if (app > 0 && !strcmp(tid, RELAY_ID)) sceSystemServiceKillApp(app, -1, 0, 0);
+          for (int i = 0; i < 30 && alive(ui); i++) usleep(100 * 1000);
+          if (alive(ui)) stop_ui(ui);
+          /* la tuile doit etre completement fermee : sinon le systeme refuse (0x80f50005) */
+          for (int i = 0; i < 50; i++) {
+            int a2 = sceSystemServiceGetAppIdOfRunningBigApp();
+            char t2[32] = { 0 };
+            if (a2 > 0) sceSystemServiceGetAppTitleId(a2, t2);
+            if (a2 <= 0 || strcmp(t2, RELAY_ID)) break;
+            usleep(100 * 1000);
+          }
+          usleep(1500 * 1000);
+          sceAppInstUtilInitialize();
+          logf("desinstallation : demande au systeme (%d)", sceAppInstUtilAppUnInstall(RELAY_ID));
+          sleep(2);
+          xp_delete("/user/app/" RELAY_ID);
+          xp_delete("/user/appmeta/" RELAY_ID);
+#ifdef L5_HAVE_GPU
+          remount_system_ex_rw();
+          xp_delete(GPU_DIR);
+#endif
+          /* le systeme repond OK sans retirer une appli installee par dossier : on efface
+             nous-memes son inscription, la tuile disparait au prochain redemarrage */
+          logf("desinstallation : inscription retiree des bases (%d lignes)", forget_app(RELAY_ID));
+          if (!strcmp(value, "tout")) {
+            logf("desinstallation : dossier " DATA_DIR " efface");
+            xp_delete(DATA_DIR);
+          }
+          notify("Launcher5 désinstallé : redémarre la console pour retirer la tuile");
+          goto fin;
+        }
+        if (!strcmp(type, "stop")) {
+          /* menu rapide « Fermer le launcher » : l'interface et ce bootstrap s'arretent ; la
+             tuile rouvre plus rien tant que launcher5.elf n'est pas renvoye (ou l'allumage) */
+          int app = sceSystemServiceGetAppIdOfRunningBigApp();
+          char tid[32] = { 0 };
+          if (app > 0) sceSystemServiceGetAppTitleId(app, tid);
+          if (app > 0 && !strcmp(tid, RELAY_ID)) sceSystemServiceKillApp(app, -1, 0, 0);
+          for (int i = 0; i < 30 && alive(ui); i++) usleep(100 * 1000);
+          if (alive(ui)) stop_ui(ui);
+          logf("launcher ferme depuis le menu rapide");
+          goto fin;
+        }
         if (!strcmp(type, "restart")) {
           /* menu rapide : l'interface se ferme, on la relance aussitot */
           for (int i = 0; i < 30 && alive(ui); i++) usleep(100 * 1000);
-          if (alive(ui)) kill(ui, SIGKILL);
+          if (alive(ui)) stop_ui(ui);
           logf("interface relancee");
           ui = start_ui();
           continue;
@@ -986,6 +1685,21 @@ int main(int argc, char **argv) {
       }
       usleep(100 * 1000);
     }
+#ifdef L5_HAVE_GPU
+    {
+      struct stat gk;
+      if (gpu_pending && !launched && stat(GPU_OK, &gk) && time(NULL) - gpu_started < 60) {
+        /* l'interface GPU s'est arretee avant sa premiere image : dessin classique tout de suite */
+        FILE *f = fopen(GPU_FAILED, "w");
+        if (f) { fprintf(f, "%s\n", L5_VERSION); fclose(f); }
+        gpu_pending = 0;
+        logf("interface GPU arretee sans image : relance immediate en dessin classique");
+        notify("Launcher5 : affichage GPU indisponible, mode classique");
+        ui = start_ui();
+        continue;
+      }
+    }
+#endif
     ui = -1;
 
     /* 2) un jeu a ete lance : retour automatique quand il est ferme */
@@ -1021,15 +1735,28 @@ int main(int argc, char **argv) {
         char tid[32] = { 0 };
         sceSystemServiceGetAppTitleId(app, tid);
         if (!strcmp(tid, RELAY_ID)) {
-          logf("tuile Launcher5 ouverte : affichage du launcher");
-          sceSystemServiceKillApp(app, -1, 0, 0);
-          usleep(400 * 1000);
-          ui = start_ui();
+#ifdef L5_HAVE_GPU
+          pid_t p = gpu_wanted() ? gpu_pid() : -1;
+          if (p > 0) {                           /* la tuile ouvre l'interface GPU elle-meme */
+            gpu_log_from = log_size() > 65536 ? log_size() - 65536 : 0;   /* la fin du journal suffit */
+            logf("tuile Launcher5 ouverte : interface GPU (pid %d, droits %d)", p, raise_app(p));
+            gpu_pending = 1;
+            gpu_started = time(NULL);
+            ui = p;
+          } else
+#endif
+          {
+            logf("tuile Launcher5 ouverte : affichage du launcher");
+            sceSystemServiceKillApp(app, -1, 0, 0);
+            usleep(400 * 1000);
+            ui = start_ui();
+          }
         }
       }
       usleep(300 * 1000);
     }
   }
+fin:
   logf("fin du bootstrap");
   remove(PID_PATH);
   sceUserServiceTerminate();

@@ -1,0 +1,66 @@
+diff --git a/integration/SDL2/CMakeLists.txt b/integration/SDL2/CMakeLists.txt
+index d12228b..b2dfb4c 100644
+--- a/integration/SDL2/CMakeLists.txt
++++ b/integration/SDL2/CMakeLists.txt
+@@ -18,7 +18,7 @@ set(SDL_HIDAPI_JOYSTICK OFF CACHE BOOL "" FORCE)
+ set(SDL_PTHREADS ON CACHE BOOL "" FORCE)
+ set(SDL_SOURCE_VERSION "2.30.12-g8c56053f13ca-g26")
+ set(SDL2_DISABLE_SDL2MAIN ON CACHE BOOL "" FORCE)
+-foreach(feature AUDIO RENDER HAPTIC SENSOR OPENGL OPENGLES VULKAN X11
++foreach(feature HAPTIC SENSOR OPENGL OPENGLES VULKAN X11
+                 WAYLAND KMSDRM OFFSCREEN JACK PULSEAUDIO DBUS IBUS FCITX LIBUDEV)
+     set(SDL_${feature} OFF CACHE BOOL "" FORCE)
+ endforeach()
+@@ -43,7 +43,7 @@ list(FILTER sources EXCLUDE REGEX "/video/ps5/")
+ set_property(TARGET SDL2-static PROPERTY SOURCES "${sources}")
+ target_sources(SDL2-static PRIVATE SDL_ps5g19.c)
+ target_include_directories(SDL2-static PRIVATE "${SDL_SOURCE}/src" "${PS5_OPENGL_PREFIX}/include")
+-target_compile_definitions(SDL2-static PRIVATE SDL_VIDEO_DRIVER_PS5=1 SDL_VIDEO_OPENGL=1)
++target_compile_definitions(SDL2-static PRIVATE SDL_VIDEO_DRIVER_PS5=1 SDL_VIDEO_OPENGL=1 SDL_VIDEO_RENDER_OGL=1 L5_NATIVE_4K=1)
+ add_library(g19-example OBJECT example.c)
+ if(G42_INPUT_VALIDATION AND NOT G19_HOST_TEST)
+     # Keep the original object/receipt path; the receipt records this selector.
+diff --git a/integration/SDL2/SDL_ps5g19.c b/integration/SDL2/SDL_ps5g19.c
+index 210bd7b..95e5742 100644
+--- a/integration/SDL2/SDL_ps5g19.c
++++ b/integration/SDL2/SDL_ps5g19.c
+@@ -9,6 +9,9 @@
+ #include <EGL/egl.h>
+ #include <EGL/eglext.h>
+ #include "ps5g19_display.h"
++#if __has_include(<ps5_opengl_display_modes.h>)
++#include <ps5_opengl_display_modes.h>
++#endif
+ 
+ /* ponytail: one fixed-profile window/context on the video thread; extend only with a
+  * separately validated EGL ownership contract. No private presentation API. */
+@@ -42,6 +45,11 @@ static int video_init(_THIS)
+     g->thread = SDL_ThreadID();
+     g->display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+     if (g->display == EGL_NO_DISPLAY) return egl_error("eglGetDisplay");
++#ifdef PS5_OPENGL_DYNAMIC_DISPLAY
++    /* mode d affichage choisi avant l initialisation (1080p par defaut sinon) */
++    eglSetDisplayModePS5(g->display, PS5_OPENGL_NATIVE_WIDTH, PS5_OPENGL_NATIVE_HEIGHT);
++    eglSetDisplayRefreshPS5(g->display, PS5_OPENGL_NATIVE_FPS);
++#endif
+     if (!eglInitialize(g->display, NULL, NULL)) {
+         g->display = EGL_NO_DISPLAY;
+         return egl_error("eglInitialize");
+diff --git a/integration/SDL2/ps5g19_display.h b/integration/SDL2/ps5g19_display.h
+index 7c4e644..004c182 100644
+--- a/integration/SDL2/ps5g19_display.h
++++ b/integration/SDL2/ps5g19_display.h
+@@ -2,7 +2,12 @@
+ #pragma once
+ 
+ /* Fixed render/presentation profile, not negotiated HDMI timing. */
+-#if __has_include(<ps5_opengl_display.h>)
++#if defined(L5_NATIVE_4K)
++/* Launcher5 : sortie 4K, demandee a l ecran par eglSetDisplayModePS5 */
++#define PS5_OPENGL_NATIVE_WIDTH 3840
++#define PS5_OPENGL_NATIVE_HEIGHT 2160
++#define PS5_OPENGL_NATIVE_FPS 60
++#elif __has_include(<ps5_opengl_display.h>)
+ #include <ps5_opengl_display.h>
+ #else
+ /* SDKs predating the profile header retain the explicit legacy 1080p60 mode. */
