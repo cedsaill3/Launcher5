@@ -112,7 +112,6 @@ Le launcher recharge tout seul un menu, un thème ou une jaquette modifiés.
 ## Compiler
 - PS5 : SDK [ps5-payload-dev](https://github.com/ps5-payload-dev/sdk), dans Ubuntu (WSL) :
   `cd launcher && make` → `launcher/build/launcher5.elf`
-- Version PC de test : `make -f Makefile.pc && ./launcher5` (SDL2, SDL2_ttf, SDL2_image, SDL2_mixer, jansson)
 
 ## Licence
 Launcher5 © 2026 cedsaill. Les chargeurs ELF (`launcher/gpl/`) et la méthode
