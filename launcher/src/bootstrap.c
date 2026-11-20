@@ -1370,6 +1370,9 @@ static int xp_delete(const char *p) {
   struct stat st;
   if (lstat(p, &st)) return 0;
   if (!S_ISDIR(st.st_mode)) return unlink(p);
+  /* dossier aux droits fermes (cree par une appli sans droits complets) : on l'ouvre d'abord,
+     sinon son contenu ne peut pas etre efface */
+  if ((st.st_mode & 0700) != 0700 || access(p, W_OK | X_OK)) chmod(p, 0777);
   DIR *d = opendir(p);
   struct dirent *e;
   int rc = 0;
