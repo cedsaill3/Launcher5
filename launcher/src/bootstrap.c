@@ -1562,7 +1562,20 @@ int main(int argc, char **argv) {
   install_wallpapers();
   { pthread_t t; if (!pthread_create(&t, NULL, xp_thread, NULL)) pthread_detach(t); }   /* Xplorer */
 #ifdef L5_HAVE_GPU
-  if (!after_update) install_gpu_app();          /* tuile de l'ancienne version peut-etre encore ouverte */
+  if (after_update) {
+    /* juste apres une mise a jour, la tuile de l'ancienne version peut etre encore ouverte : on
+       la ferme avant d'installer la nouvelle appli (sinon pas d'interface GPU jusqu'au prochain
+       lancement, et la tuile ouverte entre-temps finit en erreur) */
+    for (int i = 0; i < 50; i++) {
+      int app = sceSystemServiceGetAppIdOfRunningBigApp();
+      char tid[32] = { 0 };
+      if (app > 0) sceSystemServiceGetAppTitleId(app, tid);
+      if (app <= 0 || strcmp(tid, GPU_ID)) break;
+      if (i == 0) { logf("mise a jour : ancienne tuile fermee"); sceSystemServiceKillApp(app, -1, 0, 0); }
+      usleep(100 * 1000);
+    }
+  }
+  install_gpu_app();
   { pthread_t t; if (!pthread_create(&t, NULL, dir_server, NULL)) pthread_detach(t); }   /* dossiers pour l'interface GPU */
 #endif
   if (write_file(UI_PATH, ui_elf, ui_elf_end - ui_elf, 0755)) {
