@@ -171,7 +171,7 @@ enum {
   ACT_VIEW, ACT_FAV, ACT_UNFAV, ACT_INFO, ACT_SEARCH, ACT_CATALOG, ACT_BOOT,
   ACT_START_MANUAL, ACT_START_PLUGIN, ACT_START_AUTOLOAD, ACT_FIRST_YES, ACT_FIRST_NO, ACT_RELINK_YES, ACT_RELINK_NO, ACT_UNINST_KEEP, ACT_UNINST_ALL, ACT_K_BOOT, ACT_K_SEND, ACT_HELP_PAY,
   /* menu rapide (touche OPTIONS) */
-  ACT_Q_RESTART, ACT_Q_CACHE, ACT_Q_QUIT, ACT_Q_STOP, ACT_Q_RESUME, ACT_Q_CATALOG,
+  ACT_Q_RESTART, ACT_Q_CACHE, ACT_Q_QUIT, ACT_Q_STOP, ACT_STOP_YES, ACT_STOP_NO, ACT_Q_RESUME, ACT_Q_CATALOG,
 };
 
 typedef struct { int is_folder; int index; App *app; Node *node; } Entry;
@@ -4975,7 +4975,7 @@ static void open_quick(void) {
   add_choice("Relancer le launcher", ACT_Q_RESTART);
   add_choice("Vider le cache des jaquettes", ACT_Q_CACHE);
   add_choice("Quitter vers l'accueil PS5", ACT_Q_QUIT);
-  add_choice("Fermer le launcher", ACT_Q_STOP);
+  add_choice("Arrêter le launcher (renvoyer le .elf pour le rouvrir)", ACT_Q_STOP);
   S.mode = MODE_CONTEXT;
   sfx(SFX_OK);
 }
@@ -5053,12 +5053,13 @@ static void quick_action(int act) {
   case ACT_Q_CATALOG: open_catalog(); break;
   case ACT_HELP_PAY: open_help(1); break;
   case ACT_Q_QUIT: { App *a = menu_find_app(&S.menu, "sys:home"); if (a) launch(a); break; }   /* comme dans les Parametres */
-  case ACT_Q_STOP:                               /* arret complet : interface et tache de fond (la tuile peut etre supprimee) */
-    save();
-    toast("Fermeture du launcher…");
-    draw(); present();
-    plat_log("menu rapide : fermeture complete du launcher");
-    if (plat_stop_launcher()) S.running = 0;
+  case ACT_Q_STOP:                               /* arret complet : on confirme d'abord (la tuile ne le rouvrira plus) */
+    S.nchoices = 0; S.csel = 0; S.quick = 0;
+    snprintf(S.ctx_title, sizeof S.ctx_title, "%s", tr("Arrêter complètement ? Pour le rouvrir, il faudra renvoyer launcher5.elf"));
+    add_choice("Non, garder le launcher", ACT_STOP_NO);
+    add_choice("Oui, arrêter", ACT_STOP_YES);
+    S.mode = MODE_CONTEXT;
+    sfx(SFX_OK);
     break;
   }
 }
@@ -5132,6 +5133,14 @@ static void do_action(int act) {
   case ACT_FIRST_YES: start_mode_set(2 /* autoloader */); break;
   case ACT_RELINK_YES: start_mode_set(2 /* autoloader */); break;
   case ACT_UNINST_KEEP: case ACT_UNINST_ALL: uninstall(act == ACT_UNINST_ALL); break;
+  case ACT_STOP_NO: break;
+  case ACT_STOP_YES:                             /* arret complet : interface et tache de fond (la tuile peut etre supprimee) */
+    save();
+    toast("Arrêt du launcher…");
+    draw(); present();
+    plat_log("menu rapide : arret complet du launcher");
+    if (plat_stop_launcher()) S.running = 0;
+    break;
   case ACT_RELINK_NO: autoload_mark(0); toast("Tu pourras le remettre dans Paramètres › Démarrage de Launcher5"); break;
   case ACT_HELP_PAY: open_help(1); break;
   case ACT_K_BOOT: if (kernel_pending && boot_index(kernel_pending) < 0) boot_toggle(kernel_pending); break;

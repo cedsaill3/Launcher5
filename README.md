@@ -2,7 +2,7 @@
 
 # Launcher5 — game loader pour PS5
 
-**par cedsaill** · v2.5.11 · [English below](#english)
+**par cedsaill** · v2.5.12 · [English below](#english)
 
 **Tu lances Launcher5, tu joues.** Tout est automatique : au premier lancement, il installe
 kstuff et ShadowMount et s'ajoute au démarrage de la console. À chaque allumage, tout est
@@ -44,7 +44,7 @@ prêt et le launcher s'ouvre sur tes jeux.
   particules, style de boîtier, musique d'ambiance (une musique fournie)
 - Sons d'interface (5 styles) et sons de démarrage
 - **Menu rapide** (OPTIONS) : catalogue de payloads, aide, relancer, vider le cache des jaquettes,
-  fermer le launcher
+  arrêter complètement le launcher
 - **Mise à jour automatique** depuis GitHub
 - Dossiers, favoris, noms perso, jeux masqués, temps de jeu, économiseur d'écran, masquer l'IP
 - Français, anglais, espagnol, allemand, italien, portugais selon la langue de la console
@@ -98,7 +98,7 @@ La nouvelle version est enregistrée sur la console :
 | ✕ | jouer / ouvrir |
 | △ | options (dossiers, renommer, masquer, thème…) |
 | □ | déplacer |
-| OPTIONS | menu rapide (catalogue de payloads, aide, relancer, vider le cache des jaquettes, fermer le launcher) |
+| OPTIONS | menu rapide (catalogue de payloads, aide, relancer, vider le cache des jaquettes, arrêter le launcher) |
 | ○ | retour |
 
 ## Personnaliser
